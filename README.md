@@ -1,78 +1,133 @@
 # FRS — Face Recognition Attendance System
 
-This repository contains the Android kiosk client and a modular FastAPI backend for the FRS V4/V5 architecture. The project is intended to be a real evidence-driven biometric system: **no synthetic identity scores, mocked recognizers, generated attendance events, or silent model-download fallbacks are used**.
+> Android kiosk + FastAPI service for face-based attendance, designed around the FRS V4/V5 build plan.
 
-## System layout
+[![Backend checks](https://github.com/nothingonly/Frs/actions/workflows/backend.yml/badge.svg?branch=main)](https://github.com/nothingonly/Frs/actions/workflows/backend.yml)
+[![Flutter quality gate](https://github.com/nothingonly/Frs/actions/workflows/flutter.yml/badge.svg?branch=main)](https://github.com/nothingonly/Frs/actions/workflows/flutter.yml)
 
-- \`lib/\`: Flutter Android kiosk, camera capture, settings, client state and REST contract.
-- \`backend/app/api/\`: device-authenticated attendance and identification APIs, administrator enrollment, protected roster/attendance/audit/model endpoints.
-- \`backend/app/vision/\`: actual SCRFD/ArcFace inference, quality metrics, explicit ONNX adapters for RetinaFace/AdaFace/MobileFaceNet/MiniFASNet/FIQA, and conditional image enhancement.
-- \`backend/app/services/pipeline.py\`: frame-burst evaluation, quality routing, version/preprocessing-scoped exact cosine retrieval, calibrated per-model thresholds, temporal evidence, independent secondary recognition, attendance transition/cooldown policy, multi-view enrollment, encrypted embeddings and audit events.
-- \`backend/app/benchmark.py\`: real-data benchmark and empirical operating-threshold report.
-- \`backend/app/web/\`: browser-based admin console backed exclusively by live API results.
-- \`backend/tests/\` and \`test/\`: Python and Flutter tests.
+## About
 
-## V4/V5 operating path
+FRS combines a Flutter Android kiosk with a Python/FastAPI backend for multi-frame face verification and automatic identification. The system is built to make attendance decisions from captured evidence, a roster-scoped comparison, configured policy gates, and an auditable state transition—not from client-side identity claims.
 
-The primary fast route is:
+**Project status: pre-release / not approved for live attendance.** The application code and automated checks are under active development. Real, appropriately licensed model weights, site-specific threshold calibration, presentation-attack testing, deployment hardening, and an end-to-end device test are still release gates. This repository deliberately does not ship unknown or unlicensed model weights.
 
-\`camera burst → frame gate → SCRFD → deterministic quality → alignment → ArcFace → roster-scoped exact cosine → temporal confirmation → decision\`
+## Highlights
 
-Conditional routes can use exposure-specific enhancement, AdaFace for degraded-but-usable frames, RetinaFace recovery after a missed primary detection, MobileFaceNet for independently calibrated checks, FIQA as an additional quality signal, and MiniFASNet when policy requires liveness. Uncertainty can end in recapture, secondary check, review or unknown—not an assumed identity.
+- **Multi-frame capture:** the Android kiosk captures multiple distinct camera exposures; it does not duplicate one image to imitate temporal evidence.
+- **1:1 verification and 1:N identification:** both use the same frame-burst and decision pipeline.
+- **Fail-closed biometric decisions:** low-quality, ambiguous, unrecognized, liveness-unavailable, or invalid attendance-transition results are not treated as success.
+- **Model and preprocessing accountability:** model artifacts have explicit paths, hashes, provenance contracts, versions, and preprocessing identifiers.
+- **Enrollment and administration:** separately authenticated admin enrollment, roster and attendance views, model registry, and audit evidence.
+- **Protected data:** embeddings are encrypted before database storage; ordinary logs must not contain raw face imagery or embeddings.
+- **Automated quality gates:** Python compilation/lint/tests and Flutter analysis/tests/Android debug build run in GitHub Actions.
 
-## Important: model artifacts are not included
+## Architecture
 
-Model weights are external, versioned assets. Do not treat the repository as operational until the actual compatible model artifacts have been provisioned, their full SHA-256 checksums and provenance recorded, licenses and permitted use verified, model-specific thresholds calibrated on representative local validation data, and hardware/runtime behavior tested. The backend intentionally fails startup when required model files or provenance records are missing. It does not silently download unknown weights.
+```text
+Android camera burst
+        │
+        ▼
+Flutter kiosk ── HTTPS + device credential ──► FastAPI
+                                                  │
+                        frame validation + face-quality gate
+                                                  │
+                          SCRFD detection + alignment
+                                                  │
+                                  ArcFace embedding
+                                                  │
+                     roster-scoped exact cosine retrieval
+                                                  │
+                    temporal evidence + policy / liveness
+                                                  │
+                 ACCEPT / UNKNOWN / RECAPTURE / REVIEW
+                                                  │
+                   attendance transition + audit record
+```
 
-The public InsightFace source package and its pretrained weights have different licensing terms. The commonly distributed pretrained weights are restricted to non-commercial research unless separately licensed. For an attendance deployment, procure model rights suitable for the actual use and record those rights for each exact artifact.
+The primary path is SCRFD → alignment → ArcFace. Optional specialist paths include RetinaFace recovery, AdaFace, MobileFaceNet, FIQA, conditional enhancement, and MiniFASNet liveness. They must be explicitly provisioned and calibrated for the deployment; having a configuration option does not mean a model is bundled, licensed, or validated.
 
-See [backend/model-artifacts/README.md](backend/model-artifacts/README.md) and [backend/README.md](backend/README.md).
+## Repository map
 
-## Backend quick start
+| Path | Purpose |
+| --- | --- |
+| `lib/` | Flutter Android kiosk, camera burst capture, state and API client |
+| `test/` | Flutter client-contract and state tests |
+| `backend/app/api/` | FastAPI attendance, enrollment and admin routes |
+| `backend/app/vision/` | Model loading, ONNX adapters and image-quality measurements |
+| `backend/app/services/pipeline.py` | Recognition, temporal decision, enrollment and attendance policy |
+| `backend/app/db/` | SQLAlchemy entities and database schema support |
+| `backend/app/web/` | Browser admin console |
+| `backend/app/benchmark.py` | Real-data benchmark and threshold evaluation |
+| `backend/tests/` | Backend unit tests |
+| `.github/workflows/` | CI quality gates |
+| `backend/model-artifacts/` | Artifact provenance and model-contract documentation |
 
-Requirements: Docker Engine with Compose plugin, plus the separately licensed model artifacts described in the backend model documentation.
+## Getting started
 
-1. Enter \`backend/\`.
-2. Generate private service secrets: \`python3 scripts/generate_secrets.py\`.
-3. Configure \`.env\` with real model paths, compatible artifact sidecars, secret values and deployment settings. The generator does not invent model weights, license provenance, or calibrated thresholds.
-4. Provision the exact SCRFD/ArcFace model pack and specialist ONNX artifacts, with per-artifact checksums and contracts.
-5. Build and start: \`docker compose up --build -d\`.
-6. Inspect startup: \`docker compose logs -f api\`.
-7. Read health and model readiness at \`http://127.0.0.1:8000/health\`; ready status is separate from process liveness.
-8. Open the admin console at \`http://127.0.0.1:8000/admin\`. Use HTTPS in any non-loopback or production deployment; webcam use in a browser requires a secure context.
+### Prerequisites
 
-Do not set \`FRS_ENV=production\` until model licenses, all required specialist assets, thresholds and liveness have been validated. Production startup intentionally refuses uncalibrated configurations.
+- Docker Engine with the Docker Compose plugin for the containerized backend.
+- Flutter and the Android SDK for local kiosk development; the CI workflow is the canonical source for a tested toolchain.
+- Separately sourced and properly licensed model artifacts compatible with the documented inference contracts.
+- A secure deployment configuration and a validation data set representative of the intended users, cameras, lighting and unknown-person population.
 
-## Flutter kiosk
+### Backend configuration
 
-Use the Flutter version selected by the repository's CI workflow. From the project root:
+1. From the repository root, enter `backend/`.
+2. Run `python3 scripts/generate_secrets.py`. This creates a private `.env` file and refuses to overwrite an existing one by default.
+3. Configure the remaining environment values and provision the model artifacts described in [backend/model-artifacts/README.md](backend/model-artifacts/README.md).
+4. Review the model license, source, checksum, preprocessing contract and permitted-use statement for every artifact.
+5. Start with `docker compose up --build -d` and inspect `docker compose logs -f api`.
+6. Verify `/health`, `/health/live`, and `/health/ready`. A process responding to health requests is not evidence of biometric readiness.
 
-\`\`\`bash
+See [backend/README.md](backend/README.md) for configuration, API, testing and operations.
+
+### Flutter kiosk
+
+From the repository root:
+
+```bash
 flutter pub get
-flutter analyze
-flutter test
+flutter analyze --fatal-infos
+flutter test --reporter expanded
 flutter build apk --debug
-\`\`\`
+```
 
-On the Android kiosk, set the backend URL and provision the kiosk **device** bearer credential in Settings. The credential is written through the Android encrypted secure-storage plugin. Administrator enrollment uses a separate admin bearer key, which the server validates; there is no hard-coded local admin PIN.
+Configure the backend URL and a **device** bearer credential in the kiosk settings. Administrator enrollment requires a separate server-validated admin credential. Use HTTPS on any non-loopback network; HTTP is intended only for explicitly enabled local development.
 
-The Android app captures three real camera exposures in a burst and submits them as repeated \`images\` parts. One photograph is not duplicated to impersonate temporal evidence. HTTP is allowed only for loopback development builds/configuration; use HTTPS for remote networks and production.
+## API overview
 
-## API surface
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/health/live` | Process liveness |
+| `GET` | `/health` | Operational health snapshot |
+| `GET` | `/health/ready` | Readiness gate |
+| `POST` | `/api/v1/attendance/identify` | Automatic 1:N identification |
+| `POST` | `/api/v1/attendance/verify` | Employee-scoped 1:1 verification |
+| `POST` | `/api/v1/biometrics/enroll/admin` | Admin-authenticated multi-frame enrollment |
+| `GET` | `/api/v1/admin/people` | Protected roster query |
+| `GET` | `/api/v1/admin/attendance` | Protected attendance query |
+| `GET` | `/api/v1/admin/audit/{audit_id}` | Protected audit evidence |
+| `GET` | `/api/v1/admin/models` | Runtime model/registry status |
 
-- \`GET /health/live\` — process liveness.
-- \`GET /health\` — operational database/model/status snapshot and readiness flag.
-- \`GET /health/ready\` — returns a ready response only when required policy/model/configuration gates pass.
-- \`POST /api/v1/attendance/identify\` — automatic 1:N identification from a real frame burst.
-- \`POST /api/v1/attendance/verify\` — roster-scoped 1:1 identity verification from a real frame burst.
-- \`POST /api/v1/biometrics/enroll/admin\` — separately admin-authenticated multi-view enrollment.
-- \`GET /api/v1/admin/people\`, \`GET /api/v1/admin/attendance\`, \`GET /api/v1/admin/audit/{audit_id}\`, \`GET /api/v1/admin/models\` — protected management and evidence APIs.
-- \`/docs\` — API schema and interactive docs for developers.
-
-All attendance and enrollment data must be collected and retained under an appropriate legal basis, notice/consent process and organizational retention policy. Raw face crops and embeddings must not be written to ordinary logs.
+API documentation is available at `/docs` when the backend is running. The current routes and schema remain the source of truth.
 
 ## Testing and release gates
 
-CI runs Python compilation/lint/unit tests and Flutter analyze/test/debug APK build. A green unit-test workflow validates software contracts; it does **not** prove real biometric accuracy or live-device behavior. Before enabling actual attendance, also run the real-data benchmark with disjoint enrollment, known-probe and unknown-probe splits, evaluate false accepts/false rejects and attack-specific liveness errors, confirm licensing, and test on the target Android camera and backend hardware.
+GitHub Actions checks Python compilation, lint and tests, and runs Flutter analysis, tests and an Android debug build. These automated checks verify software behavior and integration contracts; they do **not** establish recognition accuracy, demographic performance, presentation-attack resistance, real-device reliability, or production readiness.
 
-The final application is gated by evidence, as specified in V4/V5—not by whether an API can return HTTP 200.
+Before a live deployment, complete the [release checklist](RELEASE_CHECKLIST.md): provision lawful model assets; calibrate model-specific thresholds on separated enrollment/known/unknown data; measure false-accept and false-reject rates; test attack-specific liveness performance; validate migrations, backups, retention and access controls; then run an end-to-end test on the target Android device and server.
+
+## Release status
+
+There is **no production release** at this time. The package version in `pubspec.yaml` is development metadata, not a claim of production readiness. See [RELEASE_NOTES.md](RELEASE_NOTES.md) and [CHANGELOG.md](CHANGELOG.md) for scope and known release blockers.
+
+## Security, privacy and licensing
+
+Face data is sensitive. Deploy only with an appropriate legal basis, notice/consent process, access control, retention schedule, deletion workflow and incident plan. Keep `.env`, production keys, raw captures and biometric records out of version control and logs. See [SECURITY.md](SECURITY.md).
+
+No software license has been granted by this repository unless a separate license file is added by the project owner. Model code and model weights can have different licenses; verify rights for the exact artifact and intended employment/attendance use before deployment. Public pretrained face-recognition weights are not automatically cleared for commercial attendance use.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Changes affecting recognition, security, persistence, audit or attendance state transitions must include tests and preserve fail-closed behavior.
