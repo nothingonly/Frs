@@ -91,6 +91,8 @@ class ModelRegistryEntry(Base):
     artifact_sha256: Mapped[str] = mapped_column(String(64))
     artifact_path: Mapped[str] = mapped_column(Text)
     license_name: Mapped[str] = mapped_column(String(200))
+    source_url: Mapped[str] = mapped_column(Text)
+    permitted_use: Mapped[str] = mapped_column(String(240))
     preprocessing_id: Mapped[str] = mapped_column(String(120))
     input_contract_json: Mapped[str] = mapped_column(Text)
     output_contract_json: Mapped[str] = mapped_column(Text)
