@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,9 +33,12 @@ class Settings(BaseSettings):
     require_liveness: bool = True
     minimum_identification_frames: int = Field(default=3, ge=2, le=12)
     maximum_identification_frames: int = Field(default=8, ge=3, le=16)
+    temporal_min_vote_fraction: float = Field(default=0.67, gt=0.5, le=1.0)
     attendance_cooldown_seconds: int = Field(default=60, ge=0, le=86400)
     similarity_threshold: float = Field(default=0.5, ge=-1.0, le=1.0)
+    model_thresholds_json: str = '{"ArcFace": 0.5}'
     threshold_calibrated: bool = False
+    calibrated_models_csv: str = ""
     required_liveness_score: float = Field(default=0.9, ge=0.0, le=1.0)
 
     min_face_size_px: int = Field(default=80, ge=32, le=1000)
@@ -56,18 +60,33 @@ class Settings(BaseSettings):
             raise ValueError(f"Unsupported ONNX Runtime provider: {value}")
         return value
 
+    @field_validator("model_thresholds_json")
+    @classmethod
+    def validate_threshold_map(cls, value: str) -> str:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("FRS_MODEL_THRESHOLDS_JSON must be a JSON object") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("FRS_MODEL_THRESHOLDS_JSON must be a JSON object")
+        for model_name, threshold in parsed.items():
+            if not isinstance(model_name, str) or not isinstance(threshold, (float, int)):
+                raise ValueError("Each model threshold must map a model name to a number")
+            if not -1.0 <= float(threshold) <= 1.0:
+                raise ValueError(f"Invalid similarity threshold for {model_name}")
+        return value
+
     def validate_startup_security(self) -> None:
         if self.minimum_identification_frames > self.maximum_identification_frames:
             raise ValueError("Minimum identification frames cannot exceed maximum frames")
         if self.env.lower() == "production":
-            keys = self.device_keys
-            if not keys or any(len(token) < 32 for token in keys):
+            if not self.device_keys or any(len(token) < 32 for token in self.device_keys):
                 raise ValueError("Production requires device API keys of at least 32 characters")
             if len(self.admin_api_key) < 32:
                 raise ValueError("Production requires a separate admin API key of at least 32 characters")
             self.encryption_key_bytes()
-            if not self.threshold_calibrated:
-                raise ValueError("Production startup refused: FRS_THRESHOLD_CALIBRATED must be true")
+            if not self.threshold_calibrated or "ArcFace" not in self.calibrated_models:
+                raise ValueError("Production startup refused: ArcFace threshold must be calibrated on project data")
             if self.require_liveness and not self.minifasnet_onnx_path:
                 raise ValueError("Production requires FRS_MINIFASNET_ONNX_PATH when liveness is mandatory")
 
@@ -76,8 +95,21 @@ class Settings(BaseSettings):
         return tuple(token.strip() for token in self.device_api_keys.split(",") if token.strip())
 
     @property
+    def calibrated_models(self) -> tuple[str, ...]:
+        return tuple(item.strip() for item in self.calibrated_models_csv.split(",") if item.strip())
+
+    @property
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
+
+    def is_model_calibrated(self, model_id: str) -> bool:
+        return self.threshold_calibrated and model_id == "ArcFace" or model_id in self.calibrated_models
+
+    def threshold_for(self, model_id: str) -> float:
+        parsed = json.loads(self.model_thresholds_json)
+        if model_id not in parsed:
+            raise ValueError(f"No calibrated threshold configured for {model_id}")
+        return float(parsed[model_id])
 
     def encryption_key_bytes(self) -> bytes:
         import base64
