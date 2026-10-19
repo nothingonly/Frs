@@ -53,13 +53,17 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
     for model_id, model in (("SCRFD", vision.detector), ("ArcFace", vision.recognizer)):
         path_value = getattr(model, "model_file", None)
         if not path_value or not Path(str(path_value)).is_file():
-            continue
+            raise ValueError(f"Primary {model_id} artifact path is unavailable; cannot register provenance.")
         path = Path(str(path_value)).resolve()
-        digest = vision._model_version(model)
+        provenance = vision.primary_model_provenance[model_id]
         candidates.append((
-            model_id, digest, str(path), "InsightFace model-zoo weights: non-commercial research unless separately licensed",
+            model_id, vision._model_version(model), str(path),
+            provenance["license_name"],
+            str(provenance["source_url"]),
+            str(provenance["permitted_use"]),
             "five-point-norm-crop-112-v1" if model_id == "ArcFace" else f"scrfd-det-size-{vision.settings.detect_size}",
-            {"path": str(path), "provider": vision.settings.model_provider},
+            {"path": str(path), "provider": vision.settings.model_provider,
+             "verified_sha256": provenance["sha256"]},
             {"task": "face_embedding" if model_id == "ArcFace" else "face_detection"},
         ))
     if vision.recovery_detector is not None:
@@ -67,6 +71,8 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
         candidates.append((
             "RetinaFace", vision.recovery_detector_version, str(path),
             str(vision.recovery_contract["license_name"]),
+            str(vision.recovery_contract["source_url"]),
+            str(vision.recovery_contract.get("permitted_use", "must be verified by operator")),
             str(vision.recovery_contract["preprocessing_id"]),
             {"path": str(path), "provider": vision.settings.model_provider},
             {"task": "face_detection"},
@@ -76,8 +82,9 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
             contract = model.contract
             candidates.append((
                 model_id, model.model_version, str(model.path),
-                str(contract.get("license_name", "License metadata in model sidecar")),
-                f"{model_id}:{model.model_version}:configured-input-contract",
+                model.license_name, model.source_url,
+                str(contract.get("permitted_use", "must be verified by operator")),
+                model.preprocessing_id,
                 {"layout": model.layout, "width": model.width, "height": model.height,
                  "color_order": model.color_order, "mean": model.mean, "std": model.std},
                 {"task": "face_embedding", "output_type": contract.get("output_type")},
@@ -86,8 +93,10 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
         model = vision.liveness
         candidates.append((
             "MiniFASNet", model.model_version, str(model.path),
-            str(model.contract.get("license_name", "License metadata in model sidecar")),
-            "MiniFASNet:configured-input-contract",
+            model.license_name,
+            model.source_url,
+            str(model.contract.get("permitted_use", "must be verified by operator")),
+            model.preprocessing_id,
             {"layout": model.layout, "width": model.width, "height": model.height,
              "color_order": model.color_order, "mean": model.mean, "std": model.std},
             {"task": "presentation_attack_detection", "output_type": model.contract.get("output_type"),
@@ -97,12 +106,14 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
         model = vision.fiqa
         candidates.append((
             "FIQA", model.model_version, str(model.path), model.license_name,
+            model.source_url,
+            str(model.contract.get("permitted_use", "must be verified by operator")),
             model.preprocessing_id,
             {"layout": model.layout, "width": model.width, "height": model.height,
              "color_order": model.color_order, "mean": model.mean, "std": model.std},
             {"task": "face_quality_estimation", "output_type": model.contract.get("output_type")},
         ))
-    for model_id, version, path, license_name, preprocessing_id, input_contract, output_contract in candidates:
+    for model_id, version, path, license_name, source_url, permitted_use, preprocessing_id, input_contract, output_contract in candidates:
         row = db.query(ModelRegistryEntry).filter_by(model_id=model_id, model_version=version).one_or_none()
         if row is None:
             full_digest = sha256_file(Path(path)) if Path(path).is_file() else ""
@@ -110,7 +121,8 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
                 raise ValueError(f"Cannot register model {model_id}:{version} without a verified SHA-256")
             row = ModelRegistryEntry(
                 model_id=model_id, model_version=version, artifact_sha256=full_digest, artifact_path=path,
-                license_name=license_name, preprocessing_id=preprocessing_id,
+                license_name=license_name, source_url=source_url, permitted_use=permitted_use,
+                preprocessing_id=preprocessing_id,
                 input_contract_json=json.dumps(input_contract),
                 output_contract_json=json.dumps(output_contract),
                 benchmark_json="{}", active=True,
@@ -124,6 +136,8 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
             row.artifact_sha256 = full_digest
             row.artifact_path = path
             row.license_name = license_name
+            row.source_url = source_url
+            row.permitted_use = permitted_use
             row.preprocessing_id = preprocessing_id
             row.input_contract_json = json.dumps(input_contract)
             row.output_contract_json = json.dumps(output_contract)
