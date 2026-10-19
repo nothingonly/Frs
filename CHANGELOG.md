@@ -30,3 +30,20 @@ All notable project changes will be recorded here. This file follows an Unreleas
 - Real camera/device and end-to-end acceptance testing remains required.
 - Verify existing database upgrades and backup/restore procedures before any persistent deployment.
 - No signed production APK, production tag or production approval is claimed by this changelog.
+
+## [0.1.0-alpha.1] - 2026-10-19
+
+### Added
+- Published [FRS v0.1.0 Alpha 1](https://github.com/nothingonly/Frs/releases/tag/v0.1.0-alpha.1) with an Android debug APK for technical evaluation.
+- Automated prerelease workflow that runs backend and Flutter quality gates before attaching the APK.
+
+### Validated in CI
+- Backend Python compilation and Ruff lint checks passed.
+- Backend unit tests passed.
+- Flutter dependency resolution, static analysis and Flutter tests passed.
+- Android debug APK build and artifact upload passed.
+
+### Limitations
+- This is a debug prerelease, not a production-signed build.
+- Real model weights are not bundled; biometric calibration and liveness/presentation-attack validation are not certified.
+- Do not use this prerelease for live employment, payroll, access-control or attendance decisions.
