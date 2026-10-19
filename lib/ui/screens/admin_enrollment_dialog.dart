@@ -11,11 +11,13 @@ import '../widgets/camera_viewport.dart';
 class AdminEnrollmentDialog extends StatefulWidget {
   final AppConfig config;
   final FrsApiService apiService;
+  final String adminApiKey;
 
   const AdminEnrollmentDialog({
     super.key,
     required this.config,
     required this.apiService,
+    required this.adminApiKey,
   });
 
   @override
@@ -28,7 +30,7 @@ class _AdminEnrollmentDialogState extends State<AdminEnrollmentDialog> {
   final _nameController = TextEditingController();
   final _departmentController = TextEditingController();
 
-  Uint8List? _capturedImage;
+  List<Uint8List> _capturedImages = <Uint8List>[];
   bool _isSubmitting = false;
   String? _successMessage;
   String? _errorMessage;
@@ -44,9 +46,9 @@ class _AdminEnrollmentDialogState extends State<AdminEnrollmentDialog> {
 
   Future<void> _submitEnrollment() async {
     if (!_formKey.currentState!.validate()) return;
-    if (_capturedImage == null || _capturedImage!.isEmpty) {
+    if (_capturedImages.length < 3 || _capturedImages.any((frame) => frame.isEmpty)) {
       setState(() {
-        _errorMessage = 'Please capture a facial photo before enrolling.';
+        _errorMessage = 'Capture at least three separate facial frames before enrolling.';
       });
       return;
     }
@@ -62,7 +64,8 @@ class _AdminEnrollmentDialogState extends State<AdminEnrollmentDialog> {
         employeeId: _employeeIdController.text.trim(),
         fullName: _nameController.text.trim(),
         department: _departmentController.text.trim().isEmpty ? null : _departmentController.text.trim(),
-        imageBytes: _capturedImage!,
+        imageFrames: _capturedImages,
+        adminApiKey: widget.adminApiKey,
       );
 
       setState(() {
@@ -120,9 +123,9 @@ class _AdminEnrollmentDialogState extends State<AdminEnrollmentDialog> {
                   SizedBox(
                     height: 260,
                     child: CameraViewport(
-                      capturedImage: _capturedImage,
-                      onImageCaptured: (bytes) => setState(() => _capturedImage = bytes),
-                      onRetakePressed: () => setState(() => _capturedImage = null),
+                      capturedImages: _capturedImages,
+                      onImagesCaptured: (frames) => setState(() => _capturedImages = frames),
+                      onRetakePressed: () => setState(() => _capturedImages = <Uint8List>[]),
                       isSubmitting: _isSubmitting,
                     ),
                   ),
