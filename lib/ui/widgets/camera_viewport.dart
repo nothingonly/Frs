@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -161,7 +162,7 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
           capturedFrames.add(bytes);
         } finally {
           try {
-            await photo.delete();
+            await File(photo.path).delete();
           } catch (_) {
             // The camera plugin may remove its temporary file itself.
           }
