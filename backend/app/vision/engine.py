@@ -75,8 +75,10 @@ class VisionEngine:
         if self.detector is None or self.recognizer is None:
             raise VisionError("Selected model pack must contain real detection and recognition models")
 
-        self.detector_id = type(self.detector).__name__
-        self.recognizer_id = type(self.recognizer).__name__
+        detector_class = type(self.detector).__name__
+        recognizer_class = type(self.recognizer).__name__
+        self.detector_id = "SCRFD" if "scrfd" in detector_class.lower() else detector_class
+        self.recognizer_id = "ArcFace" if "arcface" in recognizer_class.lower() else recognizer_class
         self.detector_version = self._model_version(self.detector)
         self.recognizer_version = self._model_version(self.recognizer)
         self.pipeline_version = f"frs-v5:{settings.model_pack}:{self.detector_version}:{self.recognizer_version}"
@@ -153,8 +155,12 @@ class VisionEngine:
         vector = np.asarray(self.recognizer.get_feat(aligned_bgr), dtype=np.float32).reshape(-1)
         norm = float(np.linalg.norm(vector))
         if vector.size == 0 or not np.all(np.isfinite(vector)) or norm <= 1e-12:
-            raise VisionError("ArcFace produced an invalid embedding")
+            raise VisionError(f"{self.recognizer_id} produced an invalid embedding")
         return vector / norm
+
+    def primary_embedding(self, aligned_bgr: np.ndarray) -> np.ndarray:
+        """Run the configured primary recognizer on a previously quality-gated aligned crop."""
+        return self._extract_embedding(aligned_bgr)
 
     def analyze(self, image_bytes: bytes, frame_id: str) -> FrameObservation:
         image = self._decode_image(image_bytes)
@@ -228,6 +234,17 @@ class VisionEngine:
         align_start = time.perf_counter()
         aligned = norm_crop(image, kps, image_size=getattr(self.recognizer, "input_size", (112, 112))[0])
         align_time = (time.perf_counter() - align_start) * 1000.0
+        # Do not run ArcFace on degraded frames. The orchestrator must choose AdaFace
+        # (or abstain/recapture when that specialist is unavailable) for this route.
+        if measurements.result.status == QualityState.DEGRADED:
+            return FrameObservation(
+                frame_id=frame_id, image_bgr=image, detection_state=DetectionState.OK,
+                detector_id=detector_id, detector_version=detector_version, bbox=box, keypoints=kps,
+                detection_confidence=float(box[4]) if box.size > 4 else None,
+                quality=measurements, primary_embedding=None, aligned_face_bgr=aligned,
+                recognizer_id=self.recognizer_id, recognizer_version=self.recognizer_version,
+                detection_latency_ms=detector_latency, recognition_latency_ms=0.0, frame_sha256=frame_hash,
+            )
         recognition_start = time.perf_counter()
         embedding = self._extract_embedding(aligned)
         recognition_latency = align_time + (time.perf_counter() - recognition_start) * 1000.0
