@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/publish-alpha-release.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -83,7 +84,7 @@ jobs:
       - name: Update repository About metadata
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.FRS_RELEASE_TOKEN || github.token }}
         run: |
           gh repo edit nothingonly/Frs \
             --description "Face Recognition Attendance System (FRS) — Flutter Android kiosk and FastAPI backend for secure, multi-frame biometric attendance verification and identification." \
@@ -100,10 +101,15 @@ jobs:
 
       - name: Create alpha prerelease if not already published
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.FRS_RELEASE_TOKEN || github.token }}
+          FRS_RELEASE_TOKEN: ${{ secrets.FRS_RELEASE_TOKEN }}
           VERSION: v0.1.0-alpha.1
         run: |
           set -euo pipefail
+          if [[ -z "$FRS_RELEASE_TOKEN" ]]; then
+            echo "::error::GitHub rejected the default Actions token (HTTP 403). Add an Actions secret named FRS_RELEASE_TOKEN with scoped Administration: write and Contents: write permissions for nothingonly/Frs, then run this workflow again."
+            exit 1
+          fi
           if gh release view "$VERSION" >/dev/null 2>&1; then
             echo "Release $VERSION already exists; leaving the published release unchanged."
             exit 0
