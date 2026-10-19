@@ -52,3 +52,15 @@ app.*.map.json
 
 # Generated Android build output
 /android/build/
+/backend/.env
+/backend/.env.*.bak
+/backend/.env.tmp
+/backend/frs.db
+/backend/*.db
+/android/key.properties
+/android/*.jks
+/android/*.keystore
+/android/*.p12
+/android/*.pfx
+/android/app/*.jks
+/android/app/*.keystore
