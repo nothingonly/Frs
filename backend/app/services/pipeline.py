@@ -257,13 +257,13 @@ class AttendancePipeline:
             margins: list[float | None] = []
             usable = 0
             version = self._model_version(model_id)
-            for obs, _route_model, _embedding, _preprocessing_id, _top, _count in observations:
+            for obs, _route_model, _embedding, _original_preprocessing_id, _top, _count in observations:
                 if obs.aligned_face_bgr is None or obs.quality is None:
                     continue
                 try:
-                    crop, preprocessing_id, _branch_info = _choose_preprocessing(obs, model_id, version)
+                    crop, _preprocessing_hint, branch_info = _choose_preprocessing(obs, model_id, version)
                     embedding, version = self._embed_for_model(obs, model_id, crop)
-                    preprocessing_id = _preprocessing_id(model_id, version, _branch_info["preprocessing_id"])
+                    preprocessing_id = _preprocessing_id(model_id, version, branch_info["preprocessing_id"])
                     top, candidate_count, _latency = self._retrieve(
                         db, embedding, recognizer_id=model_id, model_version=version,
                         preprocessing_id=preprocessing_id, employee_id=employee_id,
@@ -379,8 +379,12 @@ class AttendancePipeline:
                 if not self.settings.is_model_calibrated(model_id):
                     reasons.append("ADAFACE_THRESHOLD_NOT_CALIBRATED")
                     continue
+                version = self._model_version(model_id)
                 try:
-                    embedding, version = self._embed_for_model(obs, model_id)
+                    crop, _preprocessing_hint, branch_info = _choose_preprocessing(obs, model_id, version)
+                    embedding, version = self._embed_for_model(obs, model_id, crop)
+                    preprocessing_id = _preprocessing_id(model_id, version, branch_info["preprocessing_id"])
+                    frame_evidence["preprocessing"] = branch_info
                 except (VisionError, ValueError) as exc:
                     reasons.append(f"ADAFACE_INFERENCE_FAILED:{type(exc).__name__}")
                     continue
@@ -395,13 +399,20 @@ class AttendancePipeline:
                     )
                 embedding = obs.primary_embedding
                 version = obs.recognizer_version
+                preprocessing_id = _preprocessing_id(model_id, version, ORIGINAL_PREPROCESSING)
+                frame_evidence["preprocessing"] = {
+                    "preprocessing_id": ORIGINAL_PREPROCESSING,
+                    "enhancement_applied": False,
+                    "enhancement_reason": "PRIMARY_BASELINE_ORIGINAL",
+                }
                 if embedding is None:
                     reasons.append("PRIMARY_EMBEDDING_UNAVAILABLE")
                     continue
 
             try:
                 top, candidate_count, retrieval_latency = self._retrieve(
-                    db, embedding, recognizer_id=model_id, model_version=version, employee_id=employee_id,
+                    db, embedding, recognizer_id=model_id, model_version=version,
+                    preprocessing_id=preprocessing_id, employee_id=employee_id,
                 )
                 threshold = self.settings.threshold_for(model_id)
             except (RuntimeError, ValueError) as exc:
@@ -526,7 +537,7 @@ class AttendancePipeline:
             if best_unmatched is None or first.similarity > best_unmatched[0]:
                 best_unmatched = (first.similarity, threshold)
             if first.similarity >= threshold:
-                per_frame_winners.append((first.person_id, first.similarity, threshold, margin, model_id, None))  # type: ignore[arg-type]
+                per_frame_winners.append((first.person_id, first.similarity, threshold, margin, model_id))
 
         if not per_frame_winners:
             if employee_id_claim is not None:
@@ -553,11 +564,17 @@ class AttendancePipeline:
         primary_person_id, vote_count = votes.most_common(1)[0]
         usable_frames = len(processed)
         required_votes = math.ceil(usable_frames * self.settings.temporal_min_vote_fraction)
-        winner_scores = [item[1] for item in per_frame_winners if item[0] == primary_person_id]
+        winning_model, _winning_model_votes = Counter(
+            item[4] for item in per_frame_winners if item[0] == primary_person_id
+        ).most_common(1)[0]
+        winner_scores = [
+            item[1] for item in per_frame_winners
+            if item[0] == primary_person_id and item[4] == winning_model
+        ]
         primary_mean = float(np.mean(winner_scores)) if winner_scores else -1.0
         margins_close = any(
             top and len(top) > 1 and (top[0].similarity - top[1].similarity) < self.settings.ambiguity_margin
-            for _obs, _model, _embedding, top, _count in processed
+            for _obs, _model, _embedding, _preprocessing_id_value, top, _count in processed
         )
         temporally_stable = vote_count >= required_votes
         secondary_evidence = None
@@ -633,9 +650,7 @@ class AttendancePipeline:
                         "remaining_seconds": remaining, "last_punch_time": last_time.isoformat()},
             )
 
-        matched_model = secondary_evidence["model_id"] if secondary_evidence else Counter(
-            item[4] for item in per_frame_winners if item[0] == primary_person_id
-        ).most_common(1)[0][0]
+        matched_model = secondary_evidence["model_id"] if secondary_evidence else winning_model
         matched_threshold = secondary_evidence["threshold"] if secondary_evidence else self.settings.threshold_for(matched_model)
         matched_score = secondary_evidence["mean_score"] if secondary_evidence else primary_mean
         evidence["decision"] = {
