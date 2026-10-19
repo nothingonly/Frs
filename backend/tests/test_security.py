@@ -2,6 +2,7 @@ import base64
 import os
 
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from app.core.config import Settings
 from app.security import (
@@ -53,7 +54,7 @@ def test_embedding_authentication_rejects_tampering() -> None:
     ciphertext, nonce = encrypt_embedding(b"embedding", settings)
     changed = bytearray(ciphertext)
     changed[-1] ^= 0x01
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         decrypt_embedding(bytes(changed), nonce, settings)
 
 
