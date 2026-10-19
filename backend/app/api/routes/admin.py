@@ -160,6 +160,8 @@ def list_models(
             "artifact_sha256": row.artifact_sha256,
             "artifact_path": row.artifact_path,
             "license_name": row.license_name,
+            "source_url": row.source_url,
+            "permitted_use": row.permitted_use,
             "preprocessing_id": row.preprocessing_id,
             "input_contract": json.loads(row.input_contract_json),
             "output_contract": json.loads(row.output_contract_json),
