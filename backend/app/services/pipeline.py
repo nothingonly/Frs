@@ -710,6 +710,40 @@ class AttendancePipeline:
             "audit_id": audit_id,
         }
 
+    def _enrollment_fail(
+        self,
+        db: Session,
+        *,
+        session_id: str,
+        admin_actor_id: str,
+        action: str,
+        reasons: list[str],
+        evidence: dict[str, Any],
+        status_code: int,
+        detail: str | dict[str, Any],
+        state: str = "ENROLLMENT_REJECTED",
+    ) -> None:
+        """Persist a non-biometric rejection record before returning an enrollment failure."""
+        try:
+            db.rollback()
+            self._audit(
+                db,
+                session_id=session_id,
+                actor_type="administrator",
+                actor_id=admin_actor_id,
+                action=action,
+                state=state,
+                reasons=reasons,
+                evidence=evidence,
+            )
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail="Enrollment audit persistence failed; no enrollment was accepted.",
+            ) from exc
+        raise HTTPException(status_code=status_code, detail=detail)
+
     def enroll(
         self,
         db: Session,
@@ -724,102 +758,166 @@ class AttendancePipeline:
         action = "biometrics.enroll"
         employee_id = employee_id.strip()
         full_name = full_name.strip()
+        evidence: dict[str, Any] = {
+            "session_id": session_id,
+            "pipeline_version": self.vision.pipeline_version,
+            "frame_evidence": [],
+        }
+
         if not employee_id or not full_name:
-            raise HTTPException(status_code=422, detail="employee_id and full_name are required")
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["EMPLOYEE_ID_AND_FULL_NAME_REQUIRED"], evidence=evidence,
+                status_code=422, detail="employee_id and full_name are required.",
+            )
         if self.settings.require_liveness and self.vision.liveness is None:
-            raise HTTPException(status_code=503, detail="Enrollment requires a configured liveness model by current policy")
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["REQUIRED_LIVENESS_MODEL_UNAVAILABLE"], evidence=evidence,
+                status_code=503, detail="Enrollment is disabled because policy requires a configured liveness model.",
+            )
         if len(image_payloads) < self.settings.minimum_identification_frames:
-            raise HTTPException(
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["INSUFFICIENT_ENROLLMENT_VIEWS"], evidence=evidence,
                 status_code=422,
                 detail=f"Enrollment requires at least {self.settings.minimum_identification_frames} separate frames/views.",
             )
         if len(image_payloads) > self.settings.maximum_identification_frames:
-            raise HTTPException(status_code=413, detail="Too many enrollment frames.")
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["TOO_MANY_ENROLLMENT_FRAMES"], evidence=evidence,
+                status_code=413, detail="Too many enrollment frames.",
+            )
         if sum(map(len, image_payloads)) > self.settings.max_request_bytes:
-            raise HTTPException(status_code=413, detail="Enrollment burst exceeds total upload limit.")
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["ENROLLMENT_BURST_TOO_LARGE"], evidence=evidence,
+                status_code=413, detail="Enrollment burst exceeds total upload limit.",
+            )
         if any(not item or len(item) > self.settings.max_upload_bytes for item in image_payloads):
-            raise HTTPException(status_code=413, detail="A frame is empty or exceeds the image upload limit.")
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["INVALID_OR_OVERSIZED_ENROLLMENT_FRAME"], evidence=evidence,
+                status_code=413, detail="A frame is empty or exceeds the image upload limit.",
+            )
 
         observations: list[FrameObservation] = []
-        frame_evidence: list[dict[str, Any]] = []
         liveness_scores: list[float] = []
+        failure_reasons: list[str] = []
+
         for index, payload in enumerate(image_payloads):
             try:
                 obs = self.vision.analyze(payload, f"{session_id}:{index:02d}")
             except (VisionError, ValueError) as exc:
-                raise HTTPException(status_code=422, detail=f"Enrollment frame {index + 1} failed decoding/inference: {exc}") from exc
-            if obs.detection_state == DetectionState.MULTIPLE_FACES:
-                raise HTTPException(status_code=422, detail=f"Enrollment frame {index + 1} contains multiple faces.")
-            if obs.detection_state != DetectionState.OK or obs.quality is None:
-                frame_evidence.append({"frame_id": obs.frame_id, "sha256": obs.frame_sha256, "state": "NO_FACE"})
-                continue
-            if obs.quality.result.status == QualityState.RECAPTURE:
-                frame_evidence.append({
-                    "frame_id": obs.frame_id, "sha256": obs.frame_sha256,
-                    "state": "RECAPTURE", "quality": obs.quality.result.model_dump(mode="json"),
+                evidence["frame_evidence"].append({
+                    "frame_index": index,
+                    "frame_sha256": __import__("hashlib").sha256(payload).hexdigest(),
+                    "state": "INFERENCE_ERROR",
+                    "error_code": type(exc).__name__,
                 })
+                self._enrollment_fail(
+                    db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                    reasons=["ENROLLMENT_FRAME_INFERENCE_FAILED"], evidence=evidence,
+                    status_code=422,
+                    detail=f"Enrollment frame {index + 1} failed image decoding or inference ({type(exc).__name__}).",
+                )
+
+            frame_evidence: dict[str, Any] = {
+                "frame_id": obs.frame_id,
+                "frame_sha256": obs.frame_sha256,
+                "detection_state": obs.detection_state.value,
+                "detector_id": obs.detector_id,
+                "detector_version": obs.detector_version,
+                "detection_latency_ms": obs.detection_latency_ms,
+            }
+
+            if obs.detection_state == DetectionState.MULTIPLE_FACES:
+                frame_evidence["state"] = "MULTIPLE_FACES"
+                evidence["frame_evidence"].append(frame_evidence)
+                self._enrollment_fail(
+                    db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                    reasons=["MULTIPLE_FACES_IN_ENROLLMENT"], evidence=evidence,
+                    status_code=422,
+                    detail=f"Enrollment frame {index + 1} contains multiple faces.",
+                )
+
+            if obs.detection_state != DetectionState.OK or obs.quality is None:
+                frame_evidence["state"] = "NO_FACE"
+                failure_reasons.append("NO_FACE")
+                evidence["frame_evidence"].append(frame_evidence)
                 continue
+
+            frame_evidence["quality"] = obs.quality.result.model_dump(mode="json")
+            if obs.quality.result.status == QualityState.RECAPTURE:
+                frame_evidence["state"] = "RECAPTURE"
+                failure_reasons.extend(obs.quality.result.failure_codes)
+                evidence["frame_evidence"].append(frame_evidence)
+                continue
+
+            if obs.aligned_face_bgr is None:
+                frame_evidence["state"] = "ALIGNMENT_FAILED"
+                evidence["frame_evidence"].append(frame_evidence)
+                failure_reasons.append("ALIGNMENT_FAILED")
+                continue
+
             if self.settings.require_liveness:
-                score = self.vision.liveness_probability(obs)
-                liveness_scores.append(score)
-                if score < self.settings.required_liveness_score:
-                    raise HTTPException(
+                try:
+                    live_score = self.vision.liveness_probability(obs)
+                except (VisionError, ValueError) as exc:
+                    frame_evidence["state"] = "LIVENESS_ERROR"
+                    frame_evidence["liveness_error"] = type(exc).__name__
+                    evidence["frame_evidence"].append(frame_evidence)
+                    self._enrollment_fail(
+                        db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                        reasons=["ENROLLMENT_LIVENESS_INFERENCE_FAILED"], evidence=evidence,
+                        status_code=503,
+                        detail="Liveness inference failed; enrollment was not accepted.",
+                    )
+                liveness_scores.append(live_score)
+                frame_evidence["liveness_score"] = live_score
+                if live_score < self.settings.required_liveness_score:
+                    frame_evidence["state"] = "LIVENESS_REJECTED"
+                    evidence["frame_evidence"].append(frame_evidence)
+                    self._enrollment_fail(
+                        db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                        reasons=["ENROLLMENT_LIVENESS_FAILED"], evidence=evidence,
                         status_code=409,
                         detail=f"Enrollment frame {index + 1} did not pass the configured liveness policy.",
                     )
+
+            frame_evidence["state"] = "ACCEPTED_FOR_PROFILE_CHECK"
+            evidence["frame_evidence"].append(frame_evidence)
             observations.append(obs)
-            frame_evidence.append({
-                "frame_id": obs.frame_id, "sha256": obs.frame_sha256,
-                "quality": obs.quality.result.model_dump(mode="json"),
-                "detector_id": obs.detector_id, "detector_version": obs.detector_version,
-            })
+
         if len(observations) < self.settings.minimum_identification_frames:
-            raise HTTPException(
+            evidence["failure_reasons"] = failure_reasons
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["INSUFFICIENT_USABLE_ENROLLMENT_VIEWS"], evidence=evidence,
                 status_code=422,
-                detail=f"Only {len(observations)} usable enrollment views; at least "
+                detail=f"Only {len(observations)} usable enrollment views remain; at least "
                        f"{self.settings.minimum_identification_frames} are required.",
             )
 
-        db.rollback()
-        existing = db.execute(select(Person).where(Person.employee_id == employee_id).with_for_update()).scalar_one_or_none()
-        if existing is not None and not existing.is_active:
-            raise HTTPException(
-                status_code=409,
-                detail="This employee is inactive. An authorized administrator must reactivate the identity before re-enrollment.",
-            )
-        if existing is None:
-            person = Person(employee_id=employee_id, full_name=full_name, department=department, enrollment_version=1, is_active=True)
-            db.add(person)
-            db.flush()
-            enrollment_version = 1
-        else:
-            person = existing
-            enrollment_version = existing.enrollment_version + 1
-            person.enrollment_version = enrollment_version
-            person.full_name = full_name
-            person.department = department
-            person.updated_at = _utcnow()
-
-        model_rows = 0
+        # Precompute and validate the entire profile before creating/changing an identity.
+        # A bad enrollment must not leave an active person row without valid templates.
+        pending_embeddings: list[tuple[FrameObservation, str, str, np.ndarray, str]] = []
+        arcface_vectors: list[np.ndarray] = []
         model_counts: dict[str, int] = defaultdict(int)
+
         try:
             for obs in observations:
                 if obs.aligned_face_bgr is None or obs.quality is None:
-                    raise RuntimeError("Accepted enrollment frame has no aligned face or quality record")
+                    raise RuntimeError("Accepted enrollment frame lacks aligned pixels or quality evidence")
 
-                # The original aligned face is always retained as the reference.
-                embeddings: list[tuple[str, str, np.ndarray, str]] = [
-                    (
-                        "ArcFace",
-                        self.vision.recognizer_version,
-                        self.vision.primary_embedding(obs.aligned_face_bgr),
-                        _preprocessing_id("ArcFace", self.vision.recognizer_version, ORIGINAL_PREPROCESSING),
-                    ),
-                ]
+                primary = _normalise(self.vision.primary_embedding(obs.aligned_face_bgr))
+                arcface_vectors.append(primary)
+                pending_embeddings.append((
+                    obs, "ArcFace", self.vision.recognizer_version, primary,
+                    _preprocessing_id("ArcFace", self.vision.recognizer_version, ORIGINAL_PREPROCESSING),
+                ))
 
-                # Independent specialists get matching original and conditional-enhancement
-                # enrollment branches. Identification must query the same branch/version,
-                # so score distributions are never mixed across preprocessing transforms.
                 enhanced = conditional_enhance(
                     obs.aligned_face_bgr, obs.quality.result, force_enhanced_reference=True
                 )
@@ -829,41 +927,117 @@ class AttendancePipeline:
                 ):
                     if specialist is None:
                         continue
-                    original_vector, original_name, original_version = self.vision.secondary_embedding(
+                    original_vector, model_id, version = self.vision.secondary_embedding(
                         specialist_name, obs.aligned_face_bgr
                     )
-                    embeddings.append((
-                        original_name, original_version, original_vector,
-                        _preprocessing_id(original_name, original_version, ORIGINAL_PREPROCESSING),
+                    pending_embeddings.append((
+                        obs, model_id, version, _normalise(original_vector),
+                        _preprocessing_id(model_id, version, ORIGINAL_PREPROCESSING),
                     ))
-                    enhanced_vector, enhanced_name, enhanced_version = self.vision.secondary_embedding(
+                    enhanced_vector, enhanced_model_id, enhanced_version = self.vision.secondary_embedding(
                         specialist_name, enhanced.image_bgr
                     )
-                    embeddings.append((
-                        enhanced_name, enhanced_version, enhanced_vector,
-                        _preprocessing_id(enhanced_name, enhanced_version, ENHANCED_PREPROCESSING),
+                    pending_embeddings.append((
+                        obs, enhanced_model_id, enhanced_version, _normalise(enhanced_vector),
+                        _preprocessing_id(enhanced_model_id, enhanced_version, ENHANCED_PREPROCESSING),
                     ))
+        except (VisionError, ValueError, RuntimeError) as exc:
+            evidence["profile_generation_error"] = type(exc).__name__
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["ENROLLMENT_EMBEDDING_GENERATION_FAILED"], evidence=evidence,
+                status_code=503, detail="Real model inference failed while creating the enrollment profile.",
+            )
 
-                for model_id, version, vector, preprocessing_id in embeddings:
-                    ciphertext, nonce = encrypt_embedding(_normalise(vector).astype(np.float32).tobytes(), self.settings)
-                    db.add(EmbeddingRecord(
-                        person_id=person.person_id,
-                        enrollment_version=enrollment_version,
-                        recognizer_id=model_id,
-                        model_version=version,
-                        preprocessing_id=preprocessing_id,
-                        embedding_dim=int(vector.size),
-                        ciphertext=ciphertext,
-                        nonce=nonce,
-                        sample_sha256=obs.frame_sha256,
-                        quality_json=json.dumps(obs.quality.result.model_dump(mode="json"), separators=(",", ":")),
-                        accepted=True,
-                    ))
-                    model_rows += 1
-                    model_counts[model_id] += 1
+        arcface_prototype = _normalise(np.mean(np.stack(arcface_vectors, axis=0), axis=0))
+        consistency_scores = [_cosine(vector, arcface_prototype) for vector in arcface_vectors]
+        minimum_consistency = min(consistency_scores)
+        mean_consistency = float(np.mean(consistency_scores))
+        evidence["intra_person_consistency"] = {
+            "recognizer_id": "ArcFace",
+            "model_version": self.vision.recognizer_version,
+            "minimum_similarity_to_profile_centroid": minimum_consistency,
+            "mean_similarity_to_profile_centroid": mean_consistency,
+            "required_minimum": self.settings.enrollment_min_profile_consistency,
+        }
+        if minimum_consistency < self.settings.enrollment_min_profile_consistency:
+            self._enrollment_fail(
+                db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                reasons=["ENROLLMENT_PROFILE_INCONSISTENT"], evidence=evidence,
+                status_code=409,
+                detail={
+                    "message": "Enrollment views are not mutually consistent enough to create a reliable identity profile.",
+                    "minimum_observed_similarity": minimum_consistency,
+                    "required_minimum_similarity": self.settings.enrollment_min_profile_consistency,
+                    "accepted_sample_count": len(observations),
+                },
+            )
+
+        # Identity/profile transaction begins only after all frames and the ArcFace
+        # consistency gate pass. Old versions remain in storage but are not searchable.
+        db.rollback()
+        try:
+            existing = db.execute(
+                select(Person).where(Person.employee_id == employee_id).with_for_update()
+            ).scalar_one_or_none()
+            if existing is not None and not existing.is_active:
+                db.rollback()
+                self._enrollment_fail(
+                    db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                    reasons=["EMPLOYEE_IDENTITY_INACTIVE"], evidence=evidence,
+                    status_code=409,
+                    detail="This employee is inactive. An authorized administrator must reactivate the identity before re-enrollment.",
+                )
+
+            if existing is None:
+                person = Person(
+                    employee_id=employee_id, full_name=full_name, department=department,
+                    enrollment_version=1, is_active=True,
+                )
+                db.add(person)
+                db.flush()
+                enrollment_version = 1
+            else:
+                person = existing
+                enrollment_version = existing.enrollment_version + 1
+                person.enrollment_version = enrollment_version
+                person.full_name = full_name
+                person.department = department
+                person.updated_at = _utcnow()
+
+            for obs, model_id, version, vector, preprocessing_id in pending_embeddings:
+                ciphertext, nonce = encrypt_embedding(
+                    _normalise(vector).astype(np.float32).tobytes(), self.settings
+                )
+                db.add(EmbeddingRecord(
+                    person_id=person.person_id,
+                    enrollment_version=enrollment_version,
+                    recognizer_id=model_id,
+                    model_version=version,
+                    preprocessing_id=preprocessing_id,
+                    embedding_dim=int(vector.size),
+                    ciphertext=ciphertext,
+                    nonce=nonce,
+                    sample_sha256=obs.frame_sha256,
+                    quality_json=json.dumps(
+                        obs.quality.result.model_dump(mode="json"), separators=(",", ":")
+                    ),
+                    accepted=True,
+                ))
+                model_counts[model_id] += 1
 
             audit_id = str(uuid.uuid4())
-            audit = AuditEvent(
+            evidence["enrollment"] = {
+                "person_id": person.person_id,
+                "employee_id": employee_id,
+                "enrollment_version": enrollment_version,
+                "accepted_sample_count": len(observations),
+                "model_embedding_counts": dict(model_counts),
+                "liveness_scores": liveness_scores,
+                "minimum_profile_consistency": minimum_consistency,
+                "mean_profile_consistency": mean_consistency,
+            }
+            db.add(AuditEvent(
                 audit_id=audit_id,
                 session_id=session_id,
                 occurred_at=_utcnow(),
@@ -871,23 +1045,30 @@ class AttendancePipeline:
                 actor_id=admin_actor_id,
                 action=action,
                 decision_state="ENROLLED",
-                reason_codes_json=json.dumps(["MULTI_SAMPLE_ENROLLMENT_PROFILE_CREATED"]),
-                evidence_json=json.dumps({
-                    "person_id": person.person_id,
-                    "employee_id": employee_id,
-                    "enrollment_version": enrollment_version,
-                    "accepted_sample_count": len(observations),
-                    "model_embedding_counts": dict(model_counts),
-                    "frames": frame_evidence,
-                    "liveness_scores": liveness_scores,
-                    "pipeline_version": self.vision.pipeline_version,
-                }, separators=(",", ":"), default=str),
-            )
-            db.add(audit)
+                reason_codes_json=json.dumps(["MULTI_SAMPLE_PROFILE_AND_CONSISTENCY_GATE_PASSED"]),
+                evidence_json=json.dumps(evidence, separators=(",", ":"), default=str),
+            ))
             db.commit()
+        except HTTPException:
+            raise
         except Exception as exc:
             db.rollback()
-            raise HTTPException(status_code=503, detail="Enrollment transaction failed; no success was reported") from exc
+            try:
+                self._audit(
+                    db, session_id=session_id, actor_type="administrator", actor_id=admin_actor_id,
+                    action=action, state="ENROLLMENT_TRANSACTION_FAILED",
+                    reasons=["PROFILE_PERSISTENCE_FAILED"], evidence={
+                        "pipeline_version": self.vision.pipeline_version,
+                        "employee_id_sha256": __import__("hashlib").sha256(employee_id.encode("utf-8")).hexdigest(),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            except Exception:
+                db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail="Enrollment transaction failed; no success was reported.",
+            ) from exc
 
         sharpness = [obs.quality.result.blur_score for obs in observations if obs.quality is not None]
         return {
@@ -898,11 +1079,13 @@ class AttendancePipeline:
             "department": person.department,
             "enrollment_version": enrollment_version,
             "accepted_sample_count": len(observations),
-            "embedding_records_created": model_rows,
+            "embedding_records_created": len(pending_embeddings),
             "models": dict(model_counts),
             "quality_metrics": {
                 "mean_sharpness": float(np.mean(sharpness)) if sharpness else None,
                 "minimum_face_size_px": min(obs.quality.result.face_size_px for obs in observations if obs.quality),
+                "minimum_arcface_profile_consistency": minimum_consistency,
+                "mean_arcface_profile_consistency": mean_consistency,
                 "model_embedding_counts": dict(model_counts),
             },
             "audit_id": audit_id,
