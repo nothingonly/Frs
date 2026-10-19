@@ -10,6 +10,7 @@ class CameraViewport extends StatefulWidget {
   final ValueChanged<List<Uint8List>> onImagesCaptured;
   final VoidCallback onRetakePressed;
   final bool isSubmitting;
+  final bool isActive;
 
   const CameraViewport({
     super.key,
@@ -17,6 +18,7 @@ class CameraViewport extends StatefulWidget {
     required this.onImagesCaptured,
     required this.onRetakePressed,
     this.isSubmitting = false,
+    this.isActive = true,
   });
 
   @override
@@ -42,7 +44,33 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initializeCamera();
+    if (widget.isActive) _initializeCamera();
+  }
+
+  @override
+  void didUpdateWidget(covariant CameraViewport oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive == widget.isActive) return;
+    if (widget.isActive) {
+      _resumeCamera();
+    } else {
+      _pauseCamera();
+    }
+  }
+
+  Future<void> _pauseCamera() async {
+    await _disposeController();
+    if (mounted) {
+      setState(() {
+        _isInitialized = false;
+        _isCapturing = false;
+      });
+    }
+  }
+
+  Future<void> _resumeCamera() async {
+    await _disposeController();
+    if (mounted && widget.isActive) await _initializeCamera();
   }
 
   @override
@@ -63,7 +91,7 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final CameraController? cameraController = _controller;
-    if (cameraController == null || !cameraController.value.isInitialized) {
+    if (!widget.isActive || cameraController == null || !cameraController.value.isInitialized) {
       return;
     }
 
@@ -80,7 +108,7 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
   }
 
   Future<void> _initializeCamera() async {
-    if (!mounted) return;
+    if (!mounted || !widget.isActive) return;
     setState(() {
       _errorMessage = null;
       _isPermissionDenied = false;
@@ -88,6 +116,7 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
 
     try {
       _availableCameras = await availableCameras();
+      if (!mounted || !widget.isActive) return;
       if (_availableCameras.isEmpty) {
         if (!mounted) return;
         setState(() {
