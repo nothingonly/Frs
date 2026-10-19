@@ -18,7 +18,6 @@ from app.db.entities import AttendanceEvent, AuditEvent, EmbeddingRecord, Person
 from app.schemas.contracts import (
     DecisionState,
     RetrievalCandidate,
-    SecurityState,
 )
 from app.security import decrypt_embedding, encrypt_embedding
 from app.vision.engine import FrameObservation, VisionEngine, VisionError
