@@ -16,12 +16,18 @@ async def _read_burst(
     image: UploadFile | None,
     max_image_bytes: int,
     max_total_bytes: int,
+    minimum_frames: int,
+    maximum_frames: int,
 ) -> list[bytes]:
     if images and image is not None:
         raise HTTPException(status_code=422, detail="Send either repeated 'images' parts or legacy 'image', not both.")
     uploads = images or ([image] if image is not None else [])
     if not uploads:
         raise HTTPException(status_code=422, detail="Camera frame burst is required.")
+    if len(uploads) < minimum_frames:
+        raise HTTPException(status_code=422, detail=f"At least {minimum_frames} frames are required.")
+    if len(uploads) > maximum_frames:
+        raise HTTPException(status_code=413, detail=f"At most {maximum_frames} frames are accepted.")
     payloads: list[bytes] = []
     total = 0
     for part in uploads:
@@ -49,7 +55,10 @@ async def identify_attendance(
     image: Annotated[UploadFile | None, File()] = None,
 ):
     settings = request.app.state.settings
-    payloads = await _read_burst(images, image, settings.max_upload_bytes, settings.max_request_bytes)
+    payloads = await _read_burst(
+        images, image, settings.max_upload_bytes, settings.max_request_bytes,
+        settings.minimum_identification_frames, settings.maximum_identification_frames,
+    )
     return request.app.state.pipeline.identify(
         db,
         payloads,
