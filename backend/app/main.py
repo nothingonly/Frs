@@ -35,6 +35,14 @@ class RequestSizeMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+def _has_threshold(settings, model_id: str) -> bool:
+    try:
+        settings.threshold_for(model_id)
+        return True
+    except ValueError:
+        return False
+
+
 def _register_runtime_models(db, vision: VisionEngine) -> None:
     import json
     from pathlib import Path
@@ -57,8 +65,8 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
         path = Path(vision.settings.retinaface_onnx_path).expanduser().resolve()
         candidates.append((
             "RetinaFace", vision.recovery_detector_version, str(path),
-            "Operator-supplied model; verify the artifact license",
-            f"retinaface-det-size-{vision.settings.detect_size}",
+            str(vision.recovery_contract["license_name"]),
+            str(vision.recovery_contract["preprocessing_id"]),
             {"path": str(path), "provider": vision.settings.model_provider},
             {"task": "face_detection"},
         ))
@@ -83,6 +91,15 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
              "color_order": model.color_order, "mean": model.mean, "std": model.std},
             {"task": "presentation_attack_detection", "output_type": model.contract.get("output_type"),
              "live_class_index": model.live_class_index},
+        ))
+    if vision.fiqa is not None:
+        model = vision.fiqa
+        candidates.append((
+            "FIQA", model.model_version, str(model.path), model.license_name,
+            model.preprocessing_id,
+            {"layout": model.layout, "width": model.width, "height": model.height,
+             "color_order": model.color_order, "mean": model.mean, "std": model.std},
+            {"task": "face_quality_estimation", "output_type": model.contract.get("output_type")},
         ))
     for model_id, version, path, license_name, preprocessing_id, input_contract, output_contract in candidates:
         row = db.query(ModelRegistryEntry).filter_by(model_id=model_id, model_version=version).one_or_none()
@@ -187,6 +204,14 @@ def health(request: Request):
         and encryption_ready
         and settings.is_model_calibrated("ArcFace")
         and (not settings.require_liveness or vision.liveness is not None)
+        and (
+            not settings.require_all_specialists
+            or all((vision.recovery_detector, vision.adaface, vision.mobilefacenet, vision.liveness, vision.fiqa))
+        )
+        and all(
+            settings.is_model_calibrated(model_id) and _has_threshold(settings, model_id)
+            for model_id in (("ArcFace", "AdaFace", "MobileFaceNet") if settings.require_all_specialists else ("ArcFace",))
+        )
     )
     threshold_status = "CALIBRATED" if settings.is_model_calibrated("ArcFace") else "UNRECALIBRATED_BASELINE"
     return HealthResponse(
