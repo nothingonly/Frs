@@ -102,10 +102,12 @@ def assess_quality(
     elif abs(pose_tuple[0]) > 35 or abs(pose_tuple[1]) > 30:
         failures.append("EXTREME_POSE")
 
+    # Moderate exposure problems route through the conditional enhancement branch;
+    # extreme clipping remains unrecoverable and requests a new capture.
+    exposure_unrecoverable = luminance < 8.0 or luminance > 248.0
     hard_failure = any(code in failures for code in (
-        "INVALID_FACE_CROP", "FACE_TOO_SMALL", "MOTION_OR_FOCUS_BLUR",
-        "UNDEREXPOSED", "OVEREXPOSED", "EXCESSIVE_CLIPPING"
-    ))
+        "INVALID_FACE_CROP", "FACE_TOO_SMALL", "MOTION_OR_FOCUS_BLUR", "EXCESSIVE_CLIPPING"
+    )) or exposure_unrecoverable
     degraded_only = any(code in failures for code in ("EXTREME_POSE", "POSE_UNAVAILABLE"))
     if hard_failure:
         state = QualityState.RECAPTURE
