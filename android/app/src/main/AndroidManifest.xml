@@ -5,7 +5,7 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 
-    <!-- Hardware camera permissions for 1:1 facial biometric capture -->
+    <!-- Hardware camera permissions for burst-based facial biometric capture -->
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-feature android:name="android.hardware.camera" android:required="true"/>
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
@@ -14,8 +14,7 @@
         android:label="FRS Attendance Kiosk"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
-        <!-- usesCleartextTraffic is enabled for local development/pilot HTTP servers (10.0.2.2 / LAN IPs) -->
+        >
 
         <activity
             android:name=".MainActivity"
@@ -26,7 +25,7 @@
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize"
             android:screenOrientation="portrait">
-            <!-- Kiosk orientation pinned to landscape for wall-mounted/desk kiosk tablets -->
+            <!-- The app entry point and activity are both configured for portrait orientation. -->
             
             <meta-data
               android:name="io.flutter.embedding.android.NormalTheme"
