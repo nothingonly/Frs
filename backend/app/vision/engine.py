@@ -226,7 +226,7 @@ class VisionEngine:
 
     def analyze(self, image_bytes: bytes, frame_id: str) -> FrameObservation:
         image = self._decode_image(image_bytes)
-        frame_hash = hashlib.sha256(image_bytes).hexdigest()
+        frame_hash = hashlib.sha256(np.ascontiguousarray(image).tobytes()).hexdigest()
         start = time.perf_counter()
         try:
             bboxes, keypoints = self._detect(self.detector, image)
