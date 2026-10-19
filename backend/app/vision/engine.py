@@ -142,9 +142,11 @@ class VisionEngine:
             if not sidecar.is_file():
                 raise FileNotFoundError(f"RetinaFace artifact requires license/provenance sidecar: {sidecar}")
             retina_contract = json.loads(sidecar.read_text(encoding="utf-8"))
-            for required in ("license_name", "source_url", "preprocessing_id"):
+            for required in ("license_name", "source_url", "permitted_use", "preprocessing_id", "sha256"):
                 if not isinstance(retina_contract.get(required), str) or not retina_contract[required].strip() or retina_contract[required].lower().startswith("replace"):
                     raise ValueError(f"RetinaFace sidecar must declare a real {required}")
+            if retina_contract["sha256"].lower() != sha256_file(path).lower():
+                raise ValueError("RetinaFace ONNX checksum differs from its sidecar; refusing to run modified weights")
             self.recovery_contract = retina_contract
             self.recovery_detector = get_model(str(path), providers=[self._provider])
             self.recovery_detector.prepare(ctx_id=self._ctx_id, det_size=(settings.detect_size, settings.detect_size))
