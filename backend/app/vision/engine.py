@@ -55,14 +55,39 @@ class VisionEngine:
         # Do not allow a library convenience downloader to fetch unreviewed model weights.
         # Model artifacts must be separately provisioned with a verified license and checksum.
         pack_dir = root / "models" / settings.model_pack
-        expected_pack_files = ("det_10g.onnx", "w600k_r50.onnx")
-        missing_pack = [name for name in expected_pack_files if not (pack_dir / name).is_file()]
+        expected_pack_files = {"SCRFD": "det_10g.onnx", "ArcFace": "w600k_r50.onnx"}
+        missing_pack = [name for name in expected_pack_files.values() if not (pack_dir / name).is_file()]
         if missing_pack:
             raise FileNotFoundError(
                 f"Real SCRFD/ArcFace weights are missing from {pack_dir}: {', '.join(missing_pack)}. "
                 "Provision properly licensed model artifacts and verify their published checksums; "
                 "the application will not download unreviewed weights automatically."
             )
+        pack_manifest_path = pack_dir / "manifest.json"
+        if not pack_manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Missing primary model provenance manifest: {pack_manifest_path}. "
+                "Every weight must have a verified SHA-256, immutable source, license and permitted-use record."
+            )
+        pack_manifest = json.loads(pack_manifest_path.read_text(encoding="utf-8"))
+        self.primary_model_provenance: dict[str, dict[str, str]] = {}
+        manifest_models = pack_manifest.get("models")
+        if not isinstance(manifest_models, dict):
+            raise ValueError("Primary model manifest must contain a models object keyed by SCRFD and ArcFace")
+        for role, filename in expected_pack_files.items():
+            record = manifest_models.get(role)
+            if not isinstance(record, dict):
+                raise ValueError(f"Primary model manifest has no provenance record for {role}")
+            for field in ("file", "sha256", "source_url", "license_name", "permitted_use"):
+                value = record.get(field)
+                if not isinstance(value, str) or not value.strip() or value.lower().startswith("replace"):
+                    raise ValueError(f"Primary model manifest requires a real {field} for {role}")
+            if record["file"] != filename:
+                raise ValueError(f"Primary manifest file for {role} must match {filename}")
+            actual_sha = sha256_file(pack_dir / filename)
+            if record["sha256"].lower() != actual_sha.lower():
+                raise ValueError(f"Primary model SHA-256 mismatch for {role}; refusing to load modified/unverified weights")
+            self.primary_model_provenance[role] = dict(record)
 
         try:
             from insightface.app import FaceAnalysis
@@ -90,10 +115,19 @@ class VisionEngine:
 
         detector_class = type(self.detector).__name__
         recognizer_class = type(self.recognizer).__name__
-        self.detector_id = "SCRFD" if "scrfd" in detector_class.lower() else detector_class
-        self.recognizer_id = "ArcFace" if "arcface" in recognizer_class.lower() else recognizer_class
+        if "scrfd" not in detector_class.lower() or "arcface" not in recognizer_class.lower():
+            raise VisionError(
+                f"Selected model pack is not the required SCRFD + ArcFace baseline "
+                f"(loaded {detector_class} and {recognizer_class})."
+            )
+        self.detector_id = "SCRFD"
+        self.recognizer_id = "ArcFace"
         self.detector_version = self._model_version(self.detector)
         self.recognizer_version = self._model_version(self.recognizer)
+        if Path(str(getattr(self.detector, "model_file", ""))).resolve() != (pack_dir / expected_pack_files["SCRFD"]).resolve():
+            raise VisionError("Loaded detector path differs from the provenance-verified SCRFD artifact")
+        if Path(str(getattr(self.recognizer, "model_file", ""))).resolve() != (pack_dir / expected_pack_files["ArcFace"]).resolve():
+            raise VisionError("Loaded recognizer path differs from the provenance-verified ArcFace artifact")
         self.pipeline_version = f"frs-v5:{settings.model_pack}:{self.detector_version}:{self.recognizer_version}"
 
         self.recovery_detector = None
