@@ -30,6 +30,7 @@ class _KioskScreenState extends State<KioskScreen> {
   late FrsApiService _apiService;
   late final KioskState _state;
   bool _kioskCameraActive = true;
+  final GlobalKey<CameraViewportState> _kioskCameraKey = GlobalKey<CameraViewportState>();
 
   @override
   void initState() {
@@ -59,8 +60,10 @@ class _KioskScreenState extends State<KioskScreen> {
   }
 
   Future<void> _openSettings() async {
-    setState(() => _kioskCameraActive = false);
     try {
+      await _kioskCameraKey.currentState?.pauseCamera();
+      if (!mounted) return;
+      setState(() => _kioskCameraActive = false);
       await showDialog<void>(
         context: context,
         builder: (ctx) => SettingsDialog(
@@ -75,9 +78,11 @@ class _KioskScreenState extends State<KioskScreen> {
   }
 
   Future<void> _authenticateAndOpenAdmin() async {
-    setState(() => _kioskCameraActive = false);
     final credentialController = TextEditingController();
     try {
+      await _kioskCameraKey.currentState?.pauseCamera();
+      if (!mounted) return;
+      setState(() => _kioskCameraActive = false);
       final credential = await showDialog<String>(
         context: context,
         builder: (dialogContext) => AlertDialog(
@@ -206,6 +211,7 @@ class _KioskScreenState extends State<KioskScreen> {
                     child: Padding(
                       padding: const EdgeInsets.all(20.0),
                       child: CameraViewport(
+                         key: _kioskCameraKey,
                         capturedImages: _state.capturedImages,
                         onImagesCaptured: _state.setCapturedImages,
                          isActive: _kioskCameraActive,
@@ -234,6 +240,7 @@ class _KioskScreenState extends State<KioskScreen> {
                     SizedBox(
                       height: 340,
                       child: CameraViewport(
+                         key: _kioskCameraKey,
                         capturedImages: _state.capturedImages,
                         onImagesCaptured: _state.setCapturedImages,
                          isActive: _kioskCameraActive,
