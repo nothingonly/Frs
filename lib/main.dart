@@ -11,11 +11,9 @@ void main() async {
     DeviceOrientation.portraitDown,
   ]);
 
-  // In production Android kiosk deployment, configuration can be loaded from
-  // Android Managed Configurations (MDM) or SharedPreferences.
-  const config = AppConfig();
+  final config = await AppConfig.loadFromSecureStorage();
 
-  runApp(const FRSKioskApp(config: config));
+  runApp(FRSKioskApp(config: config));
 }
 
 class FRSKioskApp extends StatelessWidget {
