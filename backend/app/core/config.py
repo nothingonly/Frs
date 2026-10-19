@@ -25,10 +25,14 @@ class Settings(BaseSettings):
     model_root: str = "~/.insightface"
     detect_size: int = Field(default=640, ge=320, le=1280)
     model_provider: str = "CPUExecutionProvider"
+    model_license_attested: bool = False
+    require_all_specialists: bool = True
     retinaface_onnx_path: str = ""
     adaface_onnx_path: str = ""
     mobilefacenet_onnx_path: str = ""
     minifasnet_onnx_path: str = ""
+    fiqa_onnx_path: str = ""
+    fiqa_min_quality_score: float = Field(default=0.45, ge=0.0, le=1.0)
 
     require_liveness: bool = True
     minimum_identification_frames: int = Field(default=3, ge=2, le=12)
@@ -87,8 +91,23 @@ class Settings(BaseSettings):
             self.encryption_key_bytes()
             if not self.threshold_calibrated or "ArcFace" not in self.calibrated_models:
                 raise ValueError("Production startup refused: ArcFace threshold must be calibrated on project data")
+            if not self.model_license_attested:
+                raise ValueError("Production requires explicit verification of every model-weight license")
             if self.require_liveness and not self.minifasnet_onnx_path:
                 raise ValueError("Production requires FRS_MINIFASNET_ONNX_PATH when liveness is mandatory")
+            if self.require_all_specialists:
+                required = {
+                    "FRS_RETINAFACE_ONNX_PATH": self.retinaface_onnx_path,
+                    "FRS_ADAFACE_ONNX_PATH": self.adaface_onnx_path,
+                    "FRS_MOBILEFACENET_ONNX_PATH": self.mobilefacenet_onnx_path,
+                }
+                missing = [name for name, path in required.items() if not path.strip()]
+                if missing:
+                    raise ValueError("Production missing required specialist model paths: " + ", ".join(missing))
+                for model_id in ("ArcFace", "AdaFace", "MobileFaceNet"):
+                    if not self.is_model_calibrated(model_id):
+                        raise ValueError(f"Production requires a calibrated threshold for {model_id}")
+                    self.threshold_for(model_id)
 
     @property
     def device_keys(self) -> tuple[str, ...]:
