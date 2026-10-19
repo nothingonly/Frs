@@ -47,7 +47,7 @@ void main() {
     expect(submitFinder, findsOneWidget);
     final submitButton = tester.widget<ElevatedButton>(submitFinder);
     expect(submitButton.onPressed, isNull, reason: 'Submit button must be disabled when no photo captured');
-    expect(find.text('Capture Face to Punch'), findsOneWidget);
+    expect(find.text('Capture 3 Frames to Punch'), findsOneWidget);
   });
 
   testWidgets('Punch selector toggles punch type between CHECK_IN and CHECK_OUT', (WidgetTester tester) async {
