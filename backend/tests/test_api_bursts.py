@@ -38,8 +38,8 @@ def make_request(pipeline: FakePipeline):
     settings = Settings(
         _env_file=None,
         env="test",
-        max_upload_bytes=100,
-        max_request_bytes=400,
+        max_upload_bytes=1024,
+        max_request_bytes=4096,
         minimum_identification_frames=3,
         maximum_identification_frames=8,
     )
