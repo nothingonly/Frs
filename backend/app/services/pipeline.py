@@ -74,6 +74,14 @@ def _cosine(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.clip(np.dot(a, b), -1.0, 1.0))
 
 
+def _record_unique_frame_hash(frame_hash: str, seen_hashes: set[str]) -> bool:
+    """Record a decoded-pixel fingerprint once; reject repeated visual frames."""
+    if not frame_hash or frame_hash in seen_hashes:
+        return False
+    seen_hashes.add(frame_hash)
+    return True
+
+
 class AttendancePipeline:
     """V5 orchestration layer. Decisions are based only on real model outputs and stored templates."""
 
@@ -333,6 +341,7 @@ class AttendancePipeline:
             raise HTTPException(status_code=413, detail="A frame is empty or exceeds the image payload limit.")
 
         processed: list[tuple[FrameObservation, str, np.ndarray, list[RetrievalCandidate], int]] = []
+        seen_frame_hashes: set[str] = set()
         for frame_index, payload in enumerate(image_payloads):
             frame_id = f"{session_id}:{frame_index:02d}"
             try:
@@ -341,6 +350,19 @@ class AttendancePipeline:
                 evidence["frames"].append({"frame_id": frame_id, "state": "ERROR", "reason": str(exc)})
                 reasons.append("FRAME_DECODE_OR_INFERENCE_ERROR")
                 continue
+
+            if not _record_unique_frame_hash(obs.frame_sha256, seen_frame_hashes):
+                evidence["frames"].append({
+                    "frame_id": frame_id,
+                    "sha256": obs.frame_sha256,
+                    "state": "DUPLICATE_VISUAL_FRAME",
+                })
+                self._fail(
+                    db, session_id=session_id, actor_type=actor_type, actor_id=actor_id, action=action,
+                    state=DecisionState.RECAPTURE, reasons=["DUPLICATE_TEMPORAL_FRAME"], evidence=evidence,
+                    status_code=422,
+                    detail="The burst contains repeated visual content. Capture fresh frames before submitting.",
+                )
 
             frame_evidence: dict[str, Any] = {
                 "frame_id": frame_id,
@@ -837,6 +859,7 @@ class AttendancePipeline:
         observations: list[FrameObservation] = []
         liveness_scores: list[float] = []
         failure_reasons: list[str] = []
+        seen_frame_hashes: set[str] = set()
 
         for index, payload in enumerate(image_payloads):
             try:
@@ -853,6 +876,19 @@ class AttendancePipeline:
                     reasons=["ENROLLMENT_FRAME_INFERENCE_FAILED"], evidence=evidence,
                     status_code=422,
                     detail=f"Enrollment frame {index + 1} failed image decoding or inference ({type(exc).__name__}).",
+                )
+
+            if not _record_unique_frame_hash(obs.frame_sha256, seen_frame_hashes):
+                evidence["frame_evidence"].append({
+                    "frame_id": obs.frame_id,
+                    "frame_sha256": obs.frame_sha256,
+                    "state": "DUPLICATE_VISUAL_FRAME",
+                })
+                self._enrollment_fail(
+                    db, session_id=session_id, admin_actor_id=admin_actor_id, action=action,
+                    reasons=["DUPLICATE_ENROLLMENT_VIEW"], evidence=evidence,
+                    status_code=422,
+                    detail="Enrollment contains repeated visual content. Capture fresh views before enrollment.",
                 )
 
             frame_evidence: dict[str, Any] = {
