@@ -80,15 +80,33 @@ jobs:
         with:
           name: frs-android-debug
           path: artifacts
-      - name: Create alpha prerelease
+      - name: Update repository About metadata
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh repo edit nothingonly/Frs \
+            --description "Face Recognition Attendance System (FRS) — Flutter Android kiosk and FastAPI backend for secure, multi-frame biometric attendance verification and identification." \
+            --add-topic face-recognition \
+            --add-topic attendance-system \
+            --add-topic flutter \
+            --add-topic fastapi \
+            --add-topic python \
+            --add-topic computer-vision \
+            --add-topic arcface \
+            --add-topic biometrics \
+            --add-topic android-kiosk \
+            --add-topic onnx
+
+      - name: Create alpha prerelease if not already published
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: v0.1.0-alpha.1
         run: |
           set -euo pipefail
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "Release $VERSION already exists; refusing to overwrite a published release."
-            exit 1
+            echo "Release $VERSION already exists; leaving the published release unchanged."
+            exit 0
           fi
           gh release create "$VERSION" artifacts/app-debug.apk \
             --title "FRS v0.1.0 Alpha 1" \
