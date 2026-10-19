@@ -47,6 +47,7 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
     import json
     from pathlib import Path
     from app.db.entities import ModelRegistryEntry
+    from app.vision.onnx_models import sha256_file
 
     candidates: list[tuple[str, str, str, str, str, dict, dict]] = []
     for model_id, model in (("SCRFD", vision.detector), ("ArcFace", vision.recognizer)):
@@ -104,8 +105,11 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
     for model_id, version, path, license_name, preprocessing_id, input_contract, output_contract in candidates:
         row = db.query(ModelRegistryEntry).filter_by(model_id=model_id, model_version=version).one_or_none()
         if row is None:
+            full_digest = sha256_file(Path(path)) if Path(path).is_file() else ""
+            if len(full_digest) != 64:
+                raise ValueError(f"Cannot register model {model_id}:{version} without a verified SHA-256")
             row = ModelRegistryEntry(
-                model_id=model_id, model_version=version, artifact_sha256=version, artifact_path=path,
+                model_id=model_id, model_version=version, artifact_sha256=full_digest, artifact_path=path,
                 license_name=license_name, preprocessing_id=preprocessing_id,
                 input_contract_json=json.dumps(input_contract),
                 output_contract_json=json.dumps(output_contract),
@@ -113,7 +117,11 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
             )
             db.add(row)
         else:
+            full_digest = sha256_file(Path(path)) if Path(path).is_file() else ""
+            if len(full_digest) != 64:
+                raise ValueError(f"Cannot register model {model_id}:{version} without a verified SHA-256")
             row.active = True
+            row.artifact_sha256 = full_digest
             row.artifact_path = path
             row.license_name = license_name
             row.preprocessing_id = preprocessing_id
