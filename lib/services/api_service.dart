@@ -20,6 +20,7 @@ class FrsApiService {
 
   /// Checks server liveness and vision model loading state via GET /health.
   Future<HealthStatus> checkHealth() async {
+    config.validateTransport();
     final uri = Uri.parse('${config.apiBaseUrl}/health');
     try {
       final response = await _client.get(uri);
