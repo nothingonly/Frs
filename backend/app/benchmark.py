@@ -232,7 +232,7 @@ def run_benchmark(manifest: Path, model_id: str, target_far: float, output: Path
     rank1_correct = 0
     known_total = 0
     unknown_total = 0
-    open_set_correct_reject = 0
+    known_correct_accepted: list[tuple[bool, float]] = []
     known_max_scores: list[float] = []
     unknown_max_scores: list[float] = []
     no_branch_profile = 0
@@ -263,14 +263,17 @@ def run_benchmark(manifest: Path, model_id: str, target_far: float, output: Path
             rank1_correct += int(top_person == person_id)
             known_total += 1
             known_max_scores.append(top_score)
+            known_correct_accepted.append((top_person == person_id, top_score))
         else:
             impostor.extend(score for _candidate_id, score in scored)
             unknown_total += 1
             unknown_max_scores.append(top_score)
-            open_set_correct_reject += int(probe["person_id"] not in enroll_ids)
 
     threshold, calibration = _choose_far_threshold(genuine, impostor, target_far)
+    calibration["recommended_threshold"] = threshold
     known_max_accepted = sum(score >= threshold for score in known_max_scores)
+    known_correct_accepted_count = sum(correct and score >= threshold for correct, score in known_correct_accepted)
+    genuine_acceptance_count = sum(score >= threshold for score in genuine)
     unknown_false_accepts = sum(score >= threshold for score in unknown_max_scores)
     data_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
     model_path = None
@@ -310,8 +313,10 @@ def run_benchmark(manifest: Path, model_id: str, target_far: float, output: Path
             **calibration,
             "rank1_identification_rate": (rank1_correct / known_total) if known_total else None,
             "known_probe_acceptance_rate_at_calibrated_threshold": (known_max_accepted / known_total) if known_total else None,
+            "known_correct_identification_acceptance_rate": (known_correct_accepted_count / known_total) if known_total else None,
+            "genuine_similarity_true_accept_rate": (genuine_acceptance_count / len(genuine)) if genuine else None,
             "unknown_probe_false_accept_rate": (unknown_false_accepts / unknown_total) if unknown_total else None,
-            "open_set_unknown_rejection_rate": (open_set_correct_reject / unknown_total) if unknown_total else None,
+            "open_set_unknown_rejection_rate": ((unknown_total - unknown_false_accepts) / unknown_total) if unknown_total else None,
             "known_max_similarity_count": len(known_max_scores),
             "unknown_max_similarity_count": len(unknown_max_scores),
         },
