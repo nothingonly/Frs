@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ import numpy as np
 
 from app.core.config import Settings
 from app.schemas.contracts import DetectionState, QualityState
-from app.vision.onnx_models import OnnxEmbeddingRecognizer, OnnxLivenessModel, sha256_file
+from app.vision.onnx_models import OnnxEmbeddingRecognizer, OnnxLivenessModel, OnnxQualityScorer, sha256_file
 from app.vision.quality import QualityMeasurements, assess_quality
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,14 @@ class VisionEngine:
             path = Path(settings.retinaface_onnx_path).expanduser().resolve()
             if not path.is_file():
                 raise FileNotFoundError(f"Configured recovery detector not found: {path}")
+            sidecar = path.with_suffix(path.suffix + ".json")
+            if not sidecar.is_file():
+                raise FileNotFoundError(f"RetinaFace artifact requires license/provenance sidecar: {sidecar}")
+            retina_contract = json.loads(sidecar.read_text(encoding="utf-8"))
+            for required in ("license_name", "source_url", "preprocessing_id"):
+                if not isinstance(retina_contract.get(required), str) or not retina_contract[required].strip() or retina_contract[required].lower().startswith("replace"):
+                    raise ValueError(f"RetinaFace sidecar must declare a real {required}")
+            self.recovery_contract = retina_contract
             self.recovery_detector = get_model(str(path), providers=[self._provider])
             self.recovery_detector.prepare(ctx_id=self._ctx_id, det_size=(settings.detect_size, settings.detect_size))
             if "retina" not in type(self.recovery_detector).__name__.lower():
@@ -111,6 +120,10 @@ class VisionEngine:
         self.liveness = (
             OnnxLivenessModel(settings.minifasnet_onnx_path, self._provider)
             if settings.minifasnet_onnx_path.strip() else None
+        )
+        self.fiqa = (
+            OnnxQualityScorer(settings.fiqa_onnx_path, self._provider)
+            if settings.fiqa_onnx_path.strip() else None
         )
 
     @staticmethod
@@ -136,6 +149,7 @@ class VisionEngine:
             "liveness_minifasnet": (
                 f"READY:{self.liveness.model_version}" if self.liveness else "UNCONFIGURED"
             ),
+            "quality_fiqa": f"READY:{self.fiqa.model_version}" if self.fiqa else "UNCONFIGURED",
         }
 
     @staticmethod
@@ -234,6 +248,16 @@ class VisionEngine:
         align_start = time.perf_counter()
         aligned = norm_crop(image, kps, image_size=getattr(self.recognizer, "input_size", (112, 112))[0])
         align_time = (time.perf_counter() - align_start) * 1000.0
+        if self.fiqa is not None:
+            try:
+                fiqa_score = self.fiqa.score(aligned)
+            except Exception as exc:
+                raise VisionError(f"Learned FIQA inference failed: {type(exc).__name__}") from exc
+            measurements.result.fiqa_score = fiqa_score
+            if fiqa_score < self.settings.fiqa_min_quality_score:
+                measurements.result.status = QualityState.DEGRADED
+                measurements.result.route_hint = "DIFFICULT_QUALITY"
+                measurements.result.failure_codes.append("LEARNED_FIQA_LOW_SCORE")
         # Do not run ArcFace on degraded frames. The orchestrator must choose AdaFace
         # (or abstain/recapture when that specialist is unavailable) for this route.
         if measurements.result.status == QualityState.DEGRADED:
