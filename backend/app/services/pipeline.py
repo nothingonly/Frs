@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -340,7 +341,7 @@ class AttendancePipeline:
         if any(not payload or len(payload) > self.settings.max_upload_bytes for payload in image_payloads):
             raise HTTPException(status_code=413, detail="A frame is empty or exceeds the image payload limit.")
 
-        processed: list[tuple[FrameObservation, str, np.ndarray, list[RetrievalCandidate], int]] = []
+        processed: list[tuple[FrameObservation, str, np.ndarray, str, list[RetrievalCandidate], int]] = []
         seen_frame_hashes: set[str] = set()
         for frame_index, payload in enumerate(image_payloads):
             frame_id = f"{session_id}:{frame_index:02d}"
@@ -867,7 +868,7 @@ class AttendancePipeline:
             except (VisionError, ValueError) as exc:
                 evidence["frame_evidence"].append({
                     "frame_index": index,
-                    "frame_sha256": __import__("hashlib").sha256(payload).hexdigest(),
+                    "frame_sha256": hashlib.sha256(payload).hexdigest(),
                     "state": "INFERENCE_ERROR",
                     "error_code": type(exc).__name__,
                 })
@@ -1127,7 +1128,7 @@ class AttendancePipeline:
                     action=action, state="ENROLLMENT_TRANSACTION_FAILED",
                     reasons=["PROFILE_PERSISTENCE_FAILED"], evidence={
                         "pipeline_version": self.vision.pipeline_version,
-                        "employee_id_sha256": __import__("hashlib").sha256(employee_id.encode("utf-8")).hexdigest(),
+                        "employee_id_sha256": hashlib.sha256(employee_id.encode("utf-8")).hexdigest(),
                         "error_type": type(exc).__name__,
                     },
                 )
