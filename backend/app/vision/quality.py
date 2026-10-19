@@ -36,7 +36,7 @@ def _estimate_pose(kps: np.ndarray, width: int, height: int) -> tuple[float, flo
     ], dtype=np.float64)
     distortion = np.zeros((4, 1), dtype=np.float64)
     ok, rotation_vector, _ = cv2.solvePnP(
-        model_points, image_points, camera, distortion, flags=cv2.SOLVEPNP_ITERATIVE
+        model_points, image_points, camera, distortion, flags=cv2.SOLVEPNP_EPNP
     )
     if not ok:
         return None
