@@ -33,7 +33,7 @@ def test_tiny_face_is_routed_to_recapture() -> None:
 
 def test_moderate_low_exposure_routes_to_degraded_specialist() -> None:
     settings = Settings(
-        _env_file=None, env="test", min_face_size_px=30,
+        _env_file=None, env="test", min_face_size_px=32,
         min_laplacian_variance=0.0, min_mean_luminance=35.0,
     )
     image = np.full((160, 160, 3), 25, dtype=np.uint8)
