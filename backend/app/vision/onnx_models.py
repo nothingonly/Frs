@@ -33,14 +33,17 @@ class OnnxTensorModel:
             )
         self.contract: dict[str, Any] = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.kind = kind
-        for required in ("license_name", "source_url", "preprocessing_id", "output_type"):
+        for required in ("license_name", "source_url", "permitted_use", "preprocessing_id", "output_type", "sha256"):
             value = self.contract.get(required)
             if not isinstance(value, str) or not value.strip() or value.lower().startswith("replace"):
                 raise ValueError(f"{kind} sidecar must declare a real {required}")
         self.license_name = self.contract["license_name"]
         self.source_url = self.contract["source_url"]
+        self.permitted_use = self.contract["permitted_use"]
         self.preprocessing_id = self.contract["preprocessing_id"]
         self.sha256 = sha256_file(self.path)
+        if self.contract["sha256"].lower() != self.sha256.lower():
+            raise ValueError(f"{kind} model SHA-256 differs from its sidecar; refusing to run modified weights")
         self.session = ort.InferenceSession(str(self.path), providers=[provider])
         inputs = self.session.get_inputs()
         outputs = self.session.get_outputs()
