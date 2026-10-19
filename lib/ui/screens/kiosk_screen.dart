@@ -86,7 +86,7 @@ class _KioskScreenState extends State<KioskScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Enter administrator passcode to access employee biometric enrollment:',
+              'Enter the administrator API credential issued for this kiosk environment. It is sent only to the configured FRS backend.',
               style: TextStyle(fontSize: 13, color: AppTheme.textSecondary),
             ),
             const SizedBox(height: 16),
@@ -95,7 +95,7 @@ class _KioskScreenState extends State<KioskScreen> {
               obscureText: true,
               autofocus: true,
               decoration: const InputDecoration(
-                labelText: 'Admin Passcode',
+                labelText: 'Administrator API Credential',
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.lock_outline),
               ),
@@ -121,23 +121,26 @@ class _KioskScreenState extends State<KioskScreen> {
 
   void _verifyAdminPassword(String entered, BuildContext dialogContext) {
     Navigator.of(dialogContext).pop();
-    // Verify against pre-shared development key or standard admin pin
-    if (entered == 'admin123' || entered == _config.apiKeySecret) {
-      showDialog(
-        context: context,
-        builder: (ctx) => AdminEnrollmentDialog(
-          config: _config,
-          apiService: _apiService,
-        ),
-      );
-    } else {
+    final credential = entered.trim();
+    if (credential.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Access Denied: Incorrect administrator passcode.'),
+          content: Text('Administrator API credential is required.'),
           backgroundColor: AppTheme.errorRed,
         ),
       );
+      return;
     }
+    // No local hard-coded PIN is accepted. The backend is the authority that
+    // validates this separate administrator credential on the enrollment endpoint.
+    showDialog(
+      context: context,
+      builder: (ctx) => AdminEnrollmentDialog(
+        config: _config,
+        apiService: _apiService,
+        adminApiKey: credential,
+      ),
+    );
   }
 
   @override
@@ -205,8 +208,8 @@ class _KioskScreenState extends State<KioskScreen> {
                     child: Padding(
                       padding: const EdgeInsets.all(20.0),
                       child: CameraViewport(
-                        capturedImage: _state.capturedImage,
-                        onImageCaptured: _state.setCapturedImage,
+                        capturedImages: _state.capturedImages,
+                        onImagesCaptured: _state.setCapturedImages,
                         onRetakePressed: _state.clearCapturedImage,
                         isSubmitting: _state.isSubmitting,
                       ),
@@ -232,8 +235,8 @@ class _KioskScreenState extends State<KioskScreen> {
                     SizedBox(
                       height: 340,
                       child: CameraViewport(
-                        capturedImage: _state.capturedImage,
-                        onImageCaptured: _state.setCapturedImage,
+                        capturedImages: _state.capturedImages,
+                        onImagesCaptured: _state.setCapturedImages,
                         onRetakePressed: _state.clearCapturedImage,
                         isSubmitting: _state.isSubmitting,
                       ),
@@ -326,7 +329,7 @@ class _KioskScreenState extends State<KioskScreen> {
                 )
               : Text(
                   _state.capturedImage == null
-                      ? 'Capture Face to Punch'
+                      ? 'Capture 3 Frames to Punch'
                       : (_state.punchType == PunchType.checkIn
                           ? 'Submit CHECK IN'
                           : 'Submit CHECK OUT'),
