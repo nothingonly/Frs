@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="FRS Biometric Attendance API",
-    version="1.0.0",
+    version="0.1.0-dev",
     description="Modular, evidence-driven FRS V4/V5 backend. Production decisions require calibrated thresholds and configured policy-required models.",
     lifespan=lifespan,
 )
