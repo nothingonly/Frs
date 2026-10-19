@@ -76,7 +76,7 @@ void main() {
       expect(result.similarityScore, 0.84);
       final request = client.lastRequest! as http.MultipartRequest;
       expect(request.url.path, '/api/v1/attendance/verify');
-      expect(request.headers['Authorization'], 'Bearer ' + config.apiKeySecret);
+      expect(request.headers['Authorization'], 'Bearer ${config.apiKeySecret}');
       expect(request.fields['employee_id'], 'EMP100');
       expect(request.files, hasLength(3));
       expect(request.files.every((part) => part.field == 'images'), isTrue);
@@ -117,8 +117,8 @@ void main() {
       expect(result['enrollment_version'], 1);
       final request = client.lastRequest! as http.MultipartRequest;
       expect(request.url.path, '/api/v1/biometrics/enroll/admin');
-      expect(request.headers['Authorization'], 'Bearer ' + adminKey);
-      expect(request.headers['Authorization'], isNot('Bearer ' + config.apiKeySecret));
+      expect(request.headers['Authorization'], 'Bearer $adminKey');
+      expect(request.headers['Authorization'], isNot('Bearer ${config.apiKeySecret}'));
       expect(request.files, hasLength(3));
       expect(request.files.every((part) => part.field == 'images'), isTrue);
     });
