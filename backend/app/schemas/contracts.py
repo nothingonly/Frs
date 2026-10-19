@@ -76,6 +76,7 @@ class QualityResult(BaseModel):
     clipped_pixel_ratio: float
     pose: PoseResult = Field(default_factory=PoseResult)
     alignment_score: float | None = None
+    fiqa_score: float | None = Field(default=None, ge=0.0, le=1.0)
     temporal_stability: float | None = None
     route_hint: str
     latency_ms: float = Field(ge=0.0)
