@@ -52,6 +52,18 @@ class VisionEngine:
         self._provider = settings.model_provider
         self._ctx_id = 0 if self._provider == "CUDAExecutionProvider" else -1
 
+        # Do not allow a library convenience downloader to fetch unreviewed model weights.
+        # Model artifacts must be separately provisioned with a verified license and checksum.
+        pack_dir = root / "models" / settings.model_pack
+        expected_pack_files = ("det_10g.onnx", "w600k_r50.onnx")
+        missing_pack = [name for name in expected_pack_files if not (pack_dir / name).is_file()]
+        if missing_pack:
+            raise FileNotFoundError(
+                f"Real SCRFD/ArcFace weights are missing from {pack_dir}: {', '.join(missing_pack)}. "
+                "Provision properly licensed model artifacts and verify their published checksums; "
+                "the application will not download unreviewed weights automatically."
+            )
+
         try:
             from insightface.app import FaceAnalysis
         except ImportError as exc:
