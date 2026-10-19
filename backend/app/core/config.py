@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     threshold_calibrated: bool = False
     calibrated_models_csv: str = ""
     required_liveness_score: float = Field(default=0.9, ge=0.0, le=1.0)
+    enrollment_min_profile_consistency: float = Field(default=0.45, ge=-1.0, le=1.0)
 
     min_face_size_px: int = Field(default=80, ge=32, le=1000)
     min_laplacian_variance: float = Field(default=25.0, ge=0.0)
