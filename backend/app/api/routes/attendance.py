@@ -80,7 +80,10 @@ async def verify_attendance(
     image: Annotated[UploadFile | None, File()] = None,
 ):
     settings = request.app.state.settings
-    payloads = await _read_burst(images, image, settings.max_upload_bytes, settings.max_request_bytes)
+    payloads = await _read_burst(
+        images, image, settings.max_upload_bytes, settings.max_request_bytes,
+        settings.minimum_identification_frames, settings.maximum_identification_frames,
+    )
     return request.app.state.pipeline.identify(
         db,
         payloads,
