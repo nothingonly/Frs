@@ -1,5 +1,13 @@
 import 'package:intl/intl.dart';
 
+String _requireSuccessfulStatus(Map<String, dynamic> json) {
+  final status = json['status'];
+  if (status is! String || status.toLowerCase() != 'success') {
+    throw const FormatException('Backend response is not an accepted attendance result.');
+  }
+  return status;
+}
+
 /// Typed verification and attendance record response from POST /api/v1/attendance/verify.
 class AttendanceVerificationResult {
   final String status;
@@ -26,7 +34,7 @@ class AttendanceVerificationResult {
 
   factory AttendanceVerificationResult.fromJson(Map<String, dynamic> json) {
     return AttendanceVerificationResult(
-      status: json['status'] as String,
+      status: _requireSuccessfulStatus(json),
       attendanceId: json['attendance_id'] as String,
       userId: json['user_id'] as String,
       employeeId: json['employee_id'] as String,
@@ -80,7 +88,7 @@ class AttendanceIdentificationResult {
 
   factory AttendanceIdentificationResult.fromJson(Map<String, dynamic> json) {
     return AttendanceIdentificationResult(
-      status: json['status'] as String? ?? 'ACCEPTED',
+      status: _requireSuccessfulStatus(json),
       attendanceId: json['attendance_id'] as String,
       userId: json['user_id'] as String,
       employeeId: json['employee_id'] as String,
