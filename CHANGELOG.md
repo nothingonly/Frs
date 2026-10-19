@@ -10,7 +10,7 @@ All notable project changes will be recorded here. This file follows an Unreleas
 - Python backend for real SCRFD/ArcFace inference, policy-driven recognition, roster-scoped retrieval, enrollment, attendance state transitions, audit events and model registry.
 - Explicit model provenance, SHA-256 and ONNX input/output contract validation.
 - Runtime registry state now deactivates superseded versions for model roles that have been reloaded.
-- Refreshed and committed the resolved Flutter dependency lockfile; dependency changes trigger lockfile synchronization.
+- Refreshed and committed the resolved Flutter dependency lockfile. Dependency changes should be resolved with `flutter pub get` and the updated lockfile committed with the code change.
 - Browser-based administration views for roster, attendance, audit and model status.
 - CI workflows for Python and Flutter quality gates.
 - Documentation for backend setup, security, contributions and release readiness.
