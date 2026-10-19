@@ -7,7 +7,6 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.routes.admin import router as admin_router
 from app.api.routes.attendance import router as attendance_router
@@ -22,17 +21,72 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("frs")
 
 
-class RequestSizeMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        length = request.headers.get("content-length")
-        settings = request.app.state.settings
-        if length:
+class RequestSizeMiddleware:
+    """Enforce request-size limits for both Content-Length and streamed/chunked bodies."""
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    async def _send_error(send, status_code: int, detail: str) -> None:
+        import json
+
+        body = json.dumps({"detail": detail}).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+                (b"cache-control", b"no-store"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        settings = scope["app"].state.settings
+        max_body_bytes = settings.max_request_bytes + 1024 * 1024
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        declared_length = headers.get(b"content-length")
+        if declared_length is not None:
             try:
-                if int(length) > settings.max_request_bytes + 1024 * 1024:
-                    return JSONResponse(status_code=413, content={"detail": "Request body exceeds configured limit."})
+                declared_length_value = int(declared_length)
+                if declared_length_value < 0:
+                    raise ValueError
             except ValueError:
-                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header."})
-        return await call_next(request)
+                await self._send_error(send, 400, "Invalid Content-Length header.")
+                return
+            if declared_length_value > max_body_bytes:
+                await self._send_error(send, 413, "Request body exceeds configured limit.")
+                return
+
+        received_bytes = 0
+        request_too_large = False
+
+        async def limited_receive():
+            nonlocal received_bytes, request_too_large
+            if request_too_large:
+                return {"type": "http.disconnect"}
+
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body", b""))
+                if received_bytes > max_body_bytes:
+                    request_too_large = True
+                    await self._send_error(send, 413, "Request body exceeds configured limit.")
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message):
+            # The body-limit response has already been sent; suppress downstream writes.
+            if not request_too_large:
+                await send(message)
+
+        await self.app(scope, limited_receive, guarded_send)
 
 
 def _has_threshold(settings, model_id: str) -> bool:
