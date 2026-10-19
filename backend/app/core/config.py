@@ -100,6 +100,8 @@ class Settings(BaseSettings):
                     "FRS_RETINAFACE_ONNX_PATH": self.retinaface_onnx_path,
                     "FRS_ADAFACE_ONNX_PATH": self.adaface_onnx_path,
                     "FRS_MOBILEFACENET_ONNX_PATH": self.mobilefacenet_onnx_path,
+                    "FRS_MINIFASNET_ONNX_PATH": self.minifasnet_onnx_path,
+                    "FRS_FIQA_ONNX_PATH": self.fiqa_onnx_path,
                 }
                 missing = [name for name, path in required.items() if not path.strip()]
                 if missing:
