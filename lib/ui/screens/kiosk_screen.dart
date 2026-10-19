@@ -29,6 +29,7 @@ class _KioskScreenState extends State<KioskScreen> {
   late AppConfig _config;
   late FrsApiService _apiService;
   late final KioskState _state;
+  bool _kioskCameraActive = true;
 
   @override
   void initState() {
@@ -57,90 +58,87 @@ class _KioskScreenState extends State<KioskScreen> {
     });
   }
 
-  void _openSettings() {
-    showDialog(
-      context: context,
-      builder: (ctx) => SettingsDialog(
-        config: _config,
-        onConfigSaved: _updateConfig,
-        apiService: _apiService,
-      ),
-    );
+  Future<void> _openSettings() async {
+    setState(() => _kioskCameraActive = false);
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => SettingsDialog(
+          config: _config,
+          onConfigSaved: _updateConfig,
+          apiService: _apiService,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _kioskCameraActive = true);
+    }
   }
 
-  /// Administrator authentication gate protecting biometric enrollment.
-  void _authenticateAndOpenAdmin() {
-    final passwordController = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Row(
-          children: [
+  Future<void> _authenticateAndOpenAdmin() async {
+    setState(() => _kioskCameraActive = false);
+    final credentialController = TextEditingController();
+    try {
+      final credential = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Row(children: [
             Icon(Icons.admin_panel_settings, color: AppTheme.primaryBlue),
             SizedBox(width: 10),
             Text('Admin Authentication', style: TextStyle(fontWeight: FontWeight.bold)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+          ]),
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text(
               'Enter the administrator API credential issued for this kiosk environment. It is sent only to the configured FRS backend.',
               style: TextStyle(fontSize: 13, color: AppTheme.textSecondary),
             ),
             const SizedBox(height: 16),
             TextField(
-              controller: passwordController,
+              controller: credentialController,
               obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
               autofocus: true,
               decoration: const InputDecoration(
                 labelText: 'Administrator API Credential',
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.lock_outline),
               ),
-              onSubmitted: (_) {
-                _verifyAdminPassword(passwordController.text.trim(), ctx);
-              },
+              onSubmitted: (_) => Navigator.of(dialogContext).pop(credentialController.text.trim()),
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(credentialController.text.trim()),
+              child: const Text('Continue'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => _verifyAdminPassword(passwordController.text.trim(), ctx),
-            child: const Text('Authenticate'),
-          ),
-        ],
-      ),
-    );
-  }
+      );
 
-  void _verifyAdminPassword(String entered, BuildContext dialogContext) {
-    Navigator.of(dialogContext).pop();
-    final credential = entered.trim();
-    if (credential.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Administrator API credential is required.'),
-          backgroundColor: AppTheme.errorRed,
+      if (!mounted || credential == null) return;
+      if (credential.trim().isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Administrator API credential is required.'),
+            backgroundColor: AppTheme.errorRed,
+          ),
+        );
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AdminEnrollmentDialog(
+          config: _config,
+          apiService: _apiService,
+          adminApiKey: credential.trim(),
         ),
       );
-      return;
+    } finally {
+      credentialController.clear();
+      credentialController.dispose();
+      if (mounted) setState(() => _kioskCameraActive = true);
     }
-    // No local hard-coded PIN is accepted. The backend is the authority that
-    // validates this separate administrator credential on the enrollment endpoint.
-    showDialog(
-      context: context,
-      builder: (ctx) => AdminEnrollmentDialog(
-        config: _config,
-        apiService: _apiService,
-        adminApiKey: credential,
-      ),
-    );
   }
 
   @override
@@ -183,12 +181,12 @@ class _KioskScreenState extends State<KioskScreen> {
           IconButton(
             icon: const Icon(Icons.person_add_alt_1),
             tooltip: 'Administrator Enrollment',
-            onPressed: _authenticateAndOpenAdmin,
+            onPressed: () => _authenticateAndOpenAdmin(),
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Kiosk Settings',
-            onPressed: _openSettings,
+            onPressed: () => _openSettings(),
           ),
         ],
       ),
@@ -210,6 +208,7 @@ class _KioskScreenState extends State<KioskScreen> {
                       child: CameraViewport(
                         capturedImages: _state.capturedImages,
                         onImagesCaptured: _state.setCapturedImages,
+                         isActive: _kioskCameraActive,
                         onRetakePressed: _state.clearCapturedImage,
                         isSubmitting: _state.isSubmitting,
                       ),
@@ -237,6 +236,7 @@ class _KioskScreenState extends State<KioskScreen> {
                       child: CameraViewport(
                         capturedImages: _state.capturedImages,
                         onImagesCaptured: _state.setCapturedImages,
+                         isActive: _kioskCameraActive,
                         onRetakePressed: _state.clearCapturedImage,
                         isSubmitting: _state.isSubmitting,
                       ),
