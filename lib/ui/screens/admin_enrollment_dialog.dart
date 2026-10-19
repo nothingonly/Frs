@@ -68,17 +68,20 @@ class _AdminEnrollmentDialogState extends State<AdminEnrollmentDialog> {
         adminApiKey: widget.adminApiKey,
       );
 
+      if (!mounted) return;
       setState(() {
         _isSubmitting = false;
         _successMessage = 'Employee ${_employeeIdController.text.trim()} enrolled successfully!';
         _qualityMetrics = res['quality_metrics'] as Map<String, dynamic>?;
       });
     } on FrsApiException catch (e) {
+      if (!mounted) return;
       setState(() {
         _isSubmitting = false;
         _errorMessage = e.message;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _isSubmitting = false;
         _errorMessage = 'Enrollment failed: $e';
