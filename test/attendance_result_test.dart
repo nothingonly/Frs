@@ -40,6 +40,36 @@ void main() {
       expect(result.status, 'success');
     });
 
+
+    test('verification and identification reject absent or non-success status', () {
+      expect(
+        () => AttendanceVerificationResult.fromJson({
+          'attendance_id': 'att-1',
+          'user_id': 'person-1',
+          'employee_id': 'EMP-001',
+          'punch_type': 'CHECK_IN',
+          'timestamp': '2026-10-19T10:00:00Z',
+          'similarity_score': 0.99,
+          'threshold': 0.75,
+        }),
+        throwsFormatException,
+      );
+      expect(
+        () => AttendanceIdentificationResult.fromJson({
+          'status': 'UNKNOWN',
+          'attendance_id': 'att-2',
+          'user_id': 'person-2',
+          'employee_id': 'EMP-002',
+          'full_name': 'Example Person',
+          'punch_type': 'CHECK_IN',
+          'timestamp': '2026-10-19T10:00:00Z',
+          'similarity_score': 0.99,
+          'threshold': 0.75,
+        }),
+        throwsFormatException,
+      );
+    });
+
     test('malformed required fields throw instead of creating a false success result', () {
       expect(
         () => AttendanceVerificationResult.fromJson({
