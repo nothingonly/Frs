@@ -33,6 +33,7 @@ class EmbeddingRecord(Base):
 
     embedding_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     person_id: Mapped[str] = mapped_column(ForeignKey("persons.person_id", ondelete="CASCADE"), index=True)
+    enrollment_version: Mapped[int] = mapped_column(Integer, nullable=False)
     recognizer_id: Mapped[str] = mapped_column(String(80), index=True)
     model_version: Mapped[str] = mapped_column(String(120))
     preprocessing_id: Mapped[str] = mapped_column(String(120))
@@ -62,7 +63,7 @@ class AttendanceEvent(Base):
     threshold: Mapped[float] = mapped_column(Float)
     client_device_id: Mapped[str] = mapped_column(String(120))
     pipeline_version: Mapped[str] = mapped_column(String(120))
-    evidence_id: Mapped[str] = mapped_column(String(36), index=True)
+    evidence_id: Mapped[str] = mapped_column(String(36))
 
 
 class AuditEvent(Base):
@@ -77,7 +78,7 @@ class AuditEvent(Base):
     decision_state: Mapped[str] = mapped_column(String(40))
     reason_codes_json: Mapped[str] = mapped_column(Text)
     evidence_json: Mapped[str] = mapped_column(Text)
-    # This entity deliberately stores references and structured non-biometric evidence only.
+    # Store controlled references and non-biometric evidence, never raw images or embeddings.
 
 
 class ModelRegistryEntry(Base):
