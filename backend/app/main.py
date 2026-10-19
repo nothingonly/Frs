@@ -49,7 +49,7 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
     from app.db.entities import ModelRegistryEntry
     from app.vision.onnx_models import sha256_file
 
-    candidates: list[tuple[str, str, str, str, str, dict, dict]] = []
+    candidates: list[tuple[str, str, str, str, str, str, str, dict, dict]] = []
     for model_id, model in (("SCRFD", vision.detector), ("ArcFace", vision.recognizer)):
         path_value = getattr(model, "model_file", None)
         if not path_value or not Path(str(path_value)).is_file():
