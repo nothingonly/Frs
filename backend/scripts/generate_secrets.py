@@ -62,8 +62,10 @@ def main() -> int:
 
     content = generate_environment()
     temp_path = Path(str(DESTINATION) + ".tmp")
+    temp_created = False
     try:
         fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
+        temp_created = True
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(content)
             stream.flush()
@@ -71,7 +73,7 @@ def main() -> int:
         os.replace(temp_path, DESTINATION)
         os.chmod(DESTINATION, stat.S_IRUSR | stat.S_IWUSR)
     finally:
-        if temp_path.exists():
+        if temp_created and temp_path.exists():
             temp_path.unlink()
     print(f"Created {DESTINATION} with restrictive file permissions. Secret values were not displayed.")
     print("Review the non-secret environment settings and provision verified model artifacts before starting.")
