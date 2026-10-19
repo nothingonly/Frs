@@ -24,7 +24,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late final TextEditingController _urlController;
   late final TextEditingController _deviceIdController;
   late final TextEditingController _deviceApiKeyController;
-  bool _allowInsecureDevelopmentHttp = false;
+  late bool _allowInsecureDevelopmentHttp;
   String? _saveError;
   bool _testingConnection = false;
   String? _testResult;
@@ -33,6 +33,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   @override
   void initState() {
     super.initState();
+    _allowInsecureDevelopmentHttp = widget.config.allowInsecureDevelopmentHttp;
     _urlController = TextEditingController(text: widget.config.apiBaseUrl);
     _deviceIdController = TextEditingController(text: widget.config.clientDeviceId);
     _deviceApiKeyController = TextEditingController(text: widget.config.apiKeySecret);
@@ -62,12 +63,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
     try {
       final health = await tempService.checkHealth();
+      if (!mounted) return;
       setState(() {
         _testingConnection = false;
         _testSuccess = true;
         _testResult = 'Connected: Status=${health.status}, DB=${health.database}, Model=${health.modelVersion}';
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _testingConnection = false;
         _testSuccess = false;
