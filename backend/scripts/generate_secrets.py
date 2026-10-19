@@ -54,14 +54,14 @@ def main() -> int:
     if DESTINATION.exists():
         if not args.force:
             parser.error(f"{DESTINATION} already exists; refusing to overwrite secrets. Use --force to rotate them.")
-        backup = DESTINATION.with_suffix(".env.bak")
+        backup = Path(str(DESTINATION) + ".bak")
         if backup.exists():
             parser.error(f"Refusing to overwrite existing backup {backup}; move it securely first.")
         backup.write_bytes(DESTINATION.read_bytes())
         os.chmod(backup, stat.S_IRUSR | stat.S_IWUSR)
 
     content = generate_environment()
-    temp_path = DESTINATION.with_suffix(".env.tmp")
+    temp_path = Path(str(DESTINATION) + ".tmp")
     try:
         fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
