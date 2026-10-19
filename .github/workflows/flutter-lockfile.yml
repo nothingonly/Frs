@@ -41,4 +41,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add pubspec.lock
           git commit -m "chore: refresh Flutter dependency lockfile"
+          # Other concurrent maintenance commits can advance main while pub resolves.
+          # Rebase the generated lock change onto the latest remote before pushing.
+          git pull --rebase origin main
           git push
