@@ -66,8 +66,14 @@ Future<void> main() async {
     apiBaseUrl: 'http://localhost:8000',
     apiKeySecret: 'test_kiosk_secret_key_1234567890',
     clientDeviceId: 'TEST_KIOSK_01',
+    allowInsecureDevelopmentHttp: true,
   );
   final probeBytes = Uint8List.fromList([1, 2, 3, 4, 5]);
+  final probeFrames = <Uint8List>[
+    Uint8List.fromList([1, 2, 3, 4, 5]),
+    Uint8List.fromList([6, 7, 8, 9, 10]),
+    Uint8List.fromList([11, 12, 13, 14, 15]),
+  ];
 
   await test('GET /health parses health status correctly', () async {
     final mockClient = MockHttpClient(
@@ -108,7 +114,7 @@ Future<void> main() async {
     final service = FrsApiService(config: config, client: mockClient);
     final res = await service.verifyAttendance(
       employeeId: 'EMP100',
-      imageBytes: probeBytes,
+      imageFrames: probeFrames,
       punchType: PunchType.checkIn,
     );
 
@@ -136,7 +142,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on BiometricMismatchException catch (e) {
@@ -158,7 +164,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on AuthenticationException catch (e) {
@@ -185,7 +191,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on CooldownException catch (e) {
@@ -208,7 +214,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on BiometricQualityException catch (e) {
@@ -231,7 +237,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on IncompatibleModelVersionException catch (e) {
@@ -252,7 +258,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on InactiveEmployeeException catch (e) {
@@ -273,7 +279,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP999',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on EmployeeNotFoundException catch (e) {
@@ -294,7 +300,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on TemplateNotEnrolledException catch (e) {
@@ -313,7 +319,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: oversizedBytes,
+        imageFrames: <Uint8List>[oversizedBytes, probeFrames[1], probeFrames[2]],
         punchType: PunchType.checkIn,
       );
     } on PayloadTooLargeException catch (e) {
@@ -334,7 +340,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on MultipleFacesDetectedException catch (e) {
@@ -355,7 +361,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on NoFaceDetectedException catch (e) {
@@ -373,7 +379,7 @@ Future<void> main() async {
     try {
       await service.verifyAttendance(
         employeeId: 'EMP100',
-        imageBytes: probeBytes,
+        imageFrames: probeFrames,
         punchType: PunchType.checkIn,
       );
     } on NetworkException catch (e) {
