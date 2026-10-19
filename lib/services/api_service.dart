@@ -211,6 +211,10 @@ class FrsApiService {
     }
 
     if (statusCode == 409) {
+      if (detail is Map<String, dynamic> &&
+          detail['reason_code'] == 'INVALID_ATTENDANCE_TRANSITION') {
+        throw ServerException(detail['message'] as String? ?? 'Attendance transition is not allowed.');
+      }
       if (detail is Map<String, dynamic>) {
         if (detail.containsKey('first_candidate') ||
             (detail['message'] as String? ?? '').toLowerCase().contains('ambiguous')) {
