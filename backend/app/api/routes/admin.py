@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import admin_actor
 from app.database import get_db
-from app.db.entities import AttendanceEvent, AuditEvent, EmbeddingRecord, ModelRegistryEntry, Person
+from app.db.entities import AttendanceEvent, AuditEvent, ModelRegistryEntry, Person
 
 router = APIRouter(prefix="/api/v1/admin", tags=["administration"])
 
