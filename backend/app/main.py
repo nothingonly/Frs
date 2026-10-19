@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -171,6 +171,39 @@ async def unexpected_error_handler(request: Request, exc: Exception):
     logger.exception("Unhandled FRS request error; path=%s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": "Internal processing error. Check server-side diagnostic logs."})
 
+
+
+_ADMIN_HEADERS = {
+    "Cache-Control": "no-store, max-age=0",
+    "Pragma": "no-cache",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; "
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    ),
+}
+
+
+@app.get("/admin", include_in_schema=False)
+def admin_console():
+    page = __import__("pathlib").Path(__file__).parent / "web" / "admin.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="Administrator console assets are not installed.")
+    return FileResponse(page, media_type="text/html; charset=utf-8", headers=_ADMIN_HEADERS)
+
+
+@app.get("/admin.js", include_in_schema=False)
+def admin_script():
+    script = __import__("pathlib").Path(__file__).parent / "web" / "admin.js"
+    if not script.is_file():
+        raise HTTPException(status_code=404, detail="Administrator console script is not installed.")
+    return FileResponse(
+        script,
+        media_type="text/javascript; charset=utf-8",
+        headers={**_ADMIN_HEADERS, "Content-Security-Policy": "default-src 'none'; script-src 'self'; connect-src 'self'"},
+    )
 
 @app.get("/", tags=["health"])
 def root():
