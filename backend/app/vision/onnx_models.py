@@ -33,6 +33,13 @@ class OnnxTensorModel:
             )
         self.contract: dict[str, Any] = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.kind = kind
+        for required in ("license_name", "source_url", "preprocessing_id", "output_type"):
+            value = self.contract.get(required)
+            if not isinstance(value, str) or not value.strip() or value.lower().startswith("replace"):
+                raise ValueError(f"{kind} sidecar must declare a real {required}")
+        self.license_name = self.contract["license_name"]
+        self.source_url = self.contract["source_url"]
+        self.preprocessing_id = self.contract["preprocessing_id"]
         self.sha256 = sha256_file(self.path)
         self.session = ort.InferenceSession(str(self.path), providers=[provider])
         inputs = self.session.get_inputs()
@@ -111,3 +118,26 @@ class OnnxLivenessModel(OnnxTensorModel):
         probs = np.exp(logits)
         probs /= np.sum(probs)
         return float(probs[self.live_class_index])
+
+
+
+class OnnxQualityScorer(OnnxTensorModel):
+    def __init__(self, model_path: str, provider: str):
+        super().__init__(model_path, provider, kind="learned FIQA")
+        if self.contract.get("output_type") != "quality_score":
+            raise ValueError("FIQA sidecar must declare output_type=quality_score")
+        self.model_version = self.sha256[:16]
+        self.activation = str(self.contract.get("score_activation", "none")).lower()
+        if self.activation not in {"none", "sigmoid"}:
+            raise ValueError("FIQA score_activation must be none or sigmoid")
+
+    def score(self, aligned_face_bgr: np.ndarray) -> float:
+        values = self.run(aligned_face_bgr).astype(np.float64)
+        if values.size != 1:
+            raise ValueError("FIQA model must return one scalar quality score")
+        value = float(values[0])
+        if self.activation == "sigmoid":
+            value = 1.0 / (1.0 + np.exp(-np.clip(value, -80.0, 80.0)))
+        if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("FIQA quality score must be finite and in [0, 1]")
+        return value
