@@ -120,7 +120,9 @@ Before a live deployment, complete the [release checklist](RELEASE_CHECKLIST.md)
 
 ## Release status
 
-There is **no production release** at this time. The package version in `pubspec.yaml` is development metadata, not a claim of production readiness. See [RELEASE_NOTES.md](RELEASE_NOTES.md) and [CHANGELOG.md](CHANGELOG.md) for scope and known release blockers.
+**Latest prerelease:** [FRS v0.1.0 Alpha 1](https://github.com/nothingonly/Frs/releases/tag/v0.1.0-alpha.1). It includes an Android **debug APK** for development and integration evaluation, not a production-signed build.
+
+There is **no production release**. Real, properly licensed model artifacts, deployment-specific threshold calibration, liveness/presentation-attack testing, and end-to-end validation on the target hardware remain release gates. See [RELEASE_NOTES.md](RELEASE_NOTES.md), [releases/v0.1.0-alpha.1.md](releases/v0.1.0-alpha.1.md), and [CHANGELOG.md](CHANGELOG.md) for scope and limitations.
 
 ## Security, privacy and licensing
 
