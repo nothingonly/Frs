@@ -26,6 +26,9 @@ class RequestSizeMiddleware:
 
     def __init__(self, app):
         self.app = app
+        # ASGI middleware can execute before Starlette's router adds scope["app"].
+        # Capture the same cached settings object used by the lifespan.
+        self.settings = get_settings()
 
     @staticmethod
     async def _send_error(send, status_code: int, detail: str) -> None:
@@ -48,7 +51,9 @@ class RequestSizeMiddleware:
             await self.app(scope, receive, send)
             return
 
-        settings = scope["app"].state.settings
+        scoped_app = scope.get("app")
+        scoped_state = getattr(scoped_app, "state", None)
+        settings = getattr(scoped_state, "settings", None) or self.settings
         max_body_bytes = settings.max_request_bytes + 1024 * 1024
         headers = {key.lower(): value for key, value in scope.get("headers", [])}
         declared_length = headers.get(b"content-length")
