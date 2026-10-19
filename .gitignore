@@ -64,3 +64,4 @@ app.*.map.json
 /android/*.pfx
 /android/app/*.jks
 /android/app/*.keystore
+/backend/.env.bak
