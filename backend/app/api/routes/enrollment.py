@@ -29,6 +29,16 @@ async def enroll_person(
         raise HTTPException(status_code=422, detail="Multi-frame enrollment evidence is required.")
 
     settings = request.app.state.settings
+    if len(uploads) < settings.minimum_identification_frames:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Enrollment requires at least {settings.minimum_identification_frames} frames.",
+        )
+    if len(uploads) > settings.maximum_identification_frames:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Enrollment accepts at most {settings.maximum_identification_frames} frames.",
+        )
     payloads: list[bytes] = []
     total_bytes = 0
     for part in uploads:
