@@ -806,23 +806,52 @@ class AttendancePipeline:
             for obs in observations:
                 if obs.aligned_face_bgr is None or obs.quality is None:
                     raise RuntimeError("Accepted enrollment frame has no aligned face or quality record")
-                embeddings: list[tuple[str, str, np.ndarray]] = [
-                    ("ArcFace", self.vision.recognizer_version, self.vision.primary_embedding(obs.aligned_face_bgr)),
+
+                # The original aligned face is always retained as the reference.
+                embeddings: list[tuple[str, str, np.ndarray, str]] = [
+                    (
+                        "ArcFace",
+                        self.vision.recognizer_version,
+                        self.vision.primary_embedding(obs.aligned_face_bgr),
+                        _preprocessing_id("ArcFace", self.vision.recognizer_version, ORIGINAL_PREPROCESSING),
+                    ),
                 ]
-                if self.vision.adaface is not None:
-                    vec, _name, ver = self.vision.secondary_embedding("AdaFace", obs.aligned_face_bgr)
-                    embeddings.append(("AdaFace", ver, vec))
-                if self.vision.mobilefacenet is not None:
-                    vec, _name, ver = self.vision.secondary_embedding("MobileFaceNet", obs.aligned_face_bgr)
-                    embeddings.append(("MobileFaceNet", ver, vec))
-                for model_id, version, vector in embeddings:
+
+                # Independent specialists get matching original and conditional-enhancement
+                # enrollment branches. Identification must query the same branch/version,
+                # so score distributions are never mixed across preprocessing transforms.
+                enhanced = conditional_enhance(
+                    obs.aligned_face_bgr, obs.quality.result, force_enhanced_reference=True
+                )
+                for specialist_name, specialist in (
+                    ("AdaFace", self.vision.adaface),
+                    ("MobileFaceNet", self.vision.mobilefacenet),
+                ):
+                    if specialist is None:
+                        continue
+                    original_vector, original_name, original_version = self.vision.secondary_embedding(
+                        specialist_name, obs.aligned_face_bgr
+                    )
+                    embeddings.append((
+                        original_name, original_version, original_vector,
+                        _preprocessing_id(original_name, original_version, ORIGINAL_PREPROCESSING),
+                    ))
+                    enhanced_vector, enhanced_name, enhanced_version = self.vision.secondary_embedding(
+                        specialist_name, enhanced.image_bgr
+                    )
+                    embeddings.append((
+                        enhanced_name, enhanced_version, enhanced_vector,
+                        _preprocessing_id(enhanced_name, enhanced_version, ENHANCED_PREPROCESSING),
+                    ))
+
+                for model_id, version, vector, preprocessing_id in embeddings:
                     ciphertext, nonce = encrypt_embedding(_normalise(vector).astype(np.float32).tobytes(), self.settings)
                     db.add(EmbeddingRecord(
                         person_id=person.person_id,
                         enrollment_version=enrollment_version,
                         recognizer_id=model_id,
                         model_version=version,
-                        preprocessing_id=f"{model_id}:{version}:{PREPROCESSING_VERSION}",
+                        preprocessing_id=preprocessing_id,
                         embedding_dim=int(vector.size),
                         ciphertext=ciphertext,
                         nonce=nonce,
