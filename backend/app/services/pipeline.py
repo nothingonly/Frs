@@ -239,11 +239,11 @@ class AttendancePipeline:
     def _secondary_check(
         self,
         db: Session,
-        observations: list[tuple[FrameObservation, str, np.ndarray, list[RetrievalCandidate], int]],
+        observations: list[tuple[FrameObservation, str, np.ndarray, str, list[RetrievalCandidate], int]],
         primary_person_id: str | None,
         employee_id: str | None,
     ) -> dict[str, Any] | None:
-        primary_models = {model for _obs, model, _emb, _top, _count in observations}
+        primary_models = {model for _obs, model, _emb, _preproc, _top, _count in observations}
         for model_id in self._model_options():
             if model_id in primary_models or not self.settings.is_model_calibrated(model_id):
                 continue
@@ -253,17 +253,20 @@ class AttendancePipeline:
                 continue
             # A secondary result is meaningful only when that same model/version has enrolled templates.
             votes: list[str] = []
-            candidate_scores: list[float] = []
+            evidence_by_frame: list[tuple[str, float, float | None]] = []
             margins: list[float | None] = []
             usable = 0
-            for obs, _route_model, _embedding, _top, _count in observations:
+            version = self._model_version(model_id)
+            for obs, _route_model, _embedding, _preprocessing_id, _top, _count in observations:
                 if obs.aligned_face_bgr is None or obs.quality is None:
                     continue
                 try:
-                    embedding, version = self._embed_for_model(obs, model_id)
+                    crop, preprocessing_id, _branch_info = _choose_preprocessing(obs, model_id, version)
+                    embedding, version = self._embed_for_model(obs, model_id, crop)
+                    preprocessing_id = _preprocessing_id(model_id, version, _branch_info["preprocessing_id"])
                     top, candidate_count, _latency = self._retrieve(
                         db, embedding, recognizer_id=model_id, model_version=version,
-                        employee_id=employee_id,
+                        preprocessing_id=preprocessing_id, employee_id=employee_id,
                     )
                 except (VisionError, RuntimeError, ValueError):
                     continue
@@ -273,17 +276,21 @@ class AttendancePipeline:
                 first = top[0]
                 second = top[1] if len(top) > 1 else None
                 margin = first.similarity - second.similarity if second else None
-                candidate_scores.append(first.similarity)
                 margins.append(margin)
+                evidence_by_frame.append((first.person_id, first.similarity, margin))
                 if first.similarity >= threshold and (margin is None or margin >= self.settings.ambiguity_margin):
                     votes.append(first.person_id)
             if usable < self.settings.minimum_identification_frames or not votes:
                 continue
             winner, count = Counter(votes).most_common(1)[0]
             required_votes = math.ceil(usable * self.settings.temporal_min_vote_fraction)
-            mean_score = float(np.mean(candidate_scores))
-            margin_ok = all(m is None or m >= self.settings.ambiguity_margin for m in margins)
-            if count >= required_votes and mean_score >= threshold and margin_ok:
+            winning_scores = [score for person_id, score, _margin in evidence_by_frame
+                              if person_id == winner and score >= threshold]
+            winning_margins = [margin for person_id, _score, margin in evidence_by_frame
+                               if person_id == winner]
+            mean_score = float(np.mean(winning_scores)) if winning_scores else -1.0
+            margin_ok = all(m is None or m >= self.settings.ambiguity_margin for m in winning_margins)
+            if winner == primary_person_id and count >= required_votes and mean_score >= threshold and margin_ok:
                 return {
                     "model_id": model_id,
                     "person_id": winner,
@@ -406,7 +413,7 @@ class AttendancePipeline:
                 )
             if not top:
                 frame_evidence["retrieval"] = {"recognizer_id": model_id, "candidate_count": candidate_count}
-                processed.append((obs, model_id, embedding, [], candidate_count))
+                processed.append((obs, model_id, embedding, preprocessing_id, [], candidate_count))
                 reasons.append(f"NO_ENROLLED_TEMPLATES_FOR:{model_id}:{version}")
                 continue
 
@@ -424,7 +431,7 @@ class AttendancePipeline:
                 "retrieval_latency_ms": retrieval_latency,
                 "embedding_dimension": int(embedding.size),
             }
-            processed.append((obs, model_id, embedding, top, candidate_count))
+            processed.append((obs, model_id, embedding, preprocessing_id, top, candidate_count))
 
         evidence["reasons"] = reasons
         if len(processed) < self.settings.minimum_identification_frames:
@@ -477,7 +484,7 @@ class AttendancePipeline:
         # Liveness is independent evidence and is required according to the configured policy.
         security_scores: list[float] = []
         if self.settings.require_liveness:
-            for obs, _model_id, _embedding, _top, _count in processed:
+            for obs, _model_id, _embedding, _preprocessing_id, _top, _count in processed:
                 try:
                     security_scores.append(self.vision.liveness_probability(obs))
                 except (VisionError, ValueError) as exc:
@@ -505,10 +512,10 @@ class AttendancePipeline:
                 )
 
         # Evidence is already restricted to calibrated model IDs and their compatible versions.
-        per_frame_winners: list[tuple[str, float, float, float | None, str, Person]] = []
+        per_frame_winners: list[tuple[str, float, float, float | None, str]] = []
         best_unmatched: tuple[float, float] | None = None
         gallery_count = 0
-        for obs, model_id, embedding, top, candidate_count in processed:
+        for obs, model_id, embedding, preprocessing_id, top, candidate_count in processed:
             gallery_count += candidate_count
             if not top:
                 continue
