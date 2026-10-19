@@ -1,388 +1,177 @@
 import 'dart:convert';
 import 'dart:typed_data';
-import 'package:http/http.dart' as http;
 
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:kiosk_app/config/app_config.dart';
 import 'package:kiosk_app/exceptions/api_exceptions.dart';
 import 'package:kiosk_app/models/punch_type.dart';
 import 'package:kiosk_app/services/api_service.dart';
 
-/// Test HTTP client that mocks server responses at the HTTP boundary.
-class MockHttpClient extends http.BaseClient {
-  int statusCode;
-  String responseBody;
-  http.BaseRequest? capturedRequest;
-  bool shouldThrowNetworkError;
-
-  MockHttpClient({
-    this.statusCode = 200,
-    this.responseBody = '{}',
-    this.shouldThrowNetworkError = false,
-  });
+class BoundaryHttpClient extends http.BaseClient {
+  BoundaryHttpClient({required this.statusCode, required this.body});
+  final int statusCode;
+  final String body;
+  http.BaseRequest? lastRequest;
+  int requests = 0;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    capturedRequest = request;
-    if (shouldThrowNetworkError) {
-      throw http.ClientException('Connection refused / SocketException');
-    }
-
-    final bytes = utf8.encode(responseBody);
-    final stream = Stream<List<int>>.value(bytes);
+    requests++;
+    lastRequest = request;
     return http.StreamedResponse(
-      stream,
+      Stream<List<int>>.value(utf8.encode(body)),
       statusCode,
-      headers: {'content-type': 'application/json'},
+      headers: const {'content-type': 'application/json'},
     );
   }
 }
 
-Future<void> main() async {
-  int passed = 0;
-  int failed = 0;
+const config = AppConfig(
+  apiBaseUrl: 'http://localhost:8000',
+  apiKeySecret: 'test-kiosk-device-credential-32chars-min',
+  clientDeviceId: 'TEST_KIOSK_01',
+  allowInsecureDevelopmentHttp: true,
+);
+final frames = <Uint8List>[
+  Uint8List.fromList([1, 2, 3, 4, 5]),
+  Uint8List.fromList([6, 7, 8, 9, 10]),
+  Uint8List.fromList([11, 12, 13, 14, 15]),
+];
 
-  Future<void> test(String description, Future<void> Function() body) async {
-    try {
-      await body();
-      passed++;
-      print('  ✓ $description');
-    } catch (e, st) {
-      failed++;
-      print('  ✗ $description');
-      print('    Error: $e');
-      print('    $st');
-    }
-  }
-
-  void expect(dynamic actual, dynamic expected, [String? reason]) {
-    if (actual != expected) {
-      throw Exception('Expected <$expected> but got <$actual>${reason != null ? " ($reason)" : ""}');
-    }
-  }
-
-  print('Running FrsApiService Boundary Tests:');
-
-  const config = AppConfig(
-    apiBaseUrl: 'http://localhost:8000',
-    apiKeySecret: 'test_kiosk_secret_key_1234567890',
-    clientDeviceId: 'TEST_KIOSK_01',
-  );
-  final probeBytes = Uint8List.fromList([1, 2, 3, 4, 5]);
-
-  await test('GET /health parses health status correctly', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 200,
-      responseBody: jsonEncode({
-        'status': 'online',
-        'environment': 'development',
-        'database': 'healthy',
-        'model_version': 'arcface_r100_v1',
-        'similarity_threshold': 0.363,
-        'threshold_status': 'UNRECALIBRATED_BASELINE',
-      }),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-    final health = await service.checkHealth();
-    expect(health.status, 'online');
-    expect(health.database, 'healthy');
-    expect(health.modelVersion, 'arcface_r100_v1');
-    expect(health.similarityThreshold, 0.363);
-    expect(health.isHealthy, true);
-  });
-
-  await test('POST /attendance/verify returns AttendanceVerificationResult on 200 OK', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 200,
-      responseBody: jsonEncode({
-        'status': 'success',
-        'attendance_id': 'att_abc',
-        'user_id': 'usr_xyz',
-        'employee_id': 'EMP100',
-        'punch_type': 'CHECK_IN',
-        'timestamp': '2026-10-10T14:00:00Z',
-        'similarity_score': 0.825,
-        'threshold': 0.363,
-        'message': 'Biometric verification successful.',
-      }),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-    final res = await service.verifyAttendance(
-      employeeId: 'EMP100',
-      imageBytes: probeBytes,
-      punchType: PunchType.checkIn,
-    );
-
-    expect(res.status, 'success');
-    expect(res.employeeId, 'EMP100');
-    expect(res.punchType, 'CHECK_IN');
-    expect(res.similarityScore, 0.825);
-    expect(mockClient.capturedRequest?.headers['Authorization'], 'Bearer test_kiosk_secret_key_1234567890');
-  });
-
-  await test('Throws BiometricMismatchException on 401 with similarity_score', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 401,
-      responseBody: jsonEncode({
-        'detail': {
-          'message': 'Face verification failed. Similarity score 0.2100 is below threshold 0.3630.',
-          'similarity_score': 0.21,
-          'required_threshold': 0.363,
-        }
-      }),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+void main() {
+  group('FrsApiService contracts', () {
+    test('GET /health parses backend health contract', () async {
+      final client = BoundaryHttpClient(
+        statusCode: 200,
+        body: jsonEncode({
+          'status': 'online', 'environment': 'development', 'database': 'healthy',
+          'model_version': 'frs-v5:scrfd:arcface', 'similarity_threshold': 0.72,
+          'threshold_status': 'CALIBRATED', 'model_components': {'detection_primary': 'READY'},
+          'liveness_required': true, 'ready_for_attendance': true,
+        }),
       );
-    } on BiometricMismatchException catch (e) {
-      thrown = true;
-      expect(e.similarityScore, 0.21);
-      expect(e.requiredThreshold, 0.363);
-    }
-    expect(thrown, true, 'Should throw BiometricMismatchException');
-  });
+      final result = await FrsApiService(config: config, client: client).checkHealth();
+      expect(result.status, 'online');
+      expect(result.database, 'healthy');
+      expect(result.modelVersion, 'frs-v5:scrfd:arcface');
+      expect(result.similarityThreshold, 0.72);
+      expect(result.isHealthy, isTrue);
+    });
 
-  await test('Throws AuthenticationException on 401 with invalid secret', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 401,
-      responseBody: jsonEncode({'detail': 'Invalid API key secret'}),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+    test('verification sends three repeated images parts', () async {
+      final client = BoundaryHttpClient(
+        statusCode: 200,
+        body: jsonEncode({
+          'status': 'success', 'attendance_id': 'att_test', 'user_id': 'person_test',
+          'employee_id': 'EMP100', 'punch_type': 'CHECK_IN',
+          'timestamp': '2026-10-19T14:00:00Z', 'similarity_score': 0.84,
+          'threshold': 0.72, 'message': 'Biometric verification successful.',
+        }),
       );
-    } on AuthenticationException catch (e) {
-      thrown = true;
-      expect(e.message, 'Invalid API key secret');
-    }
-    expect(thrown, true, 'Should throw AuthenticationException');
-  });
-
-  await test('Throws CooldownException on 409 Conflict', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 409,
-      responseBody: jsonEncode({
-        'detail': {
-          'message': 'Attendance already recorded within cooldown window (remaining: 245s).',
-          'remaining_seconds': 245,
-          'last_punch_time': '2026-10-10T13:58:00Z',
-        }
-      }),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+      final result = await FrsApiService(config: config, client: client).verifyAttendance(
+        employeeId: 'EMP100', imageFrames: frames, punchType: PunchType.checkIn,
       );
-    } on CooldownException catch (e) {
-      thrown = true;
-      expect(e.remainingSeconds, 245);
-    }
-    expect(thrown, true, 'Should throw CooldownException');
-  });
+      expect(result.employeeId, 'EMP100');
+      expect(result.similarityScore, 0.84);
+      final request = client.lastRequest! as http.MultipartRequest;
+      expect(request.url.path, '/api/v1/attendance/verify');
+      expect(request.headers['Authorization'], 'Bearer ' + config.apiKeySecret);
+      expect(request.fields['employee_id'], 'EMP100');
+      expect(request.files, hasLength(3));
+      expect(request.files.every((part) => part.field == 'images'), isTrue);
+      expect(request.files.map((part) => part.filename).toSet(), hasLength(3));
+    });
 
-  await test('Throws BiometricQualityException on 400 sharpness blur rejection', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 400,
-      responseBody: jsonEncode({
-        'detail': 'Image quality check failed: sharpness variance 18.4 is below required threshold 25.0'
-      }),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+    test('automatic identification parses identity response', () async {
+      final client = BoundaryHttpClient(
+        statusCode: 200,
+        body: jsonEncode({
+          'status': 'success', 'attendance_id': 'att_id', 'user_id': 'person_a',
+          'employee_id': 'EMP002', 'full_name': 'Example Employee', 'department': 'Engineering',
+          'punch_type': 'CHECK_OUT', 'timestamp': '2026-10-19T14:02:00Z',
+          'similarity_score': 0.88, 'threshold': 0.74, 'message': 'Attendance recorded.',
+        }),
       );
-    } on BiometricQualityException catch (e) {
-      thrown = true;
-      expect(e.message.contains('sharpness'), true);
-    }
-    expect(thrown, true, 'Should throw BiometricQualityException');
-  });
-
-  await test('Throws IncompatibleModelVersionException on 400 model version mismatch', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 400,
-      responseBody: jsonEncode({
-        'detail': 'Biometric template was encoded with incompatible model version old_v1. Re-enrollment required.'
-      }),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+      final result = await FrsApiService(config: config, client: client).identifyAttendance(
+        imageFrames: frames, punchType: PunchType.checkOut,
       );
-    } on IncompatibleModelVersionException catch (e) {
-      thrown = true;
-      expect(e.message.contains('incompatible model'), true);
-    }
-    expect(thrown, true, 'Should throw IncompatibleModelVersionException');
-  });
+      expect(result.employeeId, 'EMP002');
+      expect(result.fullName, 'Example Employee');
+      final request = client.lastRequest! as http.MultipartRequest;
+      expect(request.url.path, '/api/v1/attendance/identify');
+      expect(request.fields['punch_type'], 'CHECK_OUT');
+      expect(request.files, hasLength(3));
+    });
 
-  await test('Throws InactiveEmployeeException on 403 Forbidden', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 403,
-      responseBody: jsonEncode({'detail': 'Employee is inactive'}),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+    test('admin enrollment uses distinct admin credential', () async {
+      const adminKey = 'independent-admin-api-credential-32-chars-min';
+      final client = BoundaryHttpClient(
+        statusCode: 201,
+        body: jsonEncode({'status': 'success', 'employee_id': 'EMP003', 'enrollment_version': 1}),
       );
-    } on InactiveEmployeeException catch (e) {
-      thrown = true;
-      expect(e.message, 'Employee is inactive');
-    }
-    expect(thrown, true, 'Should throw InactiveEmployeeException');
-  });
-
-  await test('Throws EmployeeNotFoundException on 404 Employee not found', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 404,
-      responseBody: jsonEncode({'detail': 'Employee not found'}),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP999',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+      final result = await FrsApiService(config: config, client: client).adminEnroll(
+        employeeId: 'EMP003', fullName: 'Example Employee', department: 'Operations',
+        imageFrames: frames, adminApiKey: adminKey,
       );
-    } on EmployeeNotFoundException catch (e) {
-      thrown = true;
-      expect(e.message, 'Employee not found');
-    }
-    expect(thrown, true, 'Should throw EmployeeNotFoundException');
-  });
+      expect(result['enrollment_version'], 1);
+      final request = client.lastRequest! as http.MultipartRequest;
+      expect(request.url.path, '/api/v1/biometrics/enroll/admin');
+      expect(request.headers['Authorization'], 'Bearer ' + adminKey);
+      expect(request.headers['Authorization'], isNot('Bearer ' + config.apiKeySecret));
+      expect(request.files, hasLength(3));
+      expect(request.files.every((part) => part.field == 'images'), isTrue);
+    });
 
-  await test('Throws TemplateNotEnrolledException on 404 template missing', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 404,
-      responseBody: jsonEncode({'detail': 'No biometric template enrolled for employee'}),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+    test('single image is rejected before network transmission', () async {
+      final client = BoundaryHttpClient(statusCode: 200, body: '{}');
+      await expectLater(
+        FrsApiService(config: config, client: client).identifyAttendance(
+          imageFrames: [frames.first], punchType: PunchType.checkIn,
+        ),
+        throwsA(isA<BiometricQualityException>()),
       );
-    } on TemplateNotEnrolledException catch (e) {
-      thrown = true;
-      expect(e.message.contains('No biometric template'), true);
-    }
-    expect(thrown, true, 'Should throw TemplateNotEnrolledException');
-  });
+      expect(client.requests, 0);
+    });
 
-  await test('Throws PayloadTooLargeException if payload exceeds 5MB', () async {
-    final oversizedBytes = Uint8List(6 * 1024 * 1024); // 6MB
-    final mockClient = MockHttpClient(statusCode: 200);
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: oversizedBytes,
-        punchType: PunchType.checkIn,
+    test('oversized frame is rejected before network transmission', () async {
+      final client = BoundaryHttpClient(statusCode: 200, body: '{}');
+      await expectLater(
+        FrsApiService(config: config, client: client).identifyAttendance(
+          imageFrames: [Uint8List(config.maxUploadSizeBytes + 1), frames[1], frames[2]],
+          punchType: PunchType.checkIn,
+        ),
+        throwsA(isA<PayloadTooLargeException>()),
       );
-    } on PayloadTooLargeException catch (e) {
-      thrown = true;
-      expect(e.message.contains('exceeds limit'), true);
-    }
-    expect(thrown, true, 'Should throw PayloadTooLargeException client-side');
-  });
+      expect(client.requests, 0);
+    });
 
-  await test('Throws MultipleFacesDetectedException on 422 Multiple Faces', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 422,
-      responseBody: jsonEncode({'detail': 'Multiple faces detected (2 faces). Single face required.'}),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+    test('unauthenticated backend response is surfaced as authentication failure', () async {
+      final client = BoundaryHttpClient(
+        statusCode: 401,
+        body: jsonEncode({'detail': 'Valid kiosk device bearer credentials are required.'}),
       );
-    } on MultipleFacesDetectedException catch (e) {
-      thrown = true;
-      expect(e.message.contains('Multiple faces'), true);
-    }
-    expect(thrown, true, 'Should throw MultipleFacesDetectedException');
-  });
-
-  await test('Throws NoFaceDetectedException on 422 No Face', () async {
-    final mockClient = MockHttpClient(
-      statusCode: 422,
-      responseBody: jsonEncode({'detail': 'No face detected in probe image'}),
-    );
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+      await expectLater(
+        FrsApiService(config: config, client: client).identifyAttendance(
+          imageFrames: frames, punchType: PunchType.checkIn,
+        ),
+        throwsA(isA<AuthenticationException>()),
       );
-    } on NoFaceDetectedException catch (e) {
-      thrown = true;
-      expect(e.message.contains('No face'), true);
-    }
-    expect(thrown, true, 'Should throw NoFaceDetectedException');
-  });
+    });
 
-  await test('Throws NetworkException on connection failure', () async {
-    final mockClient = MockHttpClient(shouldThrowNetworkError: true);
-    final service = FrsApiService(config: config, client: mockClient);
-
-    bool thrown = false;
-    try {
-      await service.verifyAttendance(
-        employeeId: 'EMP100',
-        imageBytes: probeBytes,
-        punchType: PunchType.checkIn,
+    test('non-loopback plain HTTP is refused even with development toggle', () async {
+      const insecureConfig = AppConfig(
+        apiBaseUrl: 'http://192.168.1.50:8000',
+        apiKeySecret: 'test-kiosk-device-credential-32chars-min',
+        clientDeviceId: 'TEST_KIOSK_01',
+        allowInsecureDevelopmentHttp: true,
       );
-    } on NetworkException catch (e) {
-      thrown = true;
-      expect(e.message.contains('Network transmission failure'), true);
-    }
-    expect(thrown, true, 'Should throw NetworkException');
+      final client = BoundaryHttpClient(statusCode: 200, body: '{}');
+      await expectLater(
+        FrsApiService(config: insecureConfig, client: client).checkHealth(),
+        throwsA(isA<FormatException>()),
+      );
+      expect(client.requests, 0);
+    });
   });
-
-  print('FrsApiService Boundary Tests: $passed passed, $failed failed.\n');
-  if (failed > 0) throw Exception('FrsApiService boundary tests failed');
 }

@@ -20,6 +20,7 @@ class FrsApiService {
 
   /// Checks server liveness and vision model loading state via GET /health.
   Future<HealthStatus> checkHealth() async {
+    config.validateTransport();
     final uri = Uri.parse('${config.apiBaseUrl}/health');
     try {
       final response = await _client.get(uri);
@@ -35,155 +36,143 @@ class FrsApiService {
     }
   }
 
-  /// Submits probe image and employee ID for 1:1 biometric verification via POST /api/v1/attendance/verify.
+  /// One-to-one verification uses the same real burst/temporal policy as automatic identification.
   Future<AttendanceVerificationResult> verifyAttendance({
     required String employeeId,
-    required Uint8List imageBytes,
+    required List<Uint8List> imageFrames,
     required PunchType punchType,
     String? clientDeviceId,
   }) async {
-    // 1. Client-side sanity check on payload size
-    if (imageBytes.length > config.maxUploadSizeBytes) {
-      throw PayloadTooLargeException(
-        'Captured image (${imageBytes.length} bytes) exceeds limit (${config.maxUploadSizeBytes} bytes).',
-      );
-    }
-
+    config.validateTransport();
+    _requireDeviceCredential();
+    _validateImageBurst(imageFrames);
     final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/verify');
     final request = http.MultipartRequest('POST', uri);
-
-    // 2. Authentication header (Bearer token)
     request.headers['Authorization'] = 'Bearer ${config.apiKeySecret}';
-
-    // 3. Form parameters
     request.fields['employee_id'] = employeeId.trim();
     request.fields['punch_type'] = punchType.value;
-    final deviceId = clientDeviceId ?? config.clientDeviceId;
-    request.fields['client_device_id'] = deviceId;
+    request.fields['client_device_id'] = clientDeviceId ?? config.clientDeviceId;
+    _addImageBurst(request, imageFrames, 'kiosk_verify');
 
-    // 4. Attach image bytes
-    request.files.add(
-      http.MultipartFile.fromBytes(
-        'image',
-        imageBytes,
-        filename: 'kiosk_probe.jpg',
-      ),
-    );
-
-    // 5. Send multipart stream
-    http.StreamedResponse streamedResponse;
-    try {
-      streamedResponse = await _client.send(request);
-    } catch (e) {
-      throw NetworkException('Network transmission failure: $e');
-    }
-
-    // 6. Decode response body
+    final streamedResponse = await _send(request);
     final response = await http.Response.fromStream(streamedResponse);
     final responseBody = _parseJsonBody(response.bodyBytes);
-
-    // 7. Status code dispatch
-    final statusCode = response.statusCode;
-
-    if (statusCode == 200) {
+    if (response.statusCode == 200) {
       return AttendanceVerificationResult.fromJson(responseBody);
     }
-
-    _handleErrorStatus(statusCode, responseBody, response.body);
-    throw ServerException('Unexpected response status $statusCode');
+    _handleErrorStatus(response.statusCode, responseBody, response.body);
+    throw ServerException('Unexpected verification response status ${response.statusCode}');
   }
 
-  /// Submits probe image for automatic 1:N biometric identification via POST /api/v1/attendance/identify.
+  /// Automatic one-to-many identification sends each distinct hardware frame as an images part.
   Future<AttendanceIdentificationResult> identifyAttendance({
-    required Uint8List imageBytes,
+    required List<Uint8List> imageFrames,
     required PunchType punchType,
     String? clientDeviceId,
   }) async {
-    if (imageBytes.length > config.maxUploadSizeBytes) {
-      throw PayloadTooLargeException(
-        'Captured image (${imageBytes.length} bytes) exceeds limit (${config.maxUploadSizeBytes} bytes).',
-      );
-    }
-
+    config.validateTransport();
+    _requireDeviceCredential();
+    _validateImageBurst(imageFrames);
     final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/identify');
     final request = http.MultipartRequest('POST', uri);
-
     request.headers['Authorization'] = 'Bearer ${config.apiKeySecret}';
     request.fields['punch_type'] = punchType.value;
-    final deviceId = clientDeviceId ?? config.clientDeviceId;
-    request.fields['client_device_id'] = deviceId;
+    request.fields['client_device_id'] = clientDeviceId ?? config.clientDeviceId;
+    _addImageBurst(request, imageFrames, 'kiosk_identify');
 
-    request.files.add(
-      http.MultipartFile.fromBytes(
-        'image',
-        imageBytes,
-        filename: 'kiosk_identify_probe.jpg',
-      ),
-    );
-
-    http.StreamedResponse streamedResponse;
-    try {
-      streamedResponse = await _client.send(request);
-    } catch (e) {
-      throw NetworkException('Network transmission failure: $e');
-    }
-
+    final streamedResponse = await _send(request);
     final response = await http.Response.fromStream(streamedResponse);
     final responseBody = _parseJsonBody(response.bodyBytes);
-    final statusCode = response.statusCode;
-
-    if (statusCode == 200) {
+    if (response.statusCode == 200) {
       return AttendanceIdentificationResult.fromJson(responseBody);
     }
-
-    _handleErrorStatus(statusCode, responseBody, response.body);
-    throw ServerException('Unexpected response status $statusCode');
+    _handleErrorStatus(response.statusCode, responseBody, response.body);
+    throw ServerException('Unexpected identification response status ${response.statusCode}');
   }
 
-  /// Admin workflow enrolling or updating an employee profile with facial template.
+  /// Administrator enrollment. The admin credential is supplied explicitly by the
+  /// protected admin gate and is never re-used as the ordinary kiosk device key.
   Future<Map<String, dynamic>> adminEnroll({
     required String employeeId,
     required String fullName,
     String? department,
-    required Uint8List imageBytes,
+    required List<Uint8List> imageFrames,
+    required String adminApiKey,
   }) async {
-    if (imageBytes.length > config.maxUploadSizeBytes) {
-      throw const PayloadTooLargeException('Enrollment image exceeds size limit.');
+    config.validateTransport();
+    if (adminApiKey.trim().isEmpty) {
+      throw const AuthenticationException('Administrator API credential is required for enrollment.');
     }
-
+    _validateImageBurst(imageFrames);
     final uri = Uri.parse('${config.apiBaseUrl}/api/v1/biometrics/enroll/admin');
     final request = http.MultipartRequest('POST', uri);
-
-    request.headers['Authorization'] = 'Bearer ${config.apiKeySecret}';
+    request.headers['Authorization'] = 'Bearer ${adminApiKey.trim()}';
     request.fields['employee_id'] = employeeId.trim();
     request.fields['full_name'] = fullName.trim();
     if (department != null && department.trim().isNotEmpty) {
       request.fields['department'] = department.trim();
     }
+    _addImageBurst(request, imageFrames, 'admin_enroll');
 
-    request.files.add(
-      http.MultipartFile.fromBytes(
-        'image',
-        imageBytes,
-        filename: 'admin_enroll.jpg',
-      ),
-    );
-
-    http.StreamedResponse streamedResponse;
-    try {
-      streamedResponse = await _client.send(request);
-    } catch (e) {
-      throw NetworkException('Network transmission failure: $e');
-    }
-
+    final streamedResponse = await _send(request);
     final response = await http.Response.fromStream(streamedResponse);
     final responseBody = _parseJsonBody(response.bodyBytes);
-    if (response.statusCode == 201) {
-      return responseBody;
-    }
+    if (response.statusCode == 201) return responseBody;
 
     _handleErrorStatus(response.statusCode, responseBody, response.body);
     throw ServerException('Enrollment failed with status ${response.statusCode}');
+  }
+
+  Future<http.StreamedResponse> _send(http.BaseRequest request) async {
+    try {
+      return await _client.send(request);
+    } catch (error) {
+      throw NetworkException('Network transmission failure: $error');
+    }
+  }
+
+  void _requireDeviceCredential() {
+    if (config.apiKeySecret.trim().isEmpty) {
+      throw const AuthenticationException(
+        'Kiosk device credential is missing. Configure it in Settings before submitting attendance.',
+      );
+    }
+  }
+
+  void _validateImageBurst(List<Uint8List> imageFrames) {
+    if (imageFrames.length < 3 || imageFrames.length > 8) {
+      throw const BiometricQualityException(
+        'Capture between three and eight distinct camera frames to submit biometric evidence.',
+      );
+    }
+    if (imageFrames.any((frame) => frame.isEmpty)) {
+      throw const BiometricQualityException('A captured frame is empty. Please recapture.');
+    }
+    if (imageFrames.any((frame) => frame.length > config.maxUploadSizeBytes)) {
+      throw const PayloadTooLargeException(
+        'One or more captured frames exceed the configured upload limit.',
+      );
+    }
+    final totalBytes = imageFrames.fold<int>(0, (total, frame) => total + frame.length);
+    if (totalBytes > config.maxUploadSizeBytes * 8) {
+      throw const PayloadTooLargeException('The capture burst exceeds the total upload limit.');
+    }
+  }
+
+  void _addImageBurst(
+    http.MultipartRequest request,
+    List<Uint8List> imageFrames,
+    String filenamePrefix,
+  ) {
+    for (var index = 0; index < imageFrames.length; index++) {
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'images',
+          imageFrames[index],
+          filename: '${filenamePrefix}_${(index + 1).toString().padLeft(2, '0')}.jpg',
+        ),
+      );
+    }
   }
 
   Map<String, dynamic> _parseJsonBody(Uint8List bodyBytes) {
@@ -222,6 +211,10 @@ class FrsApiService {
     }
 
     if (statusCode == 409) {
+      if (detail is Map<String, dynamic> &&
+          detail['reason_code'] == 'INVALID_ATTENDANCE_TRANSITION') {
+        throw ServerException(detail['message'] as String? ?? 'Attendance transition is not allowed.');
+      }
       if (detail is Map<String, dynamic>) {
         if (detail.containsKey('first_candidate') ||
             (detail['message'] as String? ?? '').toLowerCase().contains('ambiguous')) {

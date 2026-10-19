@@ -16,7 +16,8 @@ android {
 
     defaultConfig {
         applicationId = "com.frs.kiosk_app"
-        minSdk = flutter.minSdkVersion
+        // flutter_secure_storage 10.x requires Android API 23 or newer.
+        minSdk = maxOf(23, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)

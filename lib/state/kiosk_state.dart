@@ -31,7 +31,7 @@ class KioskState {
   KioskStatus _status = KioskStatus.idle;
   String _employeeId = '';
   PunchType _punchType = PunchType.checkIn;
-  Uint8List? _capturedImage;
+  List<Uint8List> _capturedImages = <Uint8List>[];
   bool _isSubmitting = false;
 
   AttendanceVerificationResult? _lastSuccessResult;
@@ -55,7 +55,9 @@ class KioskState {
   KioskStatus get status => _status;
   String get employeeId => _employeeId;
   PunchType get punchType => _punchType;
-  Uint8List? get capturedImage => _capturedImage;
+  Uint8List? get capturedImage => _capturedImages.isEmpty ? null : _capturedImages.first;
+  List<Uint8List> get capturedImages => List<Uint8List>.unmodifiable(_capturedImages);
+  bool get hasUsableBurst => _capturedImages.length >= 3 && _capturedImages.every((frame) => frame.isNotEmpty);
   bool get isSubmitting => _isSubmitting;
   AttendanceVerificationResult? get lastSuccessResult => _lastSuccessResult;
   AttendanceIdentificationResult? get lastIdentificationResult => _lastIdentificationResult;
@@ -73,17 +75,11 @@ class KioskState {
   DateTime? get cooldownLastPunchTime => _cooldownLastPunchTime;
 
   /// For automatic 1:N identification: submission requires only a captured photo.
-  bool get canSubmit =>
-      !_isSubmitting &&
-      _capturedImage != null &&
-      _capturedImage!.isNotEmpty;
+  bool get canSubmit => !_isSubmitting && hasUsableBurst;
 
   /// For optional 1:1 legacy verification: requires both employee ID and photo.
   bool get canSubmit1To1 =>
-      !_isSubmitting &&
-      _employeeId.trim().isNotEmpty &&
-      _capturedImage != null &&
-      _capturedImage!.isNotEmpty;
+      !_isSubmitting && _employeeId.trim().isNotEmpty && hasUsableBurst;
 
   void addListener(void Function() listener) {
     _listeners.add(listener);
@@ -132,14 +128,20 @@ class KioskState {
     notifyListeners();
   }
 
-  void setCapturedImage(Uint8List imageBytes) {
-    _capturedImage = imageBytes;
+  void setCapturedImages(List<Uint8List> imageFrames) {
+    _capturedImages = imageFrames
+        .where((frame) => frame.isNotEmpty)
+        .map((frame) => Uint8List.fromList(frame))
+        .toList(growable: false);
     _updateReadyStatus();
     notifyListeners();
   }
 
+  /// A single legacy image is not sufficient to submit temporal attendance evidence.
+  void setCapturedImage(Uint8List imageBytes) => setCapturedImages([imageBytes]);
+
   void clearCapturedImage() {
-    _capturedImage = null;
+    _capturedImages = <Uint8List>[];
     _updateReadyStatus();
     notifyListeners();
   }
@@ -173,7 +175,7 @@ class KioskState {
 
   void _updateReadyStatus() {
     if (_status == KioskStatus.submitting) return;
-    if (_capturedImage != null) {
+    if (_capturedImages.isNotEmpty) {
       _status = KioskStatus.readyToSubmit;
     } else if (_status != KioskStatus.accepted &&
                _status != KioskStatus.unrecognized &&
@@ -192,9 +194,9 @@ class KioskState {
   Future<void> submitAutomaticIdentification(FrsApiService apiService) async {
     if (_isSubmitting) return;
 
-    if (_capturedImage == null || _capturedImage!.isEmpty) {
+    if (!hasUsableBurst) {
       _status = KioskStatus.idle;
-      _errorMessage = 'Please capture a face photo before submitting.';
+      _errorMessage = 'Capture at least three separate camera frames before submitting.';
       notifyListeners();
       return;
     }
@@ -208,7 +210,7 @@ class KioskState {
 
     try {
       final result = await apiService.identifyAttendance(
-        imageBytes: _capturedImage!,
+        imageFrames: _capturedImages,
         punchType: _punchType,
       );
 
@@ -277,7 +279,7 @@ class KioskState {
       return;
     }
 
-    if (_capturedImage == null || _capturedImage!.isEmpty) {
+    if (!hasUsableBurst) {
       _status = KioskStatus.idle;
       _errorMessage = 'Please capture a face photo before submitting.';
       notifyListeners();
@@ -294,7 +296,7 @@ class KioskState {
     try {
       final result = await apiService.verifyAttendance(
         employeeId: _employeeId.trim(),
-        imageBytes: _capturedImage!,
+        imageFrames: _capturedImages,
         punchType: _punchType,
       );
 
@@ -382,7 +384,7 @@ class KioskState {
     _status = KioskStatus.idle;
     _employeeId = '';
     _punchType = PunchType.checkIn;
-    _capturedImage = null;
+    _capturedImages = <Uint8List>[];
     _isSubmitting = false;
     _lastSuccessResult = null;
     _lastIdentificationResult = null;

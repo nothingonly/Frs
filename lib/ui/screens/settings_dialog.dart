@@ -23,6 +23,9 @@ class SettingsDialog extends StatefulWidget {
 class _SettingsDialogState extends State<SettingsDialog> {
   late final TextEditingController _urlController;
   late final TextEditingController _deviceIdController;
+  late final TextEditingController _deviceApiKeyController;
+  bool _allowInsecureDevelopmentHttp = false;
+  String? _saveError;
   bool _testingConnection = false;
   String? _testResult;
   bool _testSuccess = false;
@@ -32,12 +35,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
     super.initState();
     _urlController = TextEditingController(text: widget.config.apiBaseUrl);
     _deviceIdController = TextEditingController(text: widget.config.clientDeviceId);
+    _deviceApiKeyController = TextEditingController(text: widget.config.apiKeySecret);
   }
 
   @override
   void dispose() {
     _urlController.dispose();
     _deviceIdController.dispose();
+    _deviceApiKeyController.dispose();
     super.dispose();
   }
 
@@ -50,6 +55,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
     final tempConfig = widget.config.copyWith(
       apiBaseUrl: _urlController.text.trim(),
       clientDeviceId: _deviceIdController.text.trim(),
+      apiKeySecret: _deviceApiKeyController.text.trim(),
+      allowInsecureDevelopmentHttp: _allowInsecureDevelopmentHttp,
     );
     final tempService = FrsApiService(config: tempConfig);
 
@@ -69,13 +76,24 @@ class _SettingsDialogState extends State<SettingsDialog> {
     }
   }
 
-  void _save() {
+  Future<void> _save() async {
     final updated = widget.config.copyWith(
       apiBaseUrl: _urlController.text.trim(),
+      apiKeySecret: _deviceApiKeyController.text.trim(),
       clientDeviceId: _deviceIdController.text.trim(),
+      allowInsecureDevelopmentHttp: _allowInsecureDevelopmentHttp,
     );
-    widget.onConfigSaved(updated);
-    Navigator.of(context).pop();
+    try {
+      updated.validateTransport();
+      if (updated.apiKeySecret.trim().isEmpty) {
+        throw const FormatException('The device API credential must be provisioned by the FRS administrator.');
+      }
+      await updated.persistSecureSettings();
+      widget.onConfigSaved(updated);
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) setState(() => _saveError = e.toString());
+    }
   }
 
   @override
@@ -153,6 +171,31 @@ class _SettingsDialogState extends State<SettingsDialog> {
               ),
               const SizedBox(height: 16),
 
+              const Text('Kiosk Device API Credential', style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _deviceApiKeyController,
+                obscureText: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                decoration: InputDecoration(
+                  labelText: 'Device bearer credential',
+                  helperText: 'Stored encrypted by Android secure storage. Provision a separate admin credential for enrollment.',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                  prefixIcon: const Icon(Icons.key_rounded),
+                ),
+              ),
+              const SizedBox(height: 8),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _allowInsecureDevelopmentHttp,
+                onChanged: (value) => setState(() => _allowInsecureDevelopmentHttp = value ?? false),
+                title: const Text('Allow loopback HTTP for local development only'),
+                subtitle: const Text('Disabled by default. Production backend URLs must use HTTPS.'),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+              const SizedBox(height: 12),
+
               // Test Connection button
               Row(
                 children: [
@@ -169,6 +212,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   ),
                 ],
               ),
+              if (_saveError != null) ...[
+                const SizedBox(height: 8),
+                Text(_saveError!, style: const TextStyle(fontSize: 12, color: AppTheme.errorRed)),
+              ],
               if (_testResult != null) ...[
                 const SizedBox(height: 8),
                 Text(

@@ -5,15 +5,15 @@ import '../theme/app_theme.dart';
 
 /// Real Camera Viewport managing physical camera hardware, Android lifecycle, and frame capture.
 class CameraViewport extends StatefulWidget {
-  final Uint8List? capturedImage;
-  final ValueChanged<Uint8List> onImageCaptured;
+  final List<Uint8List>? capturedImages;
+  final ValueChanged<List<Uint8List>> onImagesCaptured;
   final VoidCallback onRetakePressed;
   final bool isSubmitting;
 
   const CameraViewport({
     super.key,
-    required this.capturedImage,
-    required this.onImageCaptured,
+    required this.capturedImages,
+    required this.onImagesCaptured,
     required this.onRetakePressed,
     this.isSubmitting = false,
   });
@@ -29,6 +29,13 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
   bool _isPermissionDenied = false;
   bool _isCapturing = false;
   String? _errorMessage;
+
+  Uint8List? get _previewImage {
+    final frames = widget.capturedImages;
+    return frames != null && frames.isNotEmpty ? frames.first : null;
+  }
+
+  static const int _burstFrameCount = 3;
 
   @override
   void initState() {
@@ -133,27 +140,45 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
 
   Future<void> _capturePhoto() async {
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) {
-      return;
-    }
-    if (_isCapturing || widget.isSubmitting) {
-      return;
-    }
-
+    if (controller == null || !controller.value.isInitialized) return;
+    if (_isCapturing || widget.isSubmitting) return;
     setState(() => _isCapturing = true);
-
+    final capturedFrames = <Uint8List>[];
     try {
-      final XFile photo = await controller.takePicture();
-      final Uint8List bytes = await photo.readAsBytes();
+      // These are distinct hardware exposures over time; never clone an image
+      // to manufacture temporal evidence.
+      for (var frameIndex = 0; frameIndex < _burstFrameCount; frameIndex++) {
+        if (frameIndex > 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 220));
+        }
+        if (!controller.value.isInitialized) {
+          throw StateError('Camera became unavailable during the capture burst.');
+        }
+        final XFile photo = await controller.takePicture();
+        try {
+          final bytes = await photo.readAsBytes();
+          if (bytes.isEmpty) throw StateError('Camera produced an empty frame.');
+          capturedFrames.add(bytes);
+        } finally {
+          try {
+            await photo.delete();
+          } catch (_) {
+            // The camera plugin may remove its temporary file itself.
+          }
+        }
+      }
+      if (capturedFrames.length != _burstFrameCount) {
+        throw StateError('The full $_burstFrameCount-frame capture burst was not completed.');
+      }
       if (mounted) {
-        widget.onImageCaptured(bytes);
+        widget.onImagesCaptured(List<Uint8List>.unmodifiable(capturedFrames));
       }
     } on CameraException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: AppTheme.errorRed,
-            content: Text('Camera capture failed: ${e.description ?? e.code}'),
+            content: Text('Camera burst failed; no frames were submitted: ${e.description ?? e.code}'),
           ),
         );
       }
@@ -162,14 +187,12 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: AppTheme.errorRed,
-            content: Text('Unexpected capture error: $e'),
+            content: Text('Capture burst failed; no frames were submitted: $e'),
           ),
         );
       }
     } finally {
-      if (mounted) {
-        setState(() => _isCapturing = false);
-      }
+      if (mounted) setState(() => _isCapturing = false);
     }
   }
 
@@ -192,9 +215,9 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
         alignment: Alignment.center,
         children: [
           // 1. Live camera preview OR captured photo OR error view
-          if (widget.capturedImage != null)
+          if (_previewImage != null)
             Image.memory(
-              widget.capturedImage!,
+              _previewImage!,
               fit: BoxFit.cover,
               width: double.infinity,
               height: double.infinity,
@@ -235,16 +258,16 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    widget.capturedImage != null
+                    _previewImage != null
                         ? Icons.check_circle_outline
                         : (_isInitialized ? Icons.face_rounded : Icons.camera_alt_outlined),
-                    color: widget.capturedImage != null ? AppTheme.successGreen : Colors.white,
+                    color: _previewImage != null ? AppTheme.successGreen : Colors.white,
                     size: 18,
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    widget.capturedImage != null
-                        ? 'Photo Captured — Ready for Verification'
+                    _previewImage != null
+                        ? '${widget.capturedImages?.length ?? 0} Frames Captured — Ready for Verification'
                         : (_isInitialized
                             ? 'Align Face Inside Oval Reticle'
                             : 'Camera Hardware Status'),
@@ -268,7 +291,7 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (widget.capturedImage != null)
+                  if (_previewImage != null)
                     ElevatedButton.icon(
                       onPressed: widget.isSubmitting ? null : widget.onRetakePressed,
                       style: ElevatedButton.styleFrom(
