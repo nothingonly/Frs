@@ -22,10 +22,10 @@ class CameraViewport extends StatefulWidget {
   });
 
   @override
-  State<CameraViewport> createState() => _CameraViewportState();
+  State<CameraViewport> createState() => CameraViewportState();
 }
 
-class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObserver {
+class CameraViewportState extends State<CameraViewport> with WidgetsBindingObserver {
   CameraController? _controller;
   List<CameraDescription> _availableCameras = [];
   bool _isInitialized = false;
@@ -57,6 +57,10 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
       _pauseCamera();
     }
   }
+
+  /// Public pause hook so a parent can wait for hardware release before opening
+  /// another camera-consuming route.
+  Future<void> pauseCamera() => _pauseCamera();
 
   Future<void> _pauseCamera() async {
     await _disposeController();
@@ -103,7 +107,7 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
         });
       }
     } else if (state == AppLifecycleState.resumed) {
-      _initializeCamera();
+      _resumeCamera();
     }
   }
 
@@ -142,14 +146,18 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
       _controller = controller;
       await controller.initialize();
 
-      if (!mounted) return;
+      if (!mounted || !widget.isActive) {
+        await controller.dispose();
+        if (identical(_controller, controller)) _controller = null;
+        return;
+      }
       setState(() {
         _isInitialized = true;
         _isPermissionDenied = false;
         _errorMessage = null;
       });
     } on CameraException catch (e) {
-      if (!mounted) return;
+      if (!mounted || !widget.isActive) return;
       setState(() {
         _isInitialized = false;
         if (e.code == 'CameraAccessDenied' || e.code == 'CameraAccessDeniedWithoutPrompt') {
@@ -160,7 +168,7 @@ class _CameraViewportState extends State<CameraViewport> with WidgetsBindingObse
         }
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || !widget.isActive) return;
       setState(() {
         _isInitialized = false;
         _errorMessage = 'Failed to initialize camera: $e';
