@@ -9,6 +9,8 @@ All notable project changes will be recorded here. This file follows an Unreleas
 - Separate kiosk-device and administrator bearer credentials, with encrypted secure storage on Android.
 - Python backend for real SCRFD/ArcFace inference, policy-driven recognition, roster-scoped retrieval, enrollment, attendance state transitions, audit events and model registry.
 - Explicit model provenance, SHA-256 and ONNX input/output contract validation.
+- Runtime registry state now deactivates superseded versions for model roles that have been reloaded.
+- Refreshed and committed the resolved Flutter dependency lockfile; dependency changes trigger lockfile synchronization.
 - Browser-based administration views for roster, attendance, audit and model status.
 - CI workflows for Python and Flutter quality gates.
 - Documentation for backend setup, security, contributions and release readiness.
