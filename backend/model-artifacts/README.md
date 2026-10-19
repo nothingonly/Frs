@@ -18,11 +18,29 @@ Production readiness requires actual compatible inference files. The V5 model re
 
 Model artifacts must match this implementation's declared interface. A filename alone does not establish model identity or compatibility.
 
-## Primary model-pack directory
+## Runtime mount layout (Docker Compose)
 
-For FRS_MODEL_PACK=buffalo_l, place the separately licensed and verified det_10g.onnx and w600k_r50.onnx files in:
+Compose mounts `backend/model-artifacts/` read-only at `/models` and configures `FRS_MODEL_ROOT=/models/insightface`. The primary pack must therefore be laid out exactly as:
 
-    <FRS_MODEL_ROOT>/models/buffalo_l/
+    backend/model-artifacts/
+      insightface/
+        models/
+          buffalo_l/
+            det_10g.onnx
+            w600k_r50.onnx
+            manifest.json
+      retinaface.onnx
+      retinaface.onnx.json
+      adaface.onnx
+      adaface.onnx.json
+      mobilefacenet.onnx
+      mobilefacenet.onnx.json
+      minifasnet.onnx
+      minifasnet.onnx.json
+      fiqa.onnx
+      fiqa.onnx.json
+
+For `FRS_MODEL_PACK=buffalo_l`, the primary paths resolve to `<FRS_MODEL_ROOT>/models/buffalo_l/`. The filenames, checksums and manifest records must match the actual artifacts. Specialist paths in `.env` must resolve to the mounted `/models/...` paths. Keep actual model weights out of Git unless the project owner has explicitly reviewed the license and repository storage implications.
 
 The InsightFace Python source package and publicly distributed pretrained weights have different licensing terms. The widely distributed pretrained weights are restricted to non-commercial research absent separate permission. Obtain and document the appropriate rights for actual attendance deployment before setting FRS_MODEL_LICENSE_ATTESTED=true.
 
