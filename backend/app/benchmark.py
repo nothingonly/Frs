@@ -4,7 +4,6 @@ import argparse
 import csv
 import hashlib
 import json
-import math
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -17,11 +16,10 @@ from app.core.config import Settings
 from app.schemas.contracts import QualityState
 from app.services.pipeline import (
     PREPROCESSING_VERSION,
-    _choose_preprocessing,
     _normalise,
     _preprocessing_id,
 )
-from app.vision.engine import VisionEngine, VisionError
+from app.vision.engine import VisionEngine
 from app.vision.enhancement import ENHANCED_PREPROCESSING, ORIGINAL_PREPROCESSING, conditional_enhance
 
 
@@ -224,7 +222,7 @@ def run_benchmark(manifest: Path, model_id: str, target_far: float, output: Path
     for key, vectors in profiles.items():
         dimensions = {vector.size for vector in vectors}
         if len(dimensions) != 1:
-            raise ValueError(f"Inconsistent embedding dimensions for one enrollment profile")
+            raise ValueError("Inconsistent embedding dimensions for one enrollment profile")
         prototypes[key] = _normalise(np.mean(np.stack(vectors), axis=0))
 
     genuine: list[float] = []
