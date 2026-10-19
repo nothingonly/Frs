@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>FRS Administration</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#162236;background:#f2f5f9;font-synthesis:none}
+    *{box-sizing:border-box}body{margin:0}header{background:#102b46;color:#fff;padding:22px max(18px,calc((100vw - 1240px)/2));display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+    h1{font-size:1.3rem;margin:0}header p{margin:4px 0 0;color:#d5e2f0;font-size:.9rem}.chip{background:#dbeafe;color:#174574;border-radius:20px;padding:6px 12px;font-size:.82rem;font-weight:650}
+    main{max-width:1240px;margin:20px auto;padding:0 16px 46px}.notice{padding:12px 15px;border:1px solid #f0c66d;background:#fff8e5;border-radius:10px;margin-bottom:16px;line-height:1.45}
+    .card{background:#fff;border:1px solid #e0e7ef;border-radius:13px;padding:18px;margin-bottom:16px;box-shadow:0 3px 12px #102b460a}.card h2{font-size:1.05rem;margin:0 0 14px;color:#143553}
+    .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px}.span-12{grid-column:span 12}.span-8{grid-column:span 8}.span-6{grid-column:span 6}.span-4{grid-column:span 4}.span-3{grid-column:span 3}
+    label{display:block;font-size:.85rem;font-weight:650;margin-bottom:5px}input,select{width:100%;min-width:0;border:1px solid #c8d3e0;border-radius:8px;padding:10px 11px;background:#fff;color:#162236;font:inherit}
+    input:focus,select:focus,button:focus{outline:3px solid #94c7ff;outline-offset:1px}button{border:0;border-radius:8px;padding:10px 14px;background:#145ea8;color:#fff;font:inherit;font-weight:650;cursor:pointer}button.secondary{background:#e6edf5;color:#173754}button.danger{background:#a32b2b}button:disabled{opacity:.5;cursor:wait}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.muted{color:#5d6b7d;font-size:.88rem}.small{font-size:.8rem}.status{white-space:pre-wrap;padding:10px 12px;border-radius:8px;background:#eef4fa;color:#173754;margin-top:10px;min-height:20px}.status.error{background:#fff0ef;color:#902323}.status.success{background:#e7f8ee;color:#17613a}
+    .video-wrap{background:#0c1b2a;border-radius:10px;overflow:hidden;aspect-ratio:4/3;max-width:560px;display:flex;align-items:center;justify-content:center}.video-wrap video{width:100%;height:100%;object-fit:cover}.frame-list{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.frame-thumb{width:88px;height:66px;object-fit:cover;border:1px solid #c8d3e0;border-radius:6px}
+    .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:.88rem}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #e6ebf1;white-space:nowrap}th{background:#f6f8fb;color:#4c5e72;font-size:.8rem}tbody tr:hover{background:#f8fbff}.badge{display:inline-block;border-radius:20px;padding:3px 8px;background:#e9eef6;color:#263d57;font-size:.76rem}.badge.ok{background:#dff5e8;color:#17613a}.badge.warn{background:#fff0c8;color:#835414}
+    details summary{cursor:pointer;font-weight:650}.hidden{display:none!important}footer{font-size:.8rem;color:#6b7786;text-align:center;padding:10px}
+    @media(max-width:720px){.span-8,.span-6,.span-4,.span-3{grid-column:span 12}header{align-items:flex-start}main{padding:0 10px 32px}.card{padding:14px}}
+  </style>
+</head>
+<body>
+<header>
+  <div><h1>Face Recognition System · Administration</h1><p>Enrollment · Authorized roster · Attendance audit · Model readiness</p></div>
+  <span id="connectionBadge" class="chip">Not authenticated</span>
+</header>
+<main>
+  <div class="notice"><strong>Biometric data notice.</strong> This console sends camera frames to the configured FRS API for recognition or enrollment. Use an authorized, TLS-protected deployment, collect only with appropriate notice/consent and retention controls, and never put API credentials in screenshots or logs. The endpoint does not provide secure TLS by itself; terminate HTTPS at the approved reverse proxy.</div>
+  <section class="card">
+    <h2>Administrator session</h2>
+    <div class="grid">
+      <div class="span-6"><label for="adminKey">Administrator bearer credential</label><input id="adminKey" type="password" autocomplete="current-password" spellcheck="false" placeholder="Issued by the FRS operator"></div>
+      <div class="span-3"><label for="apiBase">API origin</label><input id="apiBase" type="url" value="" placeholder="Current origin is used"></div>
+      <div class="span-3 row" style="align-self:end"><button id="connectBtn">Check health</button><button class="secondary" id="clearKeyBtn">Clear key</button></div>
+    </div>
+    <p class="muted small">The credential is kept only in this page's memory. It is not stored in localStorage or cookies. On an HTTPS deployment, leave API origin blank to use the current origin.</p>
+    <div id="healthStatus" class="status" role="status">No health check has been run.</div>
+  </section>
+
+  <section class="card">
+    <h2>Multi-view employee enrollment</h2>
+    <div class="grid">
+      <div class="span-4"><label for="employeeId">Employee ID</label><input id="employeeId" maxlength="80" autocomplete="off"></div>
+      <div class="span-4"><label for="employeeName">Full name</label><input id="employeeName" maxlength="200" autocomplete="off"></div>
+      <div class="span-4"><label for="department">Department (optional)</label><input id="department" maxlength="160" autocomplete="off"></div>
+      <div class="span-8">
+        <div class="video-wrap"><video id="camera" autoplay muted playsinline></video></div>
+        <div class="row" style="margin-top:10px"><button id="startCameraBtn" class="secondary">Start front camera</button><button id="captureBurstBtn" disabled>Capture 3 separate frames</button><button id="stopCameraBtn" class="secondary" disabled>Stop camera</button></div>
+        <div id="framesList" class="frame-list" aria-label="Captured enrollment frame thumbnails"></div>
+        <p class="muted small">Each frame is captured from a separate video moment. A single image is never copied to fake temporal evidence.</p>
+      </div>
+      <div class="span-4">
+        <h3 style="margin-top:0">Enrollment policy</h3>
+        <p class="muted">The backend performs face detection, deterministic image-quality checks, policy-required liveness, versioned embedding generation and consistency checks. The backend refuses enrollment if the model/runtime policy is not ready.</p>
+        <button id="enrollBtn" disabled>Enroll employee</button>
+        <div id="enrollStatus" class="status" role="status"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between"><h2 style="margin:0">Employee roster</h2><div class="row"><label for="peopleActiveOnly" style="margin:0">Active only</label><select id="peopleActiveOnly" style="width:auto"><option value="true">Active</option><option value="false">Include inactive</option></select><button id="refreshPeopleBtn" class="secondary">Refresh roster</button></div></div>
+    <div id="peopleStatus" class="status" role="status"></div><div class="table-wrap"><table><thead><tr><th>Employee ID</th><th>Name</th><th>Department</th><th>State</th><th>Enrollment version</th><th>Created</th><th>Actions</th></tr></thead><tbody id="peopleBody"></tbody></table></div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between"><h2 style="margin:0">Attendance records</h2><div class="row"><input id="attendanceFilter" style="width:180px" placeholder="Employee ID (optional)"><button id="refreshAttendanceBtn" class="secondary">Refresh attendance</button></div></div>
+    <div id="attendanceStatus" class="status" role="status"></div><div class="table-wrap"><table><thead><tr><th>Timestamp</th><th>Employee ID</th><th>Punch</th><th>Similarity</th><th>Threshold</th><th>Device</th><th>Pipeline</th><th>Audit reference</th></tr></thead><tbody id="attendanceBody"></tbody></table></div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between"><h2 style="margin:0">Model registry and active runtime</h2><button id="refreshModelsBtn" class="secondary">Refresh model status</button></div>
+    <div id="modelsStatus" class="status" role="status"></div><div class="table-wrap"><table><thead><tr><th>Model / component</th><th>Version</th><th>SHA-256</th><th>License</th><th>Preprocessing</th><th>Active</th></tr></thead><tbody id="modelsBody"></tbody></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Decision audit lookup</h2>
+    <div class="row"><input id="auditId" style="flex:1;min-width:260px" placeholder="Audit ID from attendance record"><button id="lookupAuditBtn">Read audit evidence</button></div>
+    <div id="auditStatus" class="status" role="status"></div>
+    <details style="margin-top:10px"><summary>Audit evidence (non-image metadata only)</summary><pre id="auditPayload" style="white-space:pre-wrap;overflow:auto"></pre></details>
+  </section>
+  <footer>FRS V4/V5 · Actual API responses only · Attendance remains disabled until runtime readiness passes</footer>
+</main>
+<script src="/admin.js" defer></script>
+</body>
+</html>
