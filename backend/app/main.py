@@ -102,6 +102,22 @@ def _has_threshold(settings, model_id: str) -> bool:
         return False
 
 
+def _deactivate_stale_model_versions(db, active_versions: dict[str, str]) -> None:
+    """Mark superseded versions inactive for each model role loaded by this runtime."""
+    from app.db.entities import ModelRegistryEntry
+
+    if not active_versions:
+        return
+    rows = (
+        db.query(ModelRegistryEntry)
+        .filter(ModelRegistryEntry.model_id.in_(tuple(active_versions)))
+        .all()
+    )
+    for row in rows:
+        if row.model_version != active_versions[row.model_id]:
+            row.active = False
+
+
 def _register_runtime_models(db, vision: VisionEngine) -> None:
     import json
     from pathlib import Path
@@ -172,6 +188,12 @@ def _register_runtime_models(db, vision: VisionEngine) -> None:
              "color_order": model.color_order, "mean": model.mean, "std": model.std},
             {"task": "face_quality_estimation", "output_type": model.contract.get("output_type")},
         ))
+    # The admin registry's "active" flag must reflect the version actually loaded by
+    # this runtime, not leave older versions active after a model artifact upgrade.
+    _deactivate_stale_model_versions(
+        db,
+        {model_id: version for model_id, version, *_rest in candidates},
+    )
     for model_id, version, path, license_name, source_url, permitted_use, preprocessing_id, input_contract, output_contract in candidates:
         row = db.query(ModelRegistryEntry).filter_by(model_id=model_id, model_version=version).one_or_none()
         if row is None:
