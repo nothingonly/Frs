@@ -1,55 +1,80 @@
+#!/usr/bin/env python3
+"""Create a private backend .env with fresh credentials; never print secret values."""
 from __future__ import annotations
 
 import argparse
 import base64
+import os
 import secrets
+import stat
 from pathlib import Path
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+EXAMPLE = BACKEND_DIR / ".env.example"
+DESTINATION = BACKEND_DIR / ".env"
+
+
+def generate_environment() -> str:
+    example = EXAMPLE.read_text(encoding="utf-8")
+    db_password = secrets.token_urlsafe(32)
+    values = {
+        "POSTGRES_PASSWORD": db_password,
+        "FRS_DATABASE_URL": f"postgresql+psycopg://frs:{db_password}@db:5432/frs",
+        "FRS_DEVICE_API_KEYS": secrets.token_urlsafe(40),
+        "FRS_ADMIN_API_KEY": secrets.token_urlsafe(40),
+        "FRS_DATA_ENCRYPTION_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"),
+    }
+    lines: list[str] = []
+    replaced: set[str] = set()
+    for line in example.splitlines():
+        if not line or line.lstrip().startswith("#") or "=" not in line:
+            lines.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in values:
+            lines.append(f"{key}={values[key]}")
+            replaced.add(key)
+        else:
+            lines.append(line)
+    missing = set(values) - replaced
+    if missing:
+        raise RuntimeError(f".env.example is missing required settings: {', '.join(sorted(missing))}")
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate private FRS backend secrets from .env.example.")
-    parser.add_argument("--force", action="store_true", help="Replace an existing .env file; all previous secrets will change.")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing .env (the old file is preserved as .env.bak)",
+    )
     args = parser.parse_args()
 
-    backend = Path(__file__).resolve().parents[1]
-    template = backend / ".env.example"
-    target = backend / ".env"
-    if target.exists() and not args.force:
-        parser.error(f"{target} already exists. Back it up and use --force only when you intend to rotate every generated secret.")
-    if not template.is_file():
-        parser.error(f"Template not found: {template}")
+    if DESTINATION.exists():
+        if not args.force:
+            parser.error(f"{DESTINATION} already exists; refusing to overwrite secrets. Use --force to rotate them.")
+        backup = DESTINATION.with_suffix(".env.bak")
+        if backup.exists():
+            parser.error(f"Refusing to overwrite existing backup {backup}; move it securely first.")
+        backup.write_bytes(DESTINATION.read_bytes())
+        os.chmod(backup, stat.S_IRUSR | stat.S_IWUSR)
 
-    postgres_password = secrets.token_hex(32)
-    device_key = secrets.token_urlsafe(48)
-    admin_key = secrets.token_urlsafe(48)
-    while secrets.compare_digest(device_key, admin_key):
-        admin_key = secrets.token_urlsafe(48)
-    encryption_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
-
-    content = template.read_text(encoding="utf-8")
-    content = content.replace("POSTGRES_PASSWORD=REPLACE_WITH_RANDOM_POSTGRES_PASSWORD", f"POSTGRES_PASSWORD={postgres_password}")
-    content = content.replace(
-        "FRS_DATABASE_URL=postgresql+psycopg://frs:REPLACE_WITH_RANDOM_POSTGRES_PASSWORD@db:5432/frs",
-        f"FRS_DATABASE_URL=postgresql+psycopg://frs:{postgres_password}@db:5432/frs",
-    )
-    content = content.replace(
-        "FRS_DEVICE_API_KEYS=REPLACE_WITH_RANDOM_DEVICE_KEY_AT_LEAST_32_CHARS",
-        f"FRS_DEVICE_API_KEYS={device_key}",
-    )
-    content = content.replace(
-        "FRS_ADMIN_API_KEY=REPLACE_WITH_DIFFERENT_RANDOM_ADMIN_KEY_AT_LEAST_32_CHARS",
-        f"FRS_ADMIN_API_KEY={admin_key}",
-    )
-    content = content.replace(
-        "FRS_DATA_ENCRYPTION_KEY=REPLACE_WITH_BASE64_URLSAFE_32_RANDOM_BYTES",
-        f"FRS_DATA_ENCRYPTION_KEY={encryption_key}",
-    )
-    target.write_text(content, encoding="utf-8")
-    target.chmod(0o600)
-    print(f"Created {target} with mode 0600.")
-    print("Keep this file private. Do not paste its contents into chat or commit it.")
-    print("Model paths and model licenses must be configured and verified separately.")
-    print("Threshold calibration remains disabled until you run the documented real-data benchmark.")
+    content = generate_environment()
+    temp_path = DESTINATION.with_suffix(".env.tmp")
+    try:
+        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, DESTINATION)
+        os.chmod(DESTINATION, stat.S_IRUSR | stat.S_IWUSR)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+    print(f"Created {DESTINATION} with restrictive file permissions. Secret values were not displayed.")
+    print("Review the non-secret environment settings and provision verified model artifacts before starting.")
     return 0
 
 
