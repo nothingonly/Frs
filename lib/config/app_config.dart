@@ -8,6 +8,7 @@ class AppConfig {
   static const String _baseUrlKey = 'frs.api_base_url';
   static const String _deviceKey = 'frs.device_api_key';
   static const String _deviceIdKey = 'frs.device_id';
+  static const String _allowLoopbackHttpKey = 'frs.allow_loopback_http';
 
   final String apiBaseUrl;
   final String apiKeySecret;
@@ -30,6 +31,7 @@ class AppConfig {
       _secureStorage.read(key: _baseUrlKey),
       _secureStorage.read(key: _deviceKey),
       _secureStorage.read(key: _deviceIdKey),
+      _secureStorage.read(key: _allowLoopbackHttpKey),
     ]);
     return AppConfig(
       apiBaseUrl: values[0]?.trim().isNotEmpty == true
@@ -39,7 +41,7 @@ class AppConfig {
       clientDeviceId: values[2]?.trim().isNotEmpty == true
           ? values[2]!.trim()
           : 'KIOSK_ANDROID_01',
-      allowInsecureDevelopmentHttp: false,
+      allowInsecureDevelopmentHttp: values[3]?.toLowerCase() == 'true',
     );
   }
 
@@ -47,6 +49,10 @@ class AppConfig {
     await _secureStorage.write(key: _baseUrlKey, value: apiBaseUrl.trim());
     await _secureStorage.write(key: _deviceKey, value: apiKeySecret.trim());
     await _secureStorage.write(key: _deviceIdKey, value: clientDeviceId.trim());
+    await _secureStorage.write(
+      key: _allowLoopbackHttpKey,
+      value: allowInsecureDevelopmentHttp.toString(),
+    );
   }
 
   AppConfig copyWith({
