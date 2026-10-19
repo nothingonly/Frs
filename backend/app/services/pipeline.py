@@ -650,6 +650,39 @@ class AttendancePipeline:
                         "remaining_seconds": remaining, "last_punch_time": last_time.isoformat()},
             )
 
+        # Enforce state transitions in addition to duplicate-punch cooldown. CHECK_OUT
+        # requires a previous unclosed CHECK_IN; CHECK_IN cannot be repeated until
+        # the current attendance session has been closed by CHECK_OUT.
+        latest_event = db.execute(
+            select(AttendanceEvent)
+            .where(AttendanceEvent.person_id == person.person_id)
+            .order_by(AttendanceEvent.timestamp.desc())
+            .limit(1)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if punch_type == "CHECK_IN" and latest_event is not None and latest_event.punch_type == "CHECK_IN":
+            self._fail(
+                db, session_id=session_id, actor_type=actor_type, actor_id=actor_id, action=action,
+                state=DecisionState.REVIEW, reasons=["CHECK_IN_ALREADY_OPEN"], evidence=evidence,
+                status_code=409,
+                detail={
+                    "reason_code": "INVALID_ATTENDANCE_TRANSITION",
+                    "message": "A check-in is already open. Record CHECK_OUT before another CHECK_IN.",
+                    "last_punch_time": latest_event.timestamp.isoformat(),
+                },
+            )
+        if punch_type == "CHECK_OUT" and (latest_event is None or latest_event.punch_type != "CHECK_IN"):
+            self._fail(
+                db, session_id=session_id, actor_type=actor_type, actor_id=actor_id, action=action,
+                state=DecisionState.REVIEW, reasons=["CHECK_OUT_WITHOUT_OPEN_CHECK_IN"], evidence=evidence,
+                status_code=409,
+                detail={
+                    "reason_code": "INVALID_ATTENDANCE_TRANSITION",
+                    "message": "No open CHECK_IN was found. Record CHECK_IN before CHECK_OUT.",
+                    "last_punch_type": latest_event.punch_type if latest_event else None,
+                },
+            )
+
         matched_model = secondary_evidence["model_id"] if secondary_evidence else winning_model
         matched_threshold = secondary_evidence["threshold"] if secondary_evidence else self.settings.threshold_for(matched_model)
         matched_score = secondary_evidence["mean_score"] if secondary_evidence else primary_mean
