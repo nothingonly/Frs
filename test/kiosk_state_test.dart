@@ -57,8 +57,17 @@ Future<void> main() async {
 
   print('Running KioskState Tests:');
 
-  const config = AppConfig(apiKeySecret: 'secret');
+  const config = AppConfig(
+    apiBaseUrl: 'http://localhost:8000',
+    apiKeySecret: 'test-kiosk-device-key-that-is-long-enough',
+    allowInsecureDevelopmentHttp: true,
+  );
   final testImage = Uint8List.fromList([10, 20, 30, 40]);
+  final testFrames = <Uint8List>[
+    Uint8List.fromList([10, 20, 30, 40]),
+    Uint8List.fromList([40, 30, 20, 10]),
+    Uint8List.fromList([12, 22, 32, 42]),
+  ];
 
   await test('Initial state is idle and cannot submit', () async {
     final state = KioskState();
@@ -85,12 +94,15 @@ Future<void> main() async {
     final state = KioskState();
     expect(state.canSubmit, false);
 
-    // Kiosk user captures photo WITHOUT entering any employee ID
+    // A single frame is not temporal evidence and must never be submitted.
     state.setCapturedImage(testImage);
-    expect(state.canSubmit, true, 'User must be able to submit with face image only');
+    expect(state.canSubmit, false);
+
+    // Kiosk captures three distinct camera exposures WITHOUT entering an employee ID.
+    state.setCapturedImages(testFrames);
+    expect(state.canSubmit, true, '1:N requires three actual frames, not an employee ID');
     expect(state.status, KioskStatus.readyToSubmit);
 
-    // Clear photo disables submit
     state.clearCapturedImage();
     expect(state.canSubmit, false);
   });
@@ -99,7 +111,7 @@ Future<void> main() async {
     final state = KioskState();
     expect(state.canSubmit1To1, false);
 
-    state.setCapturedImage(testImage);
+    state.setCapturedImages(testFrames);
     expect(state.canSubmit1To1, false);
 
     state.setEmployeeId('EMP001');
@@ -127,7 +139,7 @@ Future<void> main() async {
     final service = FrsApiService(config: config, client: mockClient);
 
     final state = KioskState();
-    state.setCapturedImage(testImage);
+    state.setCapturedImages(testFrames);
 
     // Launch first 1:N identification (takes 100ms)
     final future1 = state.submitAutomaticIdentification(service);
@@ -163,7 +175,7 @@ Future<void> main() async {
     final service = FrsApiService(config: config, client: mockClient);
 
     final state = KioskState();
-    state.setCapturedImage(testImage);
+    state.setCapturedImages(testFrames);
 
     await state.submitAutomaticIdentification(service);
 
@@ -189,7 +201,7 @@ Future<void> main() async {
     final service = FrsApiService(config: config, client: mockClient);
 
     final state = KioskState();
-    state.setCapturedImage(testImage);
+    state.setCapturedImages(testFrames);
 
     await state.submitAutomaticIdentification(service);
 
@@ -214,7 +226,7 @@ Future<void> main() async {
     final service = FrsApiService(config: config, client: mockClient);
 
     final state = KioskState();
-    state.setCapturedImage(testImage);
+    state.setCapturedImages(testFrames);
 
     await state.submitAutomaticIdentification(service);
 
@@ -226,7 +238,7 @@ Future<void> main() async {
 
   await test('Reset restores all fields back to idle', () async {
     final state = KioskState();
-    state.setCapturedImage(testImage);
+    state.setCapturedImages(testFrames);
     state.setPunchType(PunchType.checkOut);
 
     state.reset();
