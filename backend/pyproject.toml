@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "frs-backend"
-version = "1.0.0"
+version = "0.1.0.dev0"
 description = "Modular face-recognition attendance backend following FRS V4/V5"
 requires-python = ">=3.11,<3.13"
 dependencies = [
