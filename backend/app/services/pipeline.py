@@ -22,10 +22,38 @@ from app.schemas.contracts import (
 )
 from app.security import decrypt_embedding, encrypt_embedding
 from app.vision.engine import FrameObservation, VisionEngine, VisionError
+from app.vision.enhancement import ENHANCED_PREPROCESSING, ORIGINAL_PREPROCESSING, conditional_enhance
 from app.schemas.contracts import DetectionState, QualityState
 
 
 PREPROCESSING_VERSION = "five-point-norm-crop-112-v1"
+
+
+def _preprocessing_id(model_id: str, model_version: str, branch: str) -> str:
+    return f"{model_id}:{model_version}:{PREPROCESSING_VERSION}:{branch}"
+
+
+def _choose_preprocessing(obs: FrameObservation, model_id: str, model_version: str) -> tuple[np.ndarray, str, dict[str, Any]]:
+    if obs.aligned_face_bgr is None or obs.quality is None:
+        raise VisionError("Aligned crop and quality evidence are required before recognition")
+    # Keep the primary baseline on the original aligned crop. Only route an exposure
+    # problem through enhancement when a calibrated non-primary specialist is selected.
+    use_enhancement = model_id != "ArcFace" and any(
+        code in obs.quality.result.failure_codes for code in ("UNDEREXPOSED", "OVEREXPOSED")
+    )
+    if use_enhancement:
+        route = conditional_enhance(obs.aligned_face_bgr, obs.quality.result)
+        if route.applied:
+            return route.image_bgr, _preprocessing_id(model_id, model_version, route.preprocessing_id), {
+                "preprocessing_id": route.preprocessing_id,
+                "enhancement_applied": True,
+                "enhancement_reason": route.reason,
+            }
+    return obs.aligned_face_bgr, _preprocessing_id(model_id, model_version, ORIGINAL_PREPROCESSING), {
+        "preprocessing_id": ORIGINAL_PREPROCESSING,
+        "enhancement_applied": False,
+        "enhancement_reason": "REFERENCE_BRANCH",
+    }
 
 
 def _utcnow() -> datetime:
@@ -114,6 +142,7 @@ class AttendancePipeline:
         *,
         recognizer_id: str,
         model_version: str,
+        preprocessing_id: str,
         employee_id: str | None,
     ) -> tuple[list[tuple[Person, np.ndarray]], int]:
         statement = (
@@ -123,6 +152,7 @@ class AttendancePipeline:
                 EmbeddingRecord.accepted.is_(True),
                 EmbeddingRecord.recognizer_id == recognizer_id,
                 EmbeddingRecord.model_version == model_version,
+                EmbeddingRecord.preprocessing_id == preprocessing_id,
                 EmbeddingRecord.enrollment_version == Person.enrollment_version,
                 Person.is_active.is_(True),
             )
@@ -156,11 +186,13 @@ class AttendancePipeline:
         *,
         recognizer_id: str,
         model_version: str,
+        preprocessing_id: str,
         employee_id: str | None = None,
     ) -> tuple[list[RetrievalCandidate], int, float]:
         started = time.perf_counter()
         profiles, row_count = self._read_gallery(
-            db, recognizer_id=recognizer_id, model_version=model_version, employee_id=employee_id,
+            db, recognizer_id=recognizer_id, model_version=model_version,
+            preprocessing_id=preprocessing_id, employee_id=employee_id,
         )
         query_vector = _normalise(query)
         scored: list[RetrievalCandidate] = []
@@ -175,12 +207,24 @@ class AttendancePipeline:
         scored.sort(key=lambda item: item.similarity, reverse=True)
         return scored[: self.settings.recognition_top_k], len(profiles), (time.perf_counter() - started) * 1000.0
 
-    def _embed_for_model(self, obs: FrameObservation, model_id: str) -> tuple[np.ndarray, str]:
-        if obs.aligned_face_bgr is None:
+    def _model_version(self, model_id: str) -> str:
+        if model_id == "ArcFace":
+            return self.vision.recognizer_version
+        if model_id == "AdaFace" and self.vision.adaface is not None:
+            return self.vision.adaface.model_version
+        if model_id == "MobileFaceNet" and self.vision.mobilefacenet is not None:
+            return self.vision.mobilefacenet.model_version
+        raise VisionError(f"Recognizer {model_id} is not configured")
+
+    def _embed_for_model(
+        self, obs: FrameObservation, model_id: str, image_bgr: np.ndarray | None = None
+    ) -> tuple[np.ndarray, str]:
+        crop = image_bgr if image_bgr is not None else obs.aligned_face_bgr
+        if crop is None:
             raise VisionError("Aligned face crop is unavailable")
         if model_id == "ArcFace":
-            return self.vision.primary_embedding(obs.aligned_face_bgr), self.vision.recognizer_version
-        embedding, _name, version = self.vision.secondary_embedding(model_id, obs.aligned_face_bgr)
+            return self.vision.primary_embedding(crop), self.vision.recognizer_version
+        embedding, _name, version = self.vision.secondary_embedding(model_id, crop)
         return embedding, version
 
     def _model_options(self) -> list[str]:
