@@ -24,6 +24,13 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def as_utc(value: datetime) -> datetime:
+    """Normalize SQLite's naive DateTime readback and Postgres-aware timestamps."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def pack_capture_frames(frames: list[bytes]) -> bytes:
     if not frames or len(frames) > 16:
         raise ValueError("Capture payload must contain between 1 and 16 frames.")
@@ -84,7 +91,7 @@ def _recover_stale_jobs(db: Session, now: datetime) -> None:
         CaptureBatchJob.updated_at < cutoff,
     )).scalars().all()
     for job in rows:
-        if job.attempts < job.max_attempts and job.payload_expires_at > now and job.encrypted_payload:
+        if job.attempts < job.max_attempts and as_utc(job.payload_expires_at) > now and job.encrypted_payload:
             job.status = "QUEUED"
             job.next_attempt_at = now
             job.started_at = None
@@ -141,7 +148,7 @@ def _finish_failure(db: Session, job: CaptureBatchJob, status_code: int, detail,
     if job.status != "PROCESSING":
         db.rollback()
         return
-    retryable = status_code >= 500 and job.attempts < job.max_attempts and job.payload_expires_at > now
+    retryable = status_code >= 500 and job.attempts < job.max_attempts and as_utc(job.payload_expires_at) > now
     job.error_json = json.dumps({"status_code": status_code, "detail": detail}, default=str)
     job.updated_at = now
     if retryable:
@@ -165,7 +172,7 @@ def process_claimed_capture_batch(batch_id: str, pipeline) -> None:
             if job is None or job.status != "PROCESSING":
                 return
             now = utcnow()
-            if job.payload_expires_at <= now or not job.encrypted_payload or not job.payload_nonce:
+            if as_utc(job.payload_expires_at) <= now or not job.encrypted_payload or not job.payload_nonce:
                 _finish_failure(db, job, 410, "Encrypted capture is unavailable or expired.", now)
                 return
             claimed_attempt = job.attempts
