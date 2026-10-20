@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -69,6 +68,13 @@ class AttendanceSessionCreate(StrictPayload):
     subject_code: str | None = Field(default=None, max_length=40)
     starts_at: datetime | None = None
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("starts_at")
+    @classmethod
+    def require_timezone_for_explicit_start(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("starts_at must include a timezone offset")
+        return value
 
     @field_validator("subject_code")
     @classmethod
