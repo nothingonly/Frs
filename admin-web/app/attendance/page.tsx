@@ -40,7 +40,7 @@ export default function AttendancePage() {
       {error ? <div className="notice notice-error" role="alert"><strong>Request failed</strong><span>{error}</span></div> : null}
       <section className="panel table-panel">
         <div className="table-toolbar"><div><h3>Recorded events</h3><p>{events.length} loaded · latest response capped at 100</p></div><label className="search-field"><span>Search</span><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Person, punch or device" /></label></div>
-        <div className="table-wrap"><table><thead><tr><th>Person / ID</th><th>Event</th><th>Timestamp</th><th>Similarity</th><th>Threshold</th><th>Device</th></tr></thead><tbody>
+        <div className="table-wrap"><table><thead><tr><th>Person / ID</th><th>Event</th><th>Timestamp</th><th>Similarity</th><th>Threshold</th><th>Device</th><th>Session</th></tr></thead><tbody>
           {visibleEvents.map((event) => <tr key={event.attendance_id}>
             <td><strong>{event.employee_id}</strong><small className="cell-subtext">{event.attendance_id.slice(0, 8)}</small></td>
             <td><span className="event-pill">{event.punch_type}</span></td>
@@ -49,7 +49,7 @@ export default function AttendancePage() {
             <td className="numeric-cell">{Number(event.threshold).toFixed(4)}</td>
             <td>{event.client_device_id}</td>
           </tr>)}
-          {visibleEvents.length === 0 ? <tr><td colSpan={6}><div className="empty-state"><strong>{loading ? "Loading attendance…" : filter ? "No matching events" : "No attendance events to display"}</strong><span>{isConnected ? "The backend returned no matching attendance events." : "Connect to the admin API to load real records."}</span></div></td></tr> : null}
+          {visibleEvents.length === 0 ? <tr><td colSpan={7}><div className="empty-state"><strong>{loading ? "Loading attendance…" : filter ? "No matching events" : "No attendance events to display"}</strong><span>{isConnected ? "The backend returned no matching attendance events." : "Connect to the admin API to load real records."}</span></div></td></tr> : null}
         </tbody></table></div>
       </section>
       <p className="compliance-note">This page shows attendance events already persisted by the backend. It does not calculate or fabricate new attendance decisions.</p>

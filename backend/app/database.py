@@ -51,9 +51,29 @@ def _upgrade_model_registry_provenance(target_engine) -> None:
             )
 
 
+def _upgrade_attendance_session_link(target_engine) -> None:
+    """Add the optional session foreign key to databases created by earlier FRS builds."""
+    inspector = inspect(target_engine)
+    if not inspector.has_table("attendance_events") or not inspector.has_table("attendance_sessions"):
+        return
+    existing = {column["name"] for column in inspector.get_columns("attendance_events")}
+    if "attendance_session_id" in existing:
+        return
+    with target_engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE attendance_events ADD COLUMN attendance_session_id VARCHAR(36) "
+            "REFERENCES attendance_sessions(session_id) ON DELETE SET NULL"
+        ))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_attendance_events_attendance_session_id "
+            "ON attendance_events (attendance_session_id)"
+        ))
+
+
 def create_schema() -> None:
     # Import models before create_all so every mapped entity is registered.
     from app.db import entities  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _upgrade_model_registry_provenance(engine)
+    _upgrade_attendance_session_link(engine)

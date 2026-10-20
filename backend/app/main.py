@@ -11,6 +11,7 @@ from sqlalchemy import text
 from app.api.routes.admin import router as admin_router
 from app.api.routes.attendance import router as attendance_router
 from app.api.routes.enrollment import router as enrollment_router
+from app.api.routes.college import router as college_router
 from app.core.config import get_settings
 from app.database import SessionLocal, create_schema, engine
 from app.schemas.contracts import HealthResponse
@@ -259,6 +260,7 @@ app.add_middleware(
 app.include_router(attendance_router)
 app.include_router(enrollment_router)
 app.include_router(admin_router)
+app.include_router(college_router)
 
 
 @app.exception_handler(Exception)
