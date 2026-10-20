@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -15,6 +16,7 @@ from app.api.routes.college import router as college_router
 from app.core.config import get_settings
 from app.database import SessionLocal, create_schema, engine
 from app.schemas.contracts import HealthResponse
+from app.services.capture_batches import run_capture_batch_worker
 from app.services.pipeline import AttendancePipeline
 from app.vision.engine import VisionEngine
 
@@ -239,8 +241,17 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         _register_runtime_models(db, vision)
     logger.info("FRS model components loaded: %s", vision.component_status)
-    yield
-    engine.dispose()
+    capture_worker = asyncio.create_task(run_capture_batch_worker(app.state.pipeline))
+    app.state.capture_worker_task = capture_worker
+    try:
+        yield
+    finally:
+        capture_worker.cancel()
+        try:
+            await capture_worker
+        except asyncio.CancelledError:
+            pass
+        engine.dispose()
 
 
 app = FastAPI(
