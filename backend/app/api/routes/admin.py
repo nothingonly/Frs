@@ -208,7 +208,10 @@ def retry_capture_batch(
     if job.status != "FAILED":
         raise HTTPException(status_code=409, detail="Only failed capture batches can be retried.")
     now = datetime.now(timezone.utc)
-    if not job.encrypted_payload or not job.payload_nonce or job.payload_expires_at <= now:
+    payload_expires_at = job.payload_expires_at
+    if payload_expires_at.tzinfo is None:
+        payload_expires_at = payload_expires_at.replace(tzinfo=timezone.utc)
+    if not job.encrypted_payload or not job.payload_nonce or payload_expires_at <= now:
         raise HTTPException(status_code=410, detail="Encrypted payload is missing or expired; capture a fresh batch.")
     attendance_session = db.get(AttendanceSession, job.attendance_session_id)
     if attendance_session is None or attendance_session.status != "OPEN":
