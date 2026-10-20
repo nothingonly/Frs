@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -333,8 +333,8 @@ def list_attendance_sessions(
 
 @router.post("/attendance-sessions", status_code=201)
 def create_attendance_session(
-    payload: AttendanceSessionCreate, actor: Annotated[str, Depends(admin_actor)],
-    db: Annotated[Session, Depends(get_db)],
+    payload: AttendanceSessionCreate, response: Response,
+    actor: Annotated[str, Depends(admin_actor)], db: Annotated[Session, Depends(get_db)],
 ):
     group = db.get(ClassGroup, payload.class_group_id)
     if group is None or not group.is_active:
@@ -347,8 +347,13 @@ def create_attendance_session(
             AttendanceSession.idempotency_key == payload.idempotency_key
         )).scalar_one_or_none()
         if existing:
-            if existing.class_group_id != payload.class_group_id:
-                raise HTTPException(status_code=409, detail="Idempotency key belongs to a different class group.")
+            if (
+                existing.class_group_id != payload.class_group_id
+                or existing.subject_name != payload.subject_name.strip()
+                or existing.subject_code != payload.subject_code
+            ):
+                raise HTTPException(status_code=409, detail="Idempotency key was reused with a different session payload.")
+            response.status_code = 200
             return {**_session(existing), "idempotent_replay": True}
 
     row = AttendanceSession(
