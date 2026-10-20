@@ -29,7 +29,7 @@ RLS on its own is not a complete authorization design. Review grants, database r
 - `attendance_sessions`: a class-specific subject attendance event with open/closed state and optional idempotency key.
 - `attendance_events.attendance_session_id`: optional reference for new class-scoped attendance; old events remain unassigned.
 
-Creating a student through `POST /api/v1/admin/college/students` creates or links a `persons` identity record but does not make an embedding. Existing biometric enrollment remains a separate operation. The session-aware kiosk queue invokes the configured recognition pipeline with the selected session and class group. The gallery is filtered to active students with active enrollments in that class, and accepted attendance events retain the session ID. Legacy identify/verify endpoints remain for existing non-session clients; new college kiosk deployments should use the session batch endpoint.
+Creating a student through `POST /api/v1/admin/college/students` creates or links a `persons` identity record but does not make an embedding. Existing biometric enrollment remains a separate operation. The session-aware kiosk queue invokes the configured recognition pipeline with the selected session and class group. The gallery is filtered to active students with active enrollments in that class, and accepted attendance events retain the session ID. Legacy `/identify` and `/verify` endpoints remain for development compatibility, but are rejected when `FRS_ENV=production`; production attendance must use the session batch endpoint.
 
 ## API endpoints
 
