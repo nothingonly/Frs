@@ -118,6 +118,20 @@ GitHub Actions checks Python compilation, lint and tests, and runs Flutter analy
 
 Before a live deployment, complete the [release checklist](RELEASE_CHECKLIST.md): provision lawful model assets; calibrate model-specific thresholds on separated enrollment/known/unknown data; measure false-accept and false-reject rates; test attack-specific liveness performance; validate migrations, backups, retention and access controls; then run an end-to-end test on the target Android device and server.
 
+## Next.js admin console (Sprint 1)
+
+A Next.js App Router admin console now lives in `admin-web/`. The root pnpm workspace provides the requested development command:
+
+```bash
+pnpm install
+cp admin-web/.env.example admin-web/.env.local
+pnpm dev
+```
+
+Open `http://localhost:3000`, set the FastAPI base URL and enter the existing administrator bearer key in the sidebar. The console reads live backend health, people, attendance and model-registry data. The key remains in browser memory and is not configured as a `NEXT_PUBLIC_*` variable. For local browser-to-API requests, allow `http://localhost:3000` in `FRS_ALLOWED_ORIGINS`.
+
+This is a development foundation, not a production admin portal. Institutional login/roles, college class/section tables, Supabase integration, Cloudinary integration and a durable batch queue have not been implemented yet. Do not expose the console publicly before authentication and authorization are strengthened.
+
 ## Release status
 
 **Latest prerelease:** [FRS v0.1.0 Alpha 1](https://github.com/nothingonly/Frs/releases/tag/v0.1.0-alpha.1). It includes an Android **debug APK** for development and integration evaluation, not a production-signed build.
