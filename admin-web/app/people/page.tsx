@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint react-hooks/set-state-in-effect: off -- These effects initiate external HTTP reads; state changes occur in async response/error handlers. */
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAdmin, type ListPayload, type PersonRecord } from "@/components/admin-provider";
 
