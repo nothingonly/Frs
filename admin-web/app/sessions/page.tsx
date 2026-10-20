@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint react-hooks/set-state-in-effect: off -- The effect initiates an external HTTP read; state updates occur in async response handlers. */
+
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { useAdmin } from "@/components/admin-provider";
 
