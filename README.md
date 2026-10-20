@@ -130,7 +130,7 @@ pnpm dev
 
 Open `http://localhost:3000`, set the FastAPI base URL and enter the existing administrator bearer key in the sidebar. The console reads live backend health, people, attendance and model-registry data. The key remains in browser memory and is not configured as a `NEXT_PUBLIC_*` variable. For local browser-to-API requests, allow `http://localhost:3000` in `FRS_ALLOWED_ORIGINS`.
 
-This is a development foundation, not a production admin portal. Institutional login/roles, college class/section tables, Supabase integration, Cloudinary integration and a durable batch queue have not been implemented yet. Do not expose the console publicly before authentication and authorization are strengthened.
+This is a development foundation, not a production admin portal. Institutional login/roles and private media storage (including any Cloudinary integration) are not implemented. The college domain API and database-backed session capture queue exist, but provider migrations and real-device/model validation remain outstanding. Do not expose the console publicly before authentication and authorization are strengthened.
 
 ## College domain (Sprint 2)
 
@@ -138,7 +138,7 @@ The protected college administration API and Next.js `/college` screen support d
 
 For Supabase or another PostgreSQL deployment, apply [the ordered migrations](backend/migrations/README.md) and keep the database URL server-side in FastAPI. The migration enables RLS without public/anon policies; the admin UI calls FastAPI and does not connect directly to the database. The same schema is PostgreSQL-portable for a later AWS RDS migration.
 
-All college admin endpoints use the existing administrator bearer guard and write audit events for creation/enrollment/session changes. This is still a development administration model, not institutional SSO or role-based production access. Existing attendance recognition has not yet been constrained by class group; Sprint 3 must connect sessions to the recognition/job path and test roster-scoped matching before classroom attendance use.
+All college admin endpoints use the existing administrator bearer guard and write audit events for creation/enrollment/session changes. This is still a development administration model, not institutional SSO or role-based production access. The session-batch recognition path restricts matching to active enrollments in the session's class group. Legacy unscoped `/identify` and `/verify` routes are retained for development compatibility but rejected when `FRS_ENV=production`.
 
 ## Release status
 

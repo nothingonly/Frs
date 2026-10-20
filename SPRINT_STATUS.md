@@ -59,7 +59,7 @@ Last updated: 2026-10-20
 - The queue is stored in the PostgreSQL database and survives API process restarts; the worker currently runs inside the FastAPI process and is not a separate autoscaled GPU worker service.
 - No Supabase database, Cloudinary account or target GPU worker is configured here. Migration 0003 has not been executed against a live provider.
 - The kiosk queue path requires an actual open class session and active enrollment linked to real biometric templates; roster rows alone are not biometric enrollment.
-- Legacy direct identify/verify routes still exist for existing clients and do not require class sessions. New college deployments should use the session batch path.
+- Legacy direct identify/verify routes remain for development compatibility but are rejected when `FRS_ENV=production`; production attendance must use the session-scoped batch path. Regression tests cover this policy.
 - The branch does not add or fabricate model artifacts. Verified model licenses, real weights, calibration, attack evaluation and real Android/server end-to-end validation remain release blockers.
 - The pnpm lockfile is still not committed, so web CI has lockfile generation enabled during dependency install.
 
