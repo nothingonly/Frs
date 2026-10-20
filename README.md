@@ -132,6 +132,14 @@ Open `http://localhost:3000`, set the FastAPI base URL and enter the existing ad
 
 This is a development foundation, not a production admin portal. Institutional login/roles, college class/section tables, Supabase integration, Cloudinary integration and a durable batch queue have not been implemented yet. Do not expose the console publicly before authentication and authorization are strengthened.
 
+## College domain (Sprint 2)
+
+The protected college administration API and Next.js `/college` screen support departments, year-of-study class groups, sections, student profiles, class enrollments and attendance sessions. New student records are linked to the existing biometric identity record, but creating a student does not create a face embedding.
+
+For Supabase or another PostgreSQL deployment, apply [the ordered migrations](backend/migrations/README.md) and keep the database URL server-side in FastAPI. The migration enables RLS without public/anon policies; the admin UI calls FastAPI and does not connect directly to the database. The same schema is PostgreSQL-portable for a later AWS RDS migration.
+
+All college admin endpoints use the existing administrator bearer guard and write audit events for creation/enrollment/session changes. This is still a development administration model, not institutional SSO or role-based production access. Existing attendance recognition has not yet been constrained by class group; Sprint 3 must connect sessions to the recognition/job path and test roster-scoped matching before classroom attendance use.
+
 ## Release status
 
 **Latest prerelease:** [FRS v0.1.0 Alpha 1](https://github.com/nothingonly/Frs/releases/tag/v0.1.0-alpha.1). It includes an Android **debug APK** for development and integration evaluation, not a production-signed build.
