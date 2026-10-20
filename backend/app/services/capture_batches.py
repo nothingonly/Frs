@@ -75,6 +75,10 @@ def serialize_capture_batch(job: CaptureBatchJob) -> dict:
         "attempts": job.attempts,
         "max_attempts": job.max_attempts,
         "request_sha256": job.request_sha256,
+        "payload_expires_at": as_utc(job.payload_expires_at).isoformat(),
+        "payload_available": bool(
+            job.encrypted_payload and job.payload_nonce and as_utc(job.payload_expires_at) > utcnow()
+        ),
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
         "started_at": job.started_at.isoformat() if job.started_at else None,
@@ -112,7 +116,21 @@ def _recover_stale_jobs(db: Session, now: datetime) -> None:
         job.encrypted_payload = None
         job.payload_nonce = None
         job.error_json = json.dumps({"status_code": 410, "detail": "Encrypted capture expired before processing.", "reason_code": "CAPTURE_PAYLOAD_EXPIRED"})
-    if rows or expired:
+    expired_failed = db.execute(select(CaptureBatchJob).where(
+        CaptureBatchJob.status == "FAILED",
+        CaptureBatchJob.payload_expires_at <= now,
+        CaptureBatchJob.encrypted_payload.is_not(None),
+    )).scalars().all()
+    for job in expired_failed:
+        job.encrypted_payload = None
+        job.payload_nonce = None
+        job.updated_at = now
+        error = json.loads(job.error_json) if job.error_json else {}
+        error["payload_expired"] = True
+        error["reason_code"] = "CAPTURE_PAYLOAD_EXPIRED"
+        db.add(job)
+        job.error_json = json.dumps(error, default=str)
+    if rows or expired or expired_failed:
         db.commit()
 
 
