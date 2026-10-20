@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS attendance_sessions (
 CREATE INDEX IF NOT EXISTS ix_attendance_sessions_class_group_id ON attendance_sessions (class_group_id);
 CREATE INDEX IF NOT EXISTS ix_attendance_sessions_group_started ON attendance_sessions (class_group_id, starts_at);
 
+ALTER TABLE attendance_events
+    ADD COLUMN IF NOT EXISTS attendance_session_id VARCHAR(36)
+    REFERENCES attendance_sessions(session_id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS ix_attendance_events_attendance_session_id
+    ON attendance_events (attendance_session_id);
+
 ALTER TABLE departments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE class_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE students ENABLE ROW LEVEL SECURITY;
