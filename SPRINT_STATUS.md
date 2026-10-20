@@ -32,10 +32,11 @@ Last updated: 2026-10-20
 - Exposed optional session association in the attendance admin view.
 
 ### Validation and known limits
-- Sprint 2 CI has not yet been evaluated in this status note; use the linked GitHub Actions checks on the Sprint 2 pull request.
+- GitHub Actions on the latest code revision: Python compile and Ruff passed; all 41 backend tests passed; Next.js dependency install, TypeScript, ESLint and production build passed. Flutter analysis and tests passed; the Android debug APK build was still running at the last check.
 - Supabase credentials are not configured here, so no migration has been run against a live Supabase project.
 - No production identity provider or institutional role model exists yet; do not expose the development bearer-key console publicly.
 - Student enrollment images, Cloudinary integration, durable processing workers and class-scoped recognition are not yet implemented.
+- The Next.js workspace still lacks a committed pnpm lockfile; dependency installation currently runs with lockfile generation enabled in CI. A reviewed lockfile is needed for reproducible installs.
 - Attendance sessions are persisted, but the recognition endpoint/decision pipeline does not yet require a session or restrict identity matching to that class. Sprint 3 must connect these and verify class-scoped matching.
 - Real, properly licensed model artifacts, threshold calibration, presentation-attack validation and real-device E2E tests remain release blockers.
 
