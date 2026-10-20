@@ -6,6 +6,8 @@ class CaptureBatchJob {
   final String status;
   final int frameCount;
   final int attempts;
+  final bool payloadAvailable;
+  final bool sessionOpen;
   final Map<String, dynamic>? result;
   final Map<String, dynamic>? error;
 
@@ -16,6 +18,8 @@ class CaptureBatchJob {
     required this.status,
     required this.frameCount,
     required this.attempts,
+    this.payloadAvailable = false,
+    this.sessionOpen = true,
     this.result,
     this.error,
   });
@@ -27,6 +31,8 @@ class CaptureBatchJob {
         status: (json['status'] as String).toUpperCase(),
         frameCount: (json['frame_count'] as num).toInt(),
         attempts: (json['attempts'] as num).toInt(),
+        payloadAvailable: json['payload_available'] as bool? ?? false,
+        sessionOpen: json['session_open'] as bool? ?? true,
         result: json['result'] is Map<String, dynamic>
             ? Map<String, dynamic>.from(json['result'] as Map<String, dynamic>)
             : null,
