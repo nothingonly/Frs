@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.dependencies import admin_actor
-from app.api.routes.college import router
+from app.api.routes.admin import router as admin_router
+from app.api.routes.college import router as college_router
 from app.database import Base, get_db
 from app.db.entities import AttendanceSession, AuditEvent, ClassEnrollment, Person, Student
 
@@ -32,7 +33,8 @@ def client_and_sessions() -> Generator[tuple[TestClient, sessionmaker[Session]],
     Base.metadata.create_all(engine)
     testing_sessions = sessionmaker(bind=engine, expire_on_commit=False)
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(college_router)
+    app.include_router(admin_router)
 
     def override_db() -> Generator[Session, None, None]:
         session = testing_sessions()
@@ -216,3 +218,53 @@ def test_student_creation_rejects_inactive_biometric_identity(client_and_session
     assert response.status_code == 409, response.text
     with sessions() as db:
         assert db.query(Student).filter_by(student_number="CSE-3099").count() == 0
+
+
+def test_student_deactivate_and_reactivate(client_and_sessions) -> None:
+    client, sessions = client_and_sessions
+    student = client.post("/api/v1/admin/college/students", json={
+        "student_number": "CSE-4001", "full_name": "Lifecycle Student",
+    }).json()
+    student_id = student["student_id"]
+
+    deact = client.post(f"/api/v1/admin/college/students/{student_id}/deactivate")
+    assert deact.status_code == 200
+    assert deact.json()["is_active"] is False
+
+    with sessions() as db:
+        s_row = db.get(Student, student_id)
+        assert s_row is not None and s_row.is_active is False
+        p_row = db.get(Person, s_row.person_id)
+        assert p_row is not None and p_row.is_active is False
+
+    react = client.post(f"/api/v1/admin/college/students/{student_id}/reactivate")
+    assert react.status_code == 200
+    assert react.json()["is_active"] is True
+
+    with sessions() as db:
+        s_row = db.get(Student, student_id)
+        assert s_row is not None and s_row.is_active is True
+        p_row = db.get(Person, s_row.person_id)
+        assert p_row is not None and p_row.is_active is True
+
+
+def test_list_audit_events_and_attendance_session_filter(client_and_sessions) -> None:
+    client, sessions = client_and_sessions
+    # Perform an audited action
+    create_department(client)
+
+    audit_res = client.get("/api/v1/admin/audit")
+    assert audit_res.status_code == 200
+    items = audit_res.json()["items"]
+    assert len(items) > 0
+    assert any(item["action"] == "department.create" for item in items)
+
+    filtered_res = client.get("/api/v1/admin/audit", params={"action": "department.create"})
+    assert filtered_res.status_code == 200
+    assert all(item["action"] == "department.create" for item in filtered_res.json()["items"])
+
+    # Test attendance session filter on /api/v1/admin/attendance
+    att_res = client.get("/api/v1/admin/attendance", params={"attendance_session_id": "non-existent-session-id"})
+    assert att_res.status_code == 200
+    assert len(att_res.json()["items"]) == 0
+

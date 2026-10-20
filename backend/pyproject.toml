@@ -18,11 +18,12 @@ dependencies = [
   "opencv-python-headless>=4.10,<5",
   "pillow>=11,<13",
   "cryptography>=44,<47",
-  "insightface==0.7.3",
   "onnxruntime>=1.20,<2",
+  "cloudinary>=1.41,<2",
 ]
 
 [project.optional-dependencies]
+insightface = ["insightface==0.7.3"]
 dev = ["pytest>=8.3,<9", "httpx>=0.28,<1", "ruff>=0.9,<1"]
 
 [tool.setuptools.packages.find]

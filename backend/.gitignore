@@ -1,4 +1,7 @@
 .env
+.env.*
+*.env
+!*.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -18,3 +21,9 @@ model-artifacts/*.safetensors
 models/
 reports/
 *.log
+*.egg-info/
+build/
+dist/
+*.tar.gz
+*.tar
+frs_buffalo_l_verified*/

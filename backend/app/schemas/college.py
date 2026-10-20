@@ -80,3 +80,37 @@ class AttendanceSessionCreate(StrictPayload):
     @classmethod
     def normalize_subject_code(cls, value: str | None) -> str | None:
         return value.strip().upper() if value and value.strip() else None
+
+
+class AttendanceCorrectionRequest(StrictPayload):
+    punch_type: str | None = Field(default=None, pattern=r"^(CHECK_IN|CHECK_OUT)$")
+    revoke: bool = False
+    reason_code: str = Field(min_length=2, max_length=60)
+    justification: str = Field(min_length=5, max_length=500)
+
+
+class ManualAttendanceRequest(StrictPayload):
+    student_id: str = Field(min_length=1, max_length=36)
+    attendance_session_id: str = Field(min_length=1, max_length=36)
+    punch_type: str = Field(default="CHECK_IN", pattern=r"^(CHECK_IN|CHECK_OUT)$")
+    reason_code: str = Field(default="MANUAL_FACULTY_OVERRIDE", min_length=2, max_length=60)
+    justification: str = Field(min_length=5, max_length=500)
+
+
+class ResolveReviewRequest(StrictPayload):
+    action: str = Field(pattern=r"^(APPROVE_MANUAL|DISMISS)$")
+    student_id: str | None = Field(default=None, max_length=36)
+    reason_code: str = Field(default="ADMIN_REVIEW_DECISION", min_length=2, max_length=60)
+    notes: str = Field(default="", max_length=500)
+
+
+class SignedUrlRequest(StrictPayload):
+    public_id: str = Field(min_length=1, max_length=240)
+    expires_in_seconds: int = Field(default=300, ge=10, le=3600)
+
+
+class DeleteMediaRequest(StrictPayload):
+    public_id: str = Field(min_length=1, max_length=240)
+    reason_code: str = Field(default="COMPLIANCE_RETENTION_EXPIRY", min_length=2, max_length=60)
+
+

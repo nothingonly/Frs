@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     device_api_keys: str = ""
     admin_api_key: str = ""
     data_encryption_key: str = ""
+
+    # Optional cloud integrations
+    cloudinary_cloud_name: str = Field(default="", validation_alias=AliasChoices("FRS_CLOUDINARY_CLOUD_NAME", "CLOUDINARY_CLOUD_NAME"))
+    cloudinary_api_key: str = Field(default="", validation_alias=AliasChoices("FRS_CLOUDINARY_API_KEY", "CLOUDINARY_API_KEY"))
+    cloudinary_api_secret: str = Field(default="", validation_alias=AliasChoices("FRS_CLOUDINARY_API_SECRET", "CLOUDINARY_API_SECRET"))
+    supabase_url: str = Field(default="", validation_alias=AliasChoices("FRS_SUPABASE_URL", "SUPABASE_URL"))
+    supabase_key: str = Field(default="", validation_alias=AliasChoices("FRS_SUPABASE_KEY", "SUPABASE_KEY", "SUPABASE_SECRET_KEY"))
 
     model_pack: str = "buffalo_l"
     model_root: str = "~/.insightface"

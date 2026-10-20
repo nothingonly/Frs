@@ -3,6 +3,7 @@
 /* eslint react-hooks/set-state-in-effect: off -- The effect initiates an external HTTP read; state updates occur in async response handlers. */
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useAdmin } from "@/components/admin-provider";
 
 type Items<T> = { items: T[] };
@@ -282,11 +283,19 @@ export default function AttendanceSessionsPage() {
                   <td><span className={session.status === "OPEN" ? "pill pill-success" : "pill pill-muted"}>{session.status}</span></td>
                   <td><code>{session.session_id.slice(0, 12)}</code></td>
                   <td>
-                    {session.status === "OPEN" ? (
-                      <button className="button button-secondary button-small" disabled={busyJob !== null || !isConnected} onClick={() => void closeSession(session)}>
-                        {busyJob === session.session_id ? "Closing…" : "Close session"}
-                      </button>
-                    ) : "—"}
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                      <Link
+                        href={`/attendance?session_id=${encodeURIComponent(session.session_id)}`}
+                        className="button button-secondary button-small"
+                      >
+                        Attendance
+                      </Link>
+                      {session.status === "OPEN" ? (
+                        <button className="button button-secondary button-small" disabled={busyJob !== null || !isConnected} onClick={() => void closeSession(session)}>
+                          {busyJob === session.session_id ? "Closing…" : "Close"}
+                        </button>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -299,13 +308,23 @@ export default function AttendanceSessionsPage() {
       <section className="panel table-panel">
         <div className="table-toolbar">
           <div><h3>Capture-job queue</h3><p>{batches.length} persisted jobs for the selected session · frame payloads are not exposed in this view</p></div>
-          <label className="search-field">
-            <span>Status</span>
-            <select value={batchStatus} onChange={(event) => setBatchStatus(event.target.value)}>
-              <option value="">All states</option>
-              {["QUEUED", "PROCESSING", "SUCCEEDED", "REJECTED", "FAILED"].map((status) => <option key={status} value={status}>{status}</option>)}
-            </select>
-          </label>
+          <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+            {selectedSessionId ? (
+              <Link
+                href={`/attendance?session_id=${encodeURIComponent(selectedSessionId)}`}
+                className="button button-secondary button-small"
+              >
+                View session attendance →
+              </Link>
+            ) : null}
+            <label className="search-field">
+              <span>Status</span>
+              <select value={batchStatus} onChange={(event) => setBatchStatus(event.target.value)}>
+                <option value="">All states</option>
+                {["QUEUED", "PROCESSING", "SUCCEEDED", "REJECTED", "FAILED"].map((status) => <option key={status} value={status}>{status}</option>)}
+              </select>
+            </label>
+          </div>
         </div>
         <div className="table-wrap">
           <table>

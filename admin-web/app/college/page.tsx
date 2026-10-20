@@ -3,6 +3,7 @@
 /* eslint react-hooks/set-state-in-effect: off -- These effects initiate external HTTP reads; state updates occur in async handlers. */
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useAdmin } from "@/components/admin-provider";
 
 type DepartmentRecord = { department_id: string; code: string; name: string; is_active: boolean };
@@ -134,6 +135,18 @@ export default function CollegeSetupPage() {
     } finally { setSaving(null); }
   }
 
+  async function enrollInClass(student: StudentRecord, groupId: string) {
+    if (!groupId) return;
+    setSaving(student.student_id); setError(null); setNotice(null);
+    try {
+      await requestJson("/api/v1/admin/college/class-groups/" + encodeURIComponent(groupId) + "/students/" + encodeURIComponent(student.student_id), { method: "POST" });
+      setNotice("Student " + student.student_number + " enrolled in class group.");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not enroll student in class group.");
+    } finally { setSaving(null); }
+  }
+
   return (
     <>
       <section className="welcome-row">
@@ -206,7 +219,34 @@ export default function CollegeSetupPage() {
             <td>{student.class_groups.length ? student.class_groups.map((group) => <span className="class-chip class-chip-inline" key={group.class_group_id}>{group.department_code} · Y{group.year_of_study}-{group.section} · {group.academic_year}<button type="button" aria-label={"Withdraw " + student.student_number + " from " + group.department_code + " year " + group.year_of_study + " section " + group.section} onClick={() => void withdraw(student, group.class_group_id)} disabled={saving !== null}>×</button></span>) : <span className="cell-subtext">Unassigned</span>}</td>
             <td>{student.person_id ? <span className="pill pill-success">Linked</span> : <span className="pill pill-warning">Unlinked</span>}<small className="cell-subtext">{student.person_id ? student.person_id.slice(0, 8) : "Enrollment pending"}</small></td>
             <td><span className={student.is_active ? "pill pill-success" : "pill pill-muted"}>{student.is_active ? "Active" : "Inactive"}</span></td>
-            <td>{saving === student.student_id ? "Saving…" : "—"}</td>
+            <td>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <Link
+                  href={"/enrollment?student_number=" + encodeURIComponent(student.student_number) + "&full_name=" + encodeURIComponent(student.full_name)}
+                  className="button button-small button-secondary"
+                  style={{ textDecoration: "none", whiteSpace: "nowrap" }}
+                >
+                  {student.person_id ? "Biometrics" : "Enroll"}
+                </Link>
+                {student.class_groups.length === 0 ? (
+                  <select
+                    style={{ fontSize: "0.75rem", padding: "2px 4px", maxWidth: "140px" }}
+                    defaultValue=""
+                    disabled={saving === student.student_id}
+                    onChange={(e) => {
+                      if (e.target.value) void enrollInClass(student, e.target.value);
+                    }}
+                  >
+                    <option value="">+ Assign class</option>
+                    {groups.filter((g) => g.is_active).map((g) => (
+                      <option key={g.class_group_id} value={g.class_group_id}>
+                        {g.department_code} Y{g.year_of_study}-{g.section}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+              </div>
+            </td>
           </tr>)}
           {visibleStudents.length === 0 ? <tr><td colSpan={5}><div className="empty-state"><strong>{loading ? "Loading students…" : "No matching students"}</strong><span>Records appear here after creation through this page or API.</span></div></td></tr> : null}
         </tbody></table></div>

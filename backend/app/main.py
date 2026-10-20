@@ -18,6 +18,7 @@ from app.database import SessionLocal, create_schema, engine
 from app.schemas.contracts import HealthResponse
 from app.services.capture_batches import run_capture_batch_worker
 from app.services.pipeline import AttendancePipeline
+from app.services.storage import CloudinaryStorageService
 from app.vision.engine import VisionEngine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -238,6 +239,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.vision = vision
     app.state.pipeline = AttendancePipeline(settings, vision)
+    app.state.storage = CloudinaryStorageService(settings)
     with SessionLocal() as db:
         _register_runtime_models(db, vision)
     logger.info("FRS model components loaded: %s", vision.component_status)
