@@ -287,7 +287,7 @@ class KioskState {
             _pendingBatchId = null;
             _pendingIdempotencyKey = null;
             _capturedImages = <Uint8List>[];
-            throw ServerException(
+            throw const ServerException(
               'This capture job can no longer be retried because its encrypted payload expired or the session closed. Capture a fresh frame burst.',
             );
           }
