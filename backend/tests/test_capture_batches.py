@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Generator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,7 +16,7 @@ from app.core.config import Settings
 from app.database import Base, get_db
 from app.db.entities import AttendanceSession, CaptureBatchJob, ClassGroup, Department
 from app.security import decrypt_capture_payload
-from app.services.capture_batches import pack_capture_frames, unpack_capture_frames
+from app.services.capture_batches import _finish_failure, pack_capture_frames, unpack_capture_frames
 
 
 def test_capture_payload_round_trip_and_truncation_guard() -> None:
@@ -110,5 +110,75 @@ def test_capture_batch_is_encrypted_idempotent_and_requires_open_session() -> No
         denied = client.post(url, data={**data, "idempotency_key": "another-request-key-002"}, files=files)
         assert denied.status_code == 409
         assert denied.json()["detail"] == "Attendance session is not open."
+
+    engine.dispose()
+
+
+
+def test_stale_worker_failure_cannot_overwrite_newer_claim() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    with sessions() as db:
+        department = Department(code="CSD", name="Data Science")
+        db.add(department)
+        db.flush()
+        group = ClassGroup(
+            department_id=department.department_id, year_of_study=2,
+            section="A", academic_year="2026-2027", is_active=True,
+        )
+        db.add(group)
+        db.flush()
+        attendance_session = AttendanceSession(
+            class_group_id=group.class_group_id, subject_name="Algorithms",
+            starts_at=now, status="OPEN", created_by="admin:test",
+        )
+        db.add(attendance_session)
+        db.flush()
+        job = CaptureBatchJob(
+            attendance_session_id=attendance_session.session_id,
+            class_group_id=group.class_group_id,
+            device_actor_id="device:test",
+            client_device_id="kiosk-test",
+            idempotency_key="stale-worker-test-key",
+            request_sha256="a" * 64,
+            frame_count=3,
+            punch_type="CHECK_IN",
+            status="PROCESSING",
+            encrypted_payload=b"ciphertext",
+            payload_nonce=b"0123456789ab",
+            payload_expires_at=now + timedelta(hours=1),
+            attempts=2,
+            max_attempts=3,
+        )
+        db.add(job)
+        db.commit()
+        batch_id = job.batch_id
+
+    with sessions() as db:
+        stale_job = db.get(CaptureBatchJob, batch_id)
+        assert stale_job is not None
+        _finish_failure(
+            db, stale_job, 503, "late worker error", now, expected_attempt=1,
+        )
+
+    with sessions() as db:
+        persisted = db.get(CaptureBatchJob, batch_id)
+        assert persisted is not None
+        assert persisted.status == "PROCESSING"
+        assert persisted.attempts == 2
+        assert persisted.encrypted_payload == b"ciphertext"
 
     engine.dispose()
