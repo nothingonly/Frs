@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.dependencies import admin_actor
 from app.api.routes.college import router
 from app.database import Base, get_db
-from app.db.entities import AttendanceSession, ClassEnrollment, Person, Student
+from app.db.entities import AttendanceSession, AuditEvent, ClassEnrollment, Person, Student
 
 
 @pytest.fixture
@@ -94,6 +94,9 @@ def test_student_creation_links_biometric_person_and_class_enrollment(client_and
         assert db.get(Person, student["person_id"]) is not None
         memberships = db.query(ClassEnrollment).filter_by(student_id=student["student_id"], status="ACTIVE").all()
         assert len(memberships) == 1
+        audit_rows = db.query(AuditEvent).filter_by(action="student.create").all()
+        assert audit_rows
+        assert all(len(row.session_id) <= 36 for row in audit_rows)
 
 
 def test_department_codes_are_normalized_and_duplicates_conflict(client_and_sessions) -> None:
