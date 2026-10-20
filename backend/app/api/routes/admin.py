@@ -117,6 +117,7 @@ def list_attendance(
             "client_device_id": row.client_device_id,
             "pipeline_version": row.pipeline_version,
             "evidence_id": row.evidence_id,
+            "attendance_session_id": row.attendance_session_id,
         } for row in rows],
         "limit": limit,
         "offset": offset,
