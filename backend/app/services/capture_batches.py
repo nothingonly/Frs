@@ -166,10 +166,20 @@ def _finish_failure(
     db: Session, job: CaptureBatchJob, status_code: int, detail, now: datetime,
     expected_attempt: int | None = None,
 ) -> None:
-    # A racing/stale worker must not overwrite a newer attempt or terminal success.
-    if job.status != "PROCESSING" or (expected_attempt is not None and job.attempts != expected_attempt):
+    # Re-read and lock the row: the object in this Session may be stale after a worker lease expires.
+    statement = select(CaptureBatchJob).where(
+        CaptureBatchJob.batch_id == job.batch_id,
+        CaptureBatchJob.status == "PROCESSING",
+    )
+    if expected_attempt is not None:
+        statement = statement.where(CaptureBatchJob.attempts == expected_attempt)
+    current_job = db.execute(
+        statement.with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if current_job is None:
         db.rollback()
         return
+    job = current_job
     retryable = status_code >= 500 and job.attempts < job.max_attempts and as_utc(job.payload_expires_at) > now
     job.error_json = json.dumps({"status_code": status_code, "detail": detail}, default=str)
     job.updated_at = now
