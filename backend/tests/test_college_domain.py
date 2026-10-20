@@ -170,7 +170,7 @@ def test_class_group_filter_and_attendance_session_idempotency(client_and_sessio
     created = client.post("/api/v1/admin/college/attendance-sessions", json=payload)
     assert created.status_code == 201, created.text
     replay = client.post("/api/v1/admin/college/attendance-sessions", json=payload)
-    assert replay.status_code == 201, replay.text
+    assert replay.status_code == 200, replay.text
     assert replay.json()["session_id"] == created.json()["session_id"]
     assert replay.json()["idempotent_replay"] is True
 
@@ -182,3 +182,19 @@ def test_class_group_filter_and_attendance_session_idempotency(client_and_sessio
     with sessions() as db:
         row = db.get(AttendanceSession, created.json()["session_id"])
         assert row is not None and row.status == "CLOSED"
+
+
+
+def test_attendance_session_idempotency_key_rejects_different_payload(client_and_sessions) -> None:
+    client, _ = client_and_sessions
+    department = create_department(client)
+    group = create_class_group(client, department["department_id"])
+    base_payload = {
+        "class_group_id": group["class_group_id"],
+        "subject_name": "Operating Systems",
+        "idempotency_key": "same-key-different-body",
+    }
+    assert client.post("/api/v1/admin/college/attendance-sessions", json=base_payload).status_code == 201
+    changed = {**base_payload, "subject_name": "Database Systems"}
+    response = client.post("/api/v1/admin/college/attendance-sessions", json=changed)
+    assert response.status_code == 409
