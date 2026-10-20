@@ -201,3 +201,44 @@ class AttendanceSession(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_by: Mapped[str] = mapped_column(String(120), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class CaptureBatchJob(Base):
+    """Durable queue row; input image bytes are encrypted and short-lived."""
+
+    __tablename__ = "capture_batch_jobs"
+    __table_args__ = (
+        CheckConstraint("status IN ('QUEUED', 'PROCESSING', 'SUCCEEDED', 'REJECTED', 'FAILED')", name="ck_capture_batch_jobs_status"),
+        CheckConstraint("punch_type IN ('CHECK_IN', 'CHECK_OUT')", name="ck_capture_batch_jobs_punch_type"),
+        CheckConstraint("attempts >= 0 AND max_attempts >= 1", name="ck_capture_batch_jobs_attempts"),
+        UniqueConstraint("device_actor_id", "idempotency_key", name="uq_capture_batch_device_idempotency"),
+        Index("ix_capture_batch_status_created", "status", "created_at"),
+        Index("ix_capture_batch_session_created", "attendance_session_id", "created_at"),
+    )
+
+    batch_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    attendance_session_id: Mapped[str] = mapped_column(
+        ForeignKey("attendance_sessions.session_id", ondelete="RESTRICT"), nullable=False
+    )
+    class_group_id: Mapped[str] = mapped_column(
+        ForeignKey("class_groups.class_group_id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    device_actor_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    client_device_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    frame_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    punch_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="QUEUED", nullable=False, index=True)
+    encrypted_payload: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    payload_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    payload_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
