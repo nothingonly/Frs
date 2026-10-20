@@ -144,3 +144,153 @@ class OnnxQualityScorer(OnnxTensorModel):
         if not np.isfinite(value) or not 0.0 <= value <= 1.0:
             raise ValueError("FIQA quality score must be finite and in [0, 1]")
         return value
+
+
+_REFERENCE_5PTS = np.array([
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+], dtype=np.float32)
+
+
+def norm_crop(img: np.ndarray, landmark: np.ndarray, image_size: int = 112) -> np.ndarray:
+    """Align and crop face using 5 facial landmarks and reference 112x112 coordinates."""
+    pts = np.asarray(landmark, dtype=np.float32)
+    ref_pts = _REFERENCE_5PTS if image_size == 112 else _REFERENCE_5PTS * (float(image_size) / 112.0)
+    tform, _ = cv2.estimateAffinePartial2D(pts, ref_pts)
+    if tform is None:
+        return cv2.resize(img, (image_size, image_size))
+    return cv2.warpAffine(img, tform, (image_size, image_size), borderValue=0.0)
+
+
+def _distance2bbox(points: np.ndarray, distance: np.ndarray) -> np.ndarray:
+    x1 = points[:, 0] - distance[:, 0]
+    y1 = points[:, 1] - distance[:, 1]
+    x2 = points[:, 0] + distance[:, 2]
+    y2 = points[:, 1] + distance[:, 3]
+    return np.stack([x1, y1, x2, y2], axis=-1)
+
+
+def _distance2kps(points: np.ndarray, distance: np.ndarray) -> np.ndarray:
+    preds = []
+    for i in range(0, distance.shape[1], 2):
+        px = points[:, 0] + distance[:, i]
+        py = points[:, 1] + distance[:, i + 1]
+        preds.extend([px, py])
+    stacked = np.stack(preds, axis=-1)
+    return stacked.reshape((stacked.shape[0], -1, 2))
+
+
+class SCRFDDetector:
+    """Pure ONNX runtime implementation of SCRFD face detector."""
+
+    def __init__(self, model_file: str | Path, provider: str = "CPUExecutionProvider", det_size: int = 640):
+        self.model_file = str(Path(model_file).resolve())
+        self.session = ort.InferenceSession(self.model_file, providers=[provider])
+        self.center_cache: dict[tuple[int, int, int], np.ndarray] = {}
+        self.fmc = 3
+        self._feat_stride_fpn = [8, 16, 32]
+        self._num_anchors = 2
+        self.input_name = self.session.get_inputs()[0].name
+        self.input_size = (det_size, det_size)
+
+    def prepare(self, ctx_id: int = -1, det_size: tuple[int, int] = (640, 640)) -> None:
+        self.input_size = det_size
+
+    def detect(
+        self,
+        img: np.ndarray,
+        thresh: float = 0.5,
+        max_num: int = 0,
+        metric: str = "default",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        input_size = self.input_size
+        im_ratio = float(img.shape[0]) / img.shape[1]
+        model_ratio = float(input_size[1]) / input_size[0]
+        if im_ratio > model_ratio:
+            new_height = input_size[1]
+            new_width = int(new_height / im_ratio)
+        else:
+            new_width = input_size[0]
+            new_height = int(new_width * im_ratio)
+        det_scale = float(new_height) / img.shape[0]
+        resized_img = cv2.resize(img, (new_width, new_height))
+        det_img = np.zeros((input_size[1], input_size[0], 3), dtype=np.uint8)
+        det_img[:new_height, :new_width, :] = resized_img
+
+        scores_list = []
+        bboxes_list = []
+        kpss_list = []
+        blob = cv2.dnn.blobFromImage(det_img, 1.0 / 128.0, input_size, (127.5, 127.5, 127.5), swapRB=True)
+        net_outs = self.session.run(None, {self.input_name: blob})
+
+        input_height = blob.shape[2]
+        input_width = blob.shape[3]
+        fmc = self.fmc
+        for idx, stride in enumerate(self._feat_stride_fpn):
+            score = net_outs[idx]
+            bbox = net_outs[idx + fmc] * stride
+            kps = net_outs[idx + fmc * 2] * stride
+            height = input_height // stride
+            width = input_width // stride
+            key = (height, width, stride)
+            if key in self.center_cache:
+                anchor_centers = self.center_cache[key]
+            else:
+                anchor_centers = np.stack(np.mgrid[:height, :width][::-1], axis=-1).astype(np.float32)
+                anchor_centers = (anchor_centers * stride).reshape((-1, 2))
+                if self._num_anchors > 1:
+                    anchor_centers = np.stack([anchor_centers] * self._num_anchors, axis=1).reshape((-1, 2))
+                if len(self.center_cache) < 100:
+                    self.center_cache[key] = anchor_centers
+
+            pos_inds = np.where(score >= thresh)[0]
+            if len(pos_inds) > 0:
+                bboxes = _distance2bbox(anchor_centers[pos_inds], bbox[pos_inds])
+                scores_list.append(score[pos_inds])
+                bboxes_list.append(bboxes)
+
+                kpss = _distance2kps(anchor_centers[pos_inds], kps[pos_inds])
+                kpss_list.append(kpss)
+
+        if not scores_list:
+            return np.empty((0, 5), dtype=np.float32), np.empty((0, 5, 2), dtype=np.float32)
+
+        scores = np.vstack(scores_list)
+        bboxes = np.vstack(bboxes_list) / det_scale
+        kpss = np.vstack(kpss_list) / det_scale
+
+        bboxes = np.hstack([bboxes, scores])
+        # cv2.dnn.NMSBoxes expects boxes in [x, y, w, h] format, not [x1, y1, x2, y2]
+        nms_boxes = bboxes[:, :4].copy()
+        nms_boxes[:, 2] -= nms_boxes[:, 0]
+        nms_boxes[:, 3] -= nms_boxes[:, 1]
+        indices = cv2.dnn.NMSBoxes(nms_boxes.tolist(), bboxes[:, 4].tolist(), thresh, 0.4)
+        if len(indices) == 0:
+            return np.empty((0, 5), dtype=np.float32), np.empty((0, 5, 2), dtype=np.float32)
+
+        flat_idx = np.array(indices).flatten()
+        if max_num > 0 and len(flat_idx) > max_num:
+            flat_idx = flat_idx[:max_num]
+        return bboxes[flat_idx], kpss[flat_idx]
+
+
+class ArcFaceRecognizer:
+    """Pure ONNX runtime implementation of ArcFace feature recognizer."""
+
+    def __init__(self, model_file: str | Path, provider: str = "CPUExecutionProvider"):
+        self.model_file = str(Path(model_file).resolve())
+        self.session = ort.InferenceSession(self.model_file, providers=[provider])
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[0].name
+        self.input_size = (112, 112)
+
+    def prepare(self, ctx_id: int = -1) -> None:
+        pass
+
+    def get_feat(self, aligned_bgr: np.ndarray) -> np.ndarray:
+        blob = cv2.dnn.blobFromImage(aligned_bgr, 1.0 / 128.0, (112, 112), (127.5, 127.5, 127.5), swapRB=True)
+        return self.session.run([self.output_name], {self.input_name: blob})[0][0]
+

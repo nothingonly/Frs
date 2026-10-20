@@ -47,16 +47,16 @@ app.*.map.json
 # Widget Preview related
 .widget_preview/
 
+# Environment and secret files (never commit)
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+!**/.env.example
+
 # Local machine configuration
 /android/local.properties
-
-# Generated Android build output
-/android/build/
-/backend/.env
-/backend/.env.*.bak
-/backend/.env.tmp
-/backend/frs.db
-/backend/*.db
 /android/key.properties
 /android/*.jks
 /android/*.keystore
@@ -64,7 +64,6 @@ app.*.map.json
 /android/*.pfx
 /android/app/*.jks
 /android/app/*.keystore
-/backend/.env.bak
 
 # Node.js / pnpm workspace
 node_modules/
@@ -73,5 +72,4 @@ node_modules/
 /admin-web/.next/
 /admin-web/out/
 /admin-web/coverage/
-/admin-web/.env.local
-/admin-web/.env.*.local
+

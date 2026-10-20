@@ -253,6 +253,52 @@ def create_student(
     }
 
 
+@router.post("/students/{student_id}/deactivate")
+def deactivate_student(
+    student_id: str,
+    actor: Annotated[str, Depends(admin_actor)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    student = db.execute(select(Student).where(Student.student_id == student_id).with_for_update()).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found.")
+    student.is_active = False
+    student.updated_at = datetime.now(timezone.utc)
+    if student.person_id:
+        person = db.get(Person, student.person_id)
+        if person:
+            person.is_active = False
+            person.updated_at = datetime.now(timezone.utc)
+    _audit(db, actor, "student.deactivate", "DEACTIVATED", student.student_id, {
+        "student_number": student.student_number, "person_id": student.person_id,
+    })
+    db.commit()
+    return {"status": "success", "student_id": student.student_id, "is_active": False}
+
+
+@router.post("/students/{student_id}/reactivate")
+def reactivate_student(
+    student_id: str,
+    actor: Annotated[str, Depends(admin_actor)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    student = db.execute(select(Student).where(Student.student_id == student_id).with_for_update()).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found.")
+    student.is_active = True
+    student.updated_at = datetime.now(timezone.utc)
+    if student.person_id:
+        person = db.get(Person, student.person_id)
+        if person:
+            person.is_active = True
+            person.updated_at = datetime.now(timezone.utc)
+    _audit(db, actor, "student.reactivate", "REACTIVATED", student.student_id, {
+        "student_number": student.student_number, "person_id": student.person_id,
+    })
+    db.commit()
+    return {"status": "success", "student_id": student.student_id, "is_active": True}
+
+
 @router.post("/class-groups/{class_group_id}/students/{student_id}", status_code=201)
 def enroll_student(
     class_group_id: str, student_id: str, actor: Annotated[str, Depends(admin_actor)],

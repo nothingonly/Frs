@@ -153,7 +153,12 @@ class AttendancePipeline:
         preprocessing_id: str,
         employee_id: str | None,
         class_group_id: str | None = None,
+        gallery_cache: dict[tuple[Any, ...], tuple[list[tuple[Person, np.ndarray]], int]] | None = None,
     ) -> tuple[list[tuple[Person, np.ndarray]], int]:
+        cache_key = (recognizer_id, model_version, preprocessing_id, employee_id, class_group_id)
+        if gallery_cache is not None and cache_key in gallery_cache:
+            return gallery_cache[cache_key]
+
         statement = (
             select(EmbeddingRecord, Person)
             .join(Person, Person.person_id == EmbeddingRecord.person_id)
@@ -196,7 +201,10 @@ class AttendancePipeline:
                 raise RuntimeError(f"Mixed embedding dimensions in profile for person {person_id}")
             prototype = _normalise(np.mean(np.stack(vectors, axis=0), axis=0))
             profiles.append((people_by_id[person_id], prototype))
-        return profiles, len(rows)
+        result = (profiles, len(rows))
+        if gallery_cache is not None:
+            gallery_cache[cache_key] = result
+        return result
 
     def _retrieve(
         self,
@@ -208,23 +216,30 @@ class AttendancePipeline:
         preprocessing_id: str,
         employee_id: str | None = None,
         class_group_id: str | None = None,
+        gallery_cache: dict[tuple[Any, ...], tuple[list[tuple[Person, np.ndarray]], int]] | None = None,
     ) -> tuple[list[RetrievalCandidate], int, float]:
         started = time.perf_counter()
         profiles, row_count = self._read_gallery(
             db, recognizer_id=recognizer_id, model_version=model_version,
             preprocessing_id=preprocessing_id, employee_id=employee_id,
             class_group_id=class_group_id,
+            gallery_cache=gallery_cache,
         )
+        if not profiles:
+            return [], 0, (time.perf_counter() - started) * 1000.0
+
         query_vector = _normalise(query)
-        scored: list[RetrievalCandidate] = []
-        for person, profile in profiles:
-            score = _cosine(query_vector, profile)
-            scored.append(RetrievalCandidate(
+        gallery_matrix = np.stack([profile for _person, profile in profiles], axis=0)
+        sim_scores = np.clip(gallery_matrix @ query_vector, -1.0, 1.0)
+        scored: list[RetrievalCandidate] = [
+            RetrievalCandidate(
                 person_id=person.person_id,
                 employee_id=person.employee_id,
                 full_name=person.full_name,
-                similarity=score,
-            ))
+                similarity=float(sim_scores[i]),
+            )
+            for i, (person, _profile) in enumerate(profiles)
+        ]
         scored.sort(key=lambda item: item.similarity, reverse=True)
         return scored[: self.settings.recognition_top_k], len(profiles), (time.perf_counter() - started) * 1000.0
 
@@ -264,6 +279,7 @@ class AttendancePipeline:
         primary_person_id: str | None,
         employee_id: str | None,
         class_group_id: str | None = None,
+        gallery_cache: dict[tuple[Any, ...], tuple[list[tuple[Person, np.ndarray]], int]] | None = None,
     ) -> dict[str, Any] | None:
         primary_models = {model for _obs, model, _emb, _preproc, _top, _count in observations}
         for model_id in self._model_options():
@@ -290,6 +306,7 @@ class AttendancePipeline:
                         db, embedding, recognizer_id=model_id, model_version=version,
                         preprocessing_id=preprocessing_id, employee_id=employee_id,
                         class_group_id=class_group_id,
+                        gallery_cache=gallery_cache,
                     )
                 except (VisionError, RuntimeError, ValueError):
                     continue
@@ -336,6 +353,7 @@ class AttendancePipeline:
         action: str,
         employee_id: str | None,
         class_group_id: str | None = None,
+        gallery_cache: dict[tuple[Any, ...], tuple[list[tuple[Person, np.ndarray]], int]] | None = None,
     ) -> tuple[list[tuple[FrameObservation, str, np.ndarray, list[RetrievalCandidate], int]], list[str], dict[str, Any]]:
         evidence: dict[str, Any] = {"pipeline_version": self.vision.pipeline_version, "frames": []}
         reasons: list[str] = []
@@ -452,6 +470,7 @@ class AttendancePipeline:
                     db, embedding, recognizer_id=model_id, model_version=version,
                     preprocessing_id=preprocessing_id, employee_id=employee_id,
                     class_group_id=class_group_id,
+                    gallery_cache=gallery_cache,
                 )
                 threshold = self.settings.threshold_for(model_id)
             except (RuntimeError, ValueError) as exc:
@@ -539,10 +558,12 @@ class AttendancePipeline:
                 detail="Attendance is disabled because policy requires a configured, compatible MiniFASNet ONNX liveness model.",
             )
 
+        burst_gallery_cache: dict[tuple[Any, ...], tuple[list[tuple[Person, np.ndarray]], int]] = {}
         try:
             processed, reasons, evidence = self._analyze_burst(
                 db, image_payloads, session_id=session_id, actor_type=actor_type, actor_id=actor_id,
                 action=action, employee_id=employee_id_claim, class_group_id=class_group_id,
+                gallery_cache=burst_gallery_cache,
             )
         except HTTPException:
             raise
@@ -638,6 +659,7 @@ class AttendancePipeline:
             secondary_evidence = self._secondary_check(
                 db, processed, primary_person_id=primary_person_id, employee_id=employee_id_claim,
                 class_group_id=class_group_id,
+                gallery_cache=burst_gallery_cache,
             )
             evidence["secondary_check"] = secondary_evidence
             if not secondary_evidence:

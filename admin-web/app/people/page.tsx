@@ -53,7 +53,7 @@ export default function PeoplePage() {
   return (
     <>
       <section className="welcome-row">
-        <div><div className="eyebrow">ROSTER OPERATIONS</div><h2>People directory</h2><p>Records from the existing FastAPI people endpoint. This is not yet the college student/class schema.</p></div>
+        <div><div className="eyebrow">ROSTER OPERATIONS</div><h2>People directory</h2><p>Central identity registry linked with college student enrollments and encrypted biometric credentials.</p></div>
         <button className="button button-secondary" type="button" onClick={() => void refresh()} disabled={!isConnected || loading}>{loading ? "Loading…" : "↻ Refresh"}</button>
       </section>
       {!isConnected ? <div className="notice notice-info"><strong>Admin connection required</strong><span>Enter a valid administrator bearer key in the sidebar to load protected roster data.</span></div> : null}

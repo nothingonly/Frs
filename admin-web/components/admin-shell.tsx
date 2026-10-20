@@ -8,9 +8,12 @@ import { useAdmin } from "./admin-provider";
 const navigation = [
   { href: "/", label: "Overview", marker: "OV" },
   { href: "/college", label: "College setup", marker: "CL" },
+  { href: "/enrollment", label: "Biometric enrollment", marker: "BE" },
   { href: "/sessions", label: "Sessions & jobs", marker: "SJ" },
   { href: "/people", label: "People", marker: "PE" },
   { href: "/attendance", label: "Attendance", marker: "AT" },
+  { href: "/reviews", label: "Review queue", marker: "RQ" },
+  { href: "/audit", label: "Audit log", marker: "AU" },
   { href: "/models", label: "Models & readiness", marker: "ML" },
 ];
 
@@ -79,7 +82,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
       <main className="main-column">
         <header className="topbar">
           <div><div className="eyebrow">FACE RECOGNITION SYSTEM</div><h1>{current.label}</h1></div>
-          <div className="topbar-meta"><span className={isConnected ? "pill pill-success" : "pill pill-muted"}><span className="status-dot" />{isConnected ? "API authenticated" : "Read-only health"}</span><span className="version-label">SPRINT 1 · FOUNDATION</span></div>
+          <div className="topbar-meta"><span className={isConnected ? "pill pill-success" : "pill pill-muted"}><span className="status-dot" />{isConnected ? "API authenticated" : "Read-only health"}</span><span className="version-label">FRS PLATFORM · INTEGRATED</span></div>
         </header>
         <div className="page-content">{children}</div>
         <footer className="main-footer"><span>FRS Admin · Next.js</span><span>Biometric decisions require real models and site validation.</span></footer>

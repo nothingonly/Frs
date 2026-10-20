@@ -91,25 +91,31 @@ class VisionEngine:
 
         try:
             from insightface.app import FaceAnalysis
-        except ImportError as exc:
-            raise VisionError("InsightFace is required for the SCRFD + ArcFace baseline") from exc
 
-        logger.info(
-            "Loading real face models: model_pack=%s, root=%s, provider=%s",
-            settings.model_pack, root, self._provider,
-        )
-        # InsightFace may download its selected model pack on first load. Verify the
-        # exact model-weight license before real deployment; the default public packs
-        # are restricted to non-commercial research absent a separate license.
-        self.face_app = FaceAnalysis(
-            name=settings.model_pack,
-            root=str(root),
-            allowed_modules=["detection", "recognition"],
-            providers=[self._provider],
-        )
-        self.face_app.prepare(ctx_id=self._ctx_id, det_size=(settings.detect_size, settings.detect_size))
-        self.detector = self.face_app.models.get("detection")
-        self.recognizer = self.face_app.models.get("recognition")
+            logger.info(
+                "Loading real face models via FaceAnalysis: model_pack=%s, root=%s, provider=%s",
+                settings.model_pack, root, self._provider,
+            )
+            self.face_app = FaceAnalysis(
+                name=settings.model_pack,
+                root=str(root),
+                allowed_modules=["detection", "recognition"],
+                providers=[self._provider],
+            )
+            self.face_app.prepare(ctx_id=self._ctx_id, det_size=(settings.detect_size, settings.detect_size))
+            self.detector = self.face_app.models.get("detection")
+            self.recognizer = self.face_app.models.get("recognition")
+        except ImportError:
+            logger.info(
+                "FaceAnalysis package unavailable; loading verified Buffalo_L ONNX artifacts directly via ONNX Runtime: %s",
+                pack_dir,
+            )
+            from app.vision.onnx_models import ArcFaceRecognizer, SCRFDDetector
+
+            self.face_app = None
+            self.detector = SCRFDDetector(pack_dir / expected_pack_files["SCRFD"], provider=self._provider, det_size=settings.detect_size)
+            self.recognizer = ArcFaceRecognizer(pack_dir / expected_pack_files["ArcFace"], provider=self._provider)
+
         if self.detector is None or self.recognizer is None:
             raise VisionError("Selected model pack must contain real detection and recognition models")
 
@@ -133,7 +139,12 @@ class VisionEngine:
         self.recovery_detector = None
         self.recovery_detector_version = ""
         if settings.retinaface_onnx_path.strip():
-            from insightface.model_zoo import get_model
+            try:
+                from insightface.model_zoo import get_model
+            except ImportError as exc:
+                raise VisionError(
+                    "insightface library is required to load RetinaFace recovery detector"
+                ) from exc
 
             path = Path(settings.retinaface_onnx_path).expanduser().resolve()
             if not path.is_file():
@@ -291,7 +302,10 @@ class VisionEngine:
                 detection_latency_ms=detector_latency, recognition_latency_ms=0.0, frame_sha256=frame_hash,
             )
 
-        from insightface.utils.face_align import norm_crop
+        try:
+            from insightface.utils.face_align import norm_crop
+        except ImportError:
+            from app.vision.onnx_models import norm_crop
 
         align_start = time.perf_counter()
         aligned = norm_crop(image, kps, image_size=getattr(self.recognizer, "input_size", (112, 112))[0])
