@@ -134,19 +134,20 @@ def _recover_stale_jobs(db: Session, now: datetime) -> None:
         db.commit()
 
 
-def _claim_next_capture_batch() -> str | None:
+def _claim_next_capture_batch() -> tuple[str, int] | None:
     now = utcnow()
     with SessionLocal() as db:
         _recover_stale_jobs(db, now)
-        batch_id = db.execute(select(CaptureBatchJob.batch_id).where(
+        candidate = db.execute(select(CaptureBatchJob.batch_id, CaptureBatchJob.attempts).where(
             CaptureBatchJob.status == "QUEUED",
             (CaptureBatchJob.next_attempt_at.is_(None) | (CaptureBatchJob.next_attempt_at <= now)),
             CaptureBatchJob.payload_expires_at > now,
             CaptureBatchJob.attempts < CaptureBatchJob.max_attempts,
             CaptureBatchJob.encrypted_payload.is_not(None),
-        ).order_by(CaptureBatchJob.created_at).limit(1)).scalar_one_or_none()
-        if batch_id is None:
+        ).order_by(CaptureBatchJob.created_at).limit(1)).first()
+        if candidate is None:
             return None
+        batch_id, previous_attempts = candidate
         claimed = db.execute(update(CaptureBatchJob).where(
             CaptureBatchJob.batch_id == batch_id,
             CaptureBatchJob.status == "QUEUED",
@@ -158,12 +159,15 @@ def _claim_next_capture_batch() -> str | None:
             error_json=None,
         ))
         db.commit()
-        return batch_id if claimed.rowcount == 1 else None
+        return (batch_id, previous_attempts + 1) if claimed.rowcount == 1 else None
 
 
-def _finish_failure(db: Session, job: CaptureBatchJob, status_code: int, detail, now: datetime) -> None:
-    # A racing worker must not overwrite a terminal result committed with its attendance event.
-    if job.status != "PROCESSING":
+def _finish_failure(
+    db: Session, job: CaptureBatchJob, status_code: int, detail, now: datetime,
+    expected_attempt: int | None = None,
+) -> None:
+    # A racing/stale worker must not overwrite a newer attempt or terminal success.
+    if job.status != "PROCESSING" or (expected_attempt is not None and job.attempts != expected_attempt):
         db.rollback()
         return
     retryable = status_code >= 500 and job.attempts < job.max_attempts and as_utc(job.payload_expires_at) > now
@@ -182,18 +186,18 @@ def _finish_failure(db: Session, job: CaptureBatchJob, status_code: int, detail,
     db.commit()
 
 
-def process_claimed_capture_batch(batch_id: str, pipeline) -> None:
+def process_claimed_capture_batch(batch_id: str, pipeline, claimed_attempt: int) -> None:
     """Run one claimed job through the configured real recognition pipeline."""
     try:
         with SessionLocal() as db:
             job = db.get(CaptureBatchJob, batch_id)
-            if job is None or job.status != "PROCESSING":
+            if job is None or job.status != "PROCESSING" or job.attempts != claimed_attempt:
+                db.rollback()
                 return
             now = utcnow()
             if as_utc(job.payload_expires_at) <= now or not job.encrypted_payload or not job.payload_nonce:
-                _finish_failure(db, job, 410, "Encrypted capture is unavailable or expired.", now)
+                _finish_failure(db, job, 410, "Encrypted capture is unavailable or expired.", now, claimed_attempt)
                 return
-            claimed_attempt = job.attempts
             attendance_session = db.get(AttendanceSession, job.attendance_session_id)
             group = db.get(ClassGroup, job.class_group_id)
             department = db.get(Department, group.department_id) if group else None
@@ -203,12 +207,12 @@ def process_claimed_capture_batch(batch_id: str, pipeline) -> None:
                 or group is None or not group.is_active
                 or department is None or not department.is_active
             ):
-                _finish_failure(db, job, 409, "Attendance session or its class group is not active.", now)
+                _finish_failure(db, job, 409, "Attendance session or its class group is not active.", now, claimed_attempt)
                 return
             payload = decrypt_capture_payload(job.encrypted_payload, job.payload_nonce, pipeline.settings)
             frames = unpack_capture_frames(payload)
             if len(frames) != job.frame_count:
-                _finish_failure(db, job, 422, "Stored frame count differs from the batch manifest.", now)
+                _finish_failure(db, job, 422, "Stored frame count differs from the batch manifest.", now, claimed_attempt)
                 return
             result = pipeline.identify(
                 db, frames, punch_type=job.punch_type,
@@ -232,22 +236,23 @@ def process_claimed_capture_batch(batch_id: str, pipeline) -> None:
         with SessionLocal() as db:
             job = db.get(CaptureBatchJob, batch_id)
             if job is not None:
-                _finish_failure(db, job, exc.status_code, exc.detail, utcnow())
+                _finish_failure(db, job, exc.status_code, exc.detail, utcnow(), claimed_attempt)
     except Exception:
         logger.exception("Capture batch failed unexpectedly; batch_id=%s", batch_id)
         with SessionLocal() as db:
             job = db.get(CaptureBatchJob, batch_id)
             if job is not None:
-                _finish_failure(db, job, 503, "Worker failed unexpectedly; encrypted capture retained for retry.", utcnow())
+                _finish_failure(db, job, 503, "Worker failed unexpectedly; encrypted capture retained for retry.", utcnow(), claimed_attempt)
 
 
 async def run_capture_batch_worker(pipeline) -> None:
     """Poll the durable database queue; stale claims are recovered after process restart."""
     while True:
         try:
-            batch_id = await asyncio.to_thread(_claim_next_capture_batch)
-            if batch_id:
-                await asyncio.to_thread(process_claimed_capture_batch, batch_id, pipeline)
+            claim = await asyncio.to_thread(_claim_next_capture_batch)
+            if claim:
+                batch_id, claimed_attempt = claim
+                await asyncio.to_thread(process_claimed_capture_batch, batch_id, pipeline, claimed_attempt)
             else:
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
