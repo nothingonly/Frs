@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import admin_actor
 from app.database import get_db
-from app.db.entities import AttendanceEvent, AuditEvent, ModelRegistryEntry, Person
+from app.db.entities import AttendanceEvent, AttendanceSession, AuditEvent, CaptureBatchJob, ModelRegistryEntry, Person
+from app.services.capture_batches import serialize_capture_batch
 
 router = APIRouter(prefix="/api/v1/admin", tags=["administration"])
 
@@ -171,3 +172,54 @@ def list_models(
             "registered_at": row.registered_at.isoformat(),
         } for row in rows],
     }
+
+
+@router.get("/attendance-batches")
+def list_capture_batches(
+    _actor: Annotated[str, Depends(admin_actor)],
+    db: Annotated[Session, Depends(get_db)],
+    attendance_session_id: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    statement = select(CaptureBatchJob)
+    if attendance_session_id:
+        statement = statement.where(CaptureBatchJob.attendance_session_id == attendance_session_id)
+    if status:
+        normalized_status = status.strip().upper()
+        if normalized_status not in {"QUEUED", "PROCESSING", "SUCCEEDED", "REJECTED", "FAILED"}:
+            raise HTTPException(status_code=422, detail="Unknown capture-batch status.")
+        statement = statement.where(CaptureBatchJob.status == normalized_status)
+    rows = db.execute(statement.order_by(CaptureBatchJob.created_at.desc()).limit(limit)).scalars().all()
+    return {"items": [serialize_capture_batch(row) for row in rows]}
+
+
+@router.post("/attendance-batches/{batch_id}/retry")
+def retry_capture_batch(
+    batch_id: str,
+    _actor: Annotated[str, Depends(admin_actor)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    job = db.execute(select(CaptureBatchJob).where(
+        CaptureBatchJob.batch_id == batch_id
+    ).with_for_update()).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Capture batch not found.")
+    if job.status != "FAILED":
+        raise HTTPException(status_code=409, detail="Only failed capture batches can be retried.")
+    now = datetime.now(timezone.utc)
+    if not job.encrypted_payload or not job.payload_nonce or job.payload_expires_at <= now:
+        raise HTTPException(status_code=410, detail="Encrypted payload is missing or expired; capture a fresh batch.")
+    attendance_session = db.get(AttendanceSession, job.attendance_session_id)
+    if attendance_session is None or attendance_session.status != "OPEN":
+        raise HTTPException(status_code=409, detail="The original attendance session is no longer open.")
+    job.status = "QUEUED"
+    job.attempts = 0
+    job.next_attempt_at = now
+    job.started_at = None
+    job.completed_at = None
+    job.error_json = None
+    job.updated_at = now
+    db.commit()
+    db.refresh(job)
+    return serialize_capture_batch(job)
