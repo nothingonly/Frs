@@ -511,6 +511,7 @@ class AttendancePipeline:
         attendance_session_id: str | None = None,
         class_group_id: str | None = None,
         capture_batch_id: str | None = None,
+        capture_batch_attempt: int | None = None,
     ) -> dict[str, Any]:
         session_id = str(uuid.uuid4())
         action = "attendance.verify" if employee_id_claim else "attendance.identify"
@@ -794,12 +795,20 @@ class AttendancePipeline:
         try:
             db.add_all([attendance, audit])
             if capture_batch_id is not None:
-                batch_job = db.execute(select(CaptureBatchJob).where(
-                    CaptureBatchJob.batch_id == capture_batch_id
-                ).with_for_update()).scalar_one_or_none()
-                if batch_job is None or batch_job.status != "PROCESSING":
+                batch_job = db.execute(
+                    select(CaptureBatchJob)
+                    .where(CaptureBatchJob.batch_id == capture_batch_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                ).scalar_one_or_none()
+                if (
+                    batch_job is None
+                    or batch_job.status != "PROCESSING"
+                    or capture_batch_attempt is None
+                    or batch_job.attempts != capture_batch_attempt
+                ):
                     db.rollback()
-                    raise HTTPException(status_code=409, detail="Capture batch no longer owns a processing lease.")
+                    raise HTTPException(status_code=409, detail="Capture batch processing lease was superseded.")
                 batch_job.status = "SUCCEEDED"
                 batch_job.result_json = json.dumps(result_payload, separators=(",", ":"), default=str)
                 batch_job.error_json = None
