@@ -11,6 +11,7 @@ class CameraViewport extends StatefulWidget {
   final VoidCallback onRetakePressed;
   final bool isSubmitting;
   final bool isActive;
+  final bool canRetake;
 
   const CameraViewport({
     super.key,
@@ -19,6 +20,7 @@ class CameraViewport extends StatefulWidget {
     required this.onRetakePressed,
     this.isSubmitting = false,
     this.isActive = true,
+    this.canRetake = true,
   });
 
   @override
@@ -331,7 +333,7 @@ class CameraViewportState extends State<CameraViewport> with WidgetsBindingObser
                 children: [
                   if (_previewImage != null)
                     ElevatedButton.icon(
-                      onPressed: widget.isSubmitting ? null : widget.onRetakePressed,
+                      onPressed: (widget.isSubmitting || !widget.canRetake) ? null : widget.onRetakePressed,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.white.withOpacity(0.9),
                         foregroundColor: AppTheme.primaryDark,
