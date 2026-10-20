@@ -208,6 +208,11 @@ def create_student(
         raise HTTPException(status_code=409, detail="The class group's department is inactive.")
 
     person = db.execute(select(Person).where(Person.employee_id == payload.student_number)).scalar_one_or_none()
+    if person is not None and not person.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="The matching biometric identity is inactive; review/reactivate it before creating an active student.",
+        )
     if person and person.full_name.strip().casefold() != payload.full_name.strip().casefold():
         raise HTTPException(status_code=409, detail="This student number is linked to a different biometric identity.")
     if person is None:
