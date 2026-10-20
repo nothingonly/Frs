@@ -201,3 +201,18 @@ def test_attendance_session_idempotency_key_rejects_different_payload(client_and
     changed = {**base_payload, "subject_name": "Database Systems"}
     response = client.post("/api/v1/admin/college/attendance-sessions", json=changed)
     assert response.status_code == 409
+
+
+
+def test_student_creation_rejects_inactive_biometric_identity(client_and_sessions) -> None:
+    client, sessions = client_and_sessions
+    with sessions() as db:
+        db.add(Person(employee_id="CSE-3099", full_name="Disabled Student", is_active=False))
+        db.commit()
+
+    response = client.post("/api/v1/admin/college/students", json={
+        "student_number": "CSE-3099", "full_name": "Disabled Student",
+    })
+    assert response.status_code == 409, response.text
+    with sessions() as db:
+        assert db.query(Student).filter_by(student_number="CSE-3099").count() == 0
