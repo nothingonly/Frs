@@ -282,7 +282,16 @@ class KioskState {
           throw BiometricQualityException(message);
         }
         if (job.status == 'FAILED') {
-          throw ServerException('${job.errorMessage} Batch ID: ${job.batchId}.');
+          if (!job.payloadAvailable || !job.sessionOpen) {
+            _pendingSessionId = null;
+            _pendingBatchId = null;
+            _pendingIdempotencyKey = null;
+            _capturedImages = <Uint8List>[];
+            throw ServerException(
+              'This capture job can no longer be retried because its encrypted payload expired or the session closed. Capture a fresh frame burst.',
+            );
+          }
+          throw ServerException('${job.errorMessage} Batch ID: ${job.batchId}. The retained batch may be retried by an administrator.');
         }
         if (job.status != 'QUEUED' && job.status != 'PROCESSING') {
           throw ServerException('Unexpected capture batch state: ${job.status}. Batch ID: ${job.batchId}.');
