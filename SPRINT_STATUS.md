@@ -40,6 +40,25 @@ Last updated: 2026-10-20
 - Attendance sessions are persisted, but the recognition endpoint/decision pipeline does not yet require a session or restrict identity matching to that class. Sprint 3 must connect these and verify class-scoped matching.
 - Real, properly licensed model artifacts, threshold calibration, presentation-attack validation and real-device E2E tests remain release blockers.
 
-## Next sprint candidate — Capture-to-attendance integration
 
-Connect an attendance session to the Android batch, persist an upload/job record, scope the eligible identity set to the session's class, run the actual configured model pipeline, store session-linked attendance decisions and ensure jobs recover safely when the GPU worker disconnects. Implement Cloudinary upload/retention only after authorized private-access rules are agreed.
+
+## Sprint 3 — Session-scoped capture-to-attendance (implementation in CI)
+
+### Delivered in this branch
+- Added the durable PostgreSQL/SQLAlchemy capture-job table and migration 0003; input frame bursts are packed and AES-GCM encrypted while queued.
+- Added device-authenticated endpoints to list OPEN sessions, enqueue a capture batch using an idempotency key, and check the status of a batch owned by the same kiosk credential.
+- Added a FastAPI background worker that atomically claims queued jobs, retries transient server failures, recovers stale PROCESSING leases and expires queued payloads after 24 hours.
+- Connected the actual configured face recognition/liveness pipeline to session-aware processing. Eligible templates are limited to active students with an ACTIVE enrollment in the session's class group, including secondary-recognizer checks.
+- Made the accepted attendance-event write and batch SUCCEEDED transition atomic. The attendance event contains the selected attendance-session ID; session-aware cooldown and check-in/check-out state rules are scoped to that session.
+- Added admin-only queue inspection and retry endpoints; the Next.js console now has a Sessions & jobs page for creating/closing class sessions, reading job states and retrying eligible FAILED jobs.
+- Updated the Android kiosk to select a persisted OPEN attendance session, enqueue its real captured frames, poll the server job, and resume the same idempotent request after network errors. Retake/session switching is blocked while local state is holding an uncertain pending batch.
+- Added test coverage for encrypted queue payloads/idempotency/session closure and class-scoped template retrieval.
+
+### Validation and known limits
+- Sprint 3's final CI results are pending at the time of this status update; record actual outcomes after workflows finish.
+- The queue is stored in the PostgreSQL database and survives API process restarts; the worker currently runs inside the FastAPI process and is not a separate autoscaled GPU worker service.
+- No Supabase database, Cloudinary account or target GPU worker is configured here. Migration 0003 has not been executed against a live provider.
+- The kiosk queue path requires an actual open class session and active enrollment linked to real biometric templates; roster rows alone are not biometric enrollment.
+- Legacy direct identify/verify routes still exist for existing clients and do not require class sessions. New college deployments should use the session batch path.
+- The branch does not add or fabricate model artifacts. Verified model licenses, real weights, calibration, attack evaluation and real Android/server end-to-end validation remain release blockers.
+- The pnpm lockfile is still not committed, so web CI has lockfile generation enabled during dependency install.
