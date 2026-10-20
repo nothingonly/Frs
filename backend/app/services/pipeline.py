@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.db.entities import AttendanceEvent, AuditEvent, EmbeddingRecord, Person
+from app.db.entities import AttendanceEvent, AttendanceSession, AuditEvent, ClassEnrollment, EmbeddingRecord, Person, Student
 from app.schemas.contracts import (
     DecisionState,
     RetrievalCandidate,
@@ -152,6 +152,7 @@ class AttendancePipeline:
         model_version: str,
         preprocessing_id: str,
         employee_id: str | None,
+        class_group_id: str | None = None,
     ) -> tuple[list[tuple[Person, np.ndarray]], int]:
         statement = (
             select(EmbeddingRecord, Person)
@@ -167,6 +168,16 @@ class AttendancePipeline:
         )
         if employee_id is not None:
             statement = statement.where(Person.employee_id == employee_id)
+        if class_group_id is not None:
+            eligible_person_ids = select(Student.person_id).join(
+                ClassEnrollment, ClassEnrollment.student_id == Student.student_id
+            ).where(
+                ClassEnrollment.class_group_id == class_group_id,
+                ClassEnrollment.status == "ACTIVE",
+                Student.is_active.is_(True),
+                Student.person_id.is_not(None),
+            )
+            statement = statement.where(Person.person_id.in_(eligible_person_ids))
         rows = db.execute(statement).all()
         vectors_by_person: dict[str, list[np.ndarray]] = defaultdict(list)
         people_by_id: dict[str, Person] = {}
@@ -196,11 +207,13 @@ class AttendancePipeline:
         model_version: str,
         preprocessing_id: str,
         employee_id: str | None = None,
+        class_group_id: str | None = None,
     ) -> tuple[list[RetrievalCandidate], int, float]:
         started = time.perf_counter()
         profiles, row_count = self._read_gallery(
             db, recognizer_id=recognizer_id, model_version=model_version,
             preprocessing_id=preprocessing_id, employee_id=employee_id,
+            class_group_id=class_group_id,
         )
         query_vector = _normalise(query)
         scored: list[RetrievalCandidate] = []
@@ -250,6 +263,7 @@ class AttendancePipeline:
         observations: list[tuple[FrameObservation, str, np.ndarray, str, list[RetrievalCandidate], int]],
         primary_person_id: str | None,
         employee_id: str | None,
+        class_group_id: str | None = None,
     ) -> dict[str, Any] | None:
         primary_models = {model for _obs, model, _emb, _preproc, _top, _count in observations}
         for model_id in self._model_options():
@@ -275,6 +289,7 @@ class AttendancePipeline:
                     top, candidate_count, _latency = self._retrieve(
                         db, embedding, recognizer_id=model_id, model_version=version,
                         preprocessing_id=preprocessing_id, employee_id=employee_id,
+                        class_group_id=class_group_id,
                     )
                 except (VisionError, RuntimeError, ValueError):
                     continue
@@ -320,6 +335,7 @@ class AttendancePipeline:
         actor_id: str,
         action: str,
         employee_id: str | None,
+        class_group_id: str | None = None,
     ) -> tuple[list[tuple[FrameObservation, str, np.ndarray, list[RetrievalCandidate], int]], list[str], dict[str, Any]]:
         evidence: dict[str, Any] = {"pipeline_version": self.vision.pipeline_version, "frames": []}
         reasons: list[str] = []
@@ -435,6 +451,7 @@ class AttendancePipeline:
                 top, candidate_count, retrieval_latency = self._retrieve(
                     db, embedding, recognizer_id=model_id, model_version=version,
                     preprocessing_id=preprocessing_id, employee_id=employee_id,
+                    class_group_id=class_group_id,
                 )
                 threshold = self.settings.threshold_for(model_id)
             except (RuntimeError, ValueError) as exc:
@@ -491,12 +508,27 @@ class AttendancePipeline:
         client_device_id: str,
         actor_id: str,
         employee_id_claim: str | None = None,
+        attendance_session_id: str | None = None,
+        class_group_id: str | None = None,
+        capture_batch_id: str | None = None,
     ) -> dict[str, Any]:
         session_id = str(uuid.uuid4())
         action = "attendance.verify" if employee_id_claim else "attendance.identify"
         actor_type = "kiosk_device"
         if punch_type not in {"CHECK_IN", "CHECK_OUT"}:
             raise HTTPException(status_code=422, detail="punch_type must be CHECK_IN or CHECK_OUT")
+        if bool(attendance_session_id) != bool(class_group_id):
+            raise HTTPException(status_code=422, detail="attendance_session_id and class_group_id must be supplied together")
+        if attendance_session_id is not None:
+            attendance_session = db.execute(select(AttendanceSession).where(
+                AttendanceSession.session_id == attendance_session_id
+            ).with_for_update()).scalar_one_or_none()
+            if attendance_session is None:
+                raise HTTPException(status_code=404, detail="Attendance session not found.")
+            if attendance_session.status != "OPEN":
+                raise HTTPException(status_code=409, detail="Attendance session is not open.")
+            if attendance_session.class_group_id != class_group_id:
+                raise HTTPException(status_code=409, detail="Attendance session does not belong to the submitted class group.")
         if self.settings.require_liveness and self.vision.liveness is None:
             self._fail(
                 db, session_id=session_id, actor_type=actor_type, actor_id=actor_id, action=action,
@@ -509,7 +541,7 @@ class AttendancePipeline:
         try:
             processed, reasons, evidence = self._analyze_burst(
                 db, image_payloads, session_id=session_id, actor_type=actor_type, actor_id=actor_id,
-                action=action, employee_id=employee_id_claim,
+                action=action, employee_id=employee_id_claim, class_group_id=class_group_id,
             )
         except HTTPException:
             raise
@@ -604,6 +636,7 @@ class AttendancePipeline:
         if not temporally_stable or margins_close:
             secondary_evidence = self._secondary_check(
                 db, processed, primary_person_id=primary_person_id, employee_id=employee_id_claim,
+                class_group_id=class_group_id,
             )
             evidence["secondary_check"] = secondary_evidence
             if not secondary_evidence:
@@ -648,16 +681,15 @@ class AttendancePipeline:
 
         now = _utcnow()
         cooldown_start = now - timedelta(seconds=self.settings.attendance_cooldown_seconds)
+        cooldown_stmt = select(AttendanceEvent).where(
+            AttendanceEvent.person_id == person.person_id,
+            AttendanceEvent.punch_type == punch_type,
+            AttendanceEvent.timestamp >= cooldown_start,
+        )
+        if attendance_session_id is not None:
+            cooldown_stmt = cooldown_stmt.where(AttendanceEvent.attendance_session_id == attendance_session_id)
         last_event = db.execute(
-            select(AttendanceEvent)
-            .where(
-                AttendanceEvent.person_id == person.person_id,
-                AttendanceEvent.punch_type == punch_type,
-                AttendanceEvent.timestamp >= cooldown_start,
-            )
-            .order_by(AttendanceEvent.timestamp.desc())
-            .limit(1)
-            .with_for_update()
+            cooldown_stmt.order_by(AttendanceEvent.timestamp.desc()).limit(1).with_for_update()
         ).scalar_one_or_none()
         if last_event is not None and self.settings.attendance_cooldown_seconds > 0:
             last_time = last_event.timestamp
@@ -675,12 +707,11 @@ class AttendancePipeline:
         # Enforce state transitions in addition to duplicate-punch cooldown. CHECK_OUT
         # requires a previous unclosed CHECK_IN; CHECK_IN cannot be repeated until
         # the current attendance session has been closed by CHECK_OUT.
+        latest_stmt = select(AttendanceEvent).where(AttendanceEvent.person_id == person.person_id)
+        if attendance_session_id is not None:
+            latest_stmt = latest_stmt.where(AttendanceEvent.attendance_session_id == attendance_session_id)
         latest_event = db.execute(
-            select(AttendanceEvent)
-            .where(AttendanceEvent.person_id == person.person_id)
-            .order_by(AttendanceEvent.timestamp.desc())
-            .limit(1)
-            .with_for_update()
+            latest_stmt.order_by(AttendanceEvent.timestamp.desc()).limit(1).with_for_update()
         ).scalar_one_or_none()
         if punch_type == "CHECK_IN" and latest_event is not None and latest_event.punch_type == "CHECK_IN":
             self._fail(
@@ -731,6 +762,7 @@ class AttendancePipeline:
             client_device_id=client_device_id,
             pipeline_version=self.vision.pipeline_version,
             evidence_id=audit_id,
+            attendance_session_id=attendance_session_id,
         )
         audit = AuditEvent(
             audit_id=audit_id,
@@ -763,6 +795,8 @@ class AttendancePipeline:
             "threshold": matched_threshold,
             "message": "Attendance recorded after calibrated recognition and temporal confirmation.",
             "audit_id": audit_id,
+            "attendance_session_id": attendance_session_id,
+            "capture_batch_id": capture_batch_id,
         }
 
     def _enrollment_fail(
