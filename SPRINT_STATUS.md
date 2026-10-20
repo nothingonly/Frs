@@ -17,7 +17,8 @@ Last updated: 2026-10-20
 
 ### Intentionally not claimed as complete
 
-- The Next.js package has not been installed/built in this tool environment; the new GitHub Actions workflow must verify it.
+- GitHub Actions passed install, TypeScript type-check, ESLint and Next.js production build on the latest Sprint 1 branch commit. Live backend integration has not been verified against a running instance.
+- No pnpm lockfile is committed yet. The workflow currently permits lockfile generation during install; commit a reviewed lockfile before relying on reproducible dependency installation.
 - No Supabase schema, migrations, Auth/RLS policies or live Supabase integration yet.
 - No Cloudinary upload integration or private asset retention workflow yet.
 - No college department/year/section/class/student schema yet.
