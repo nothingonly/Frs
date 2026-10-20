@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [main, "implementation/**"]
+    branches: [main, "implementation/**", "sprint/**"]
   pull_request:
     branches: [main]
 
