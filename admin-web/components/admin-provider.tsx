@@ -23,6 +23,7 @@ export type AttendanceRecord = {
   client_device_id: string;
   pipeline_version: string;
   evidence_id: string;
+  attendance_session_id: string | null;
 };
 
 export type ModelRecord = {
