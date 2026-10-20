@@ -240,4 +240,7 @@ def get_attendance_batch(
         raise HTTPException(status_code=404, detail="Capture batch not found.")
     if job.device_actor_id != actor_id:
         raise HTTPException(status_code=403, detail="Capture batch belongs to a different kiosk credential.")
-    return serialize_capture_batch(job)
+    payload = serialize_capture_batch(job)
+    attendance_session = db.get(AttendanceSession, job.attendance_session_id)
+    payload["session_open"] = attendance_session is not None and attendance_session.status == "OPEN"
+    return payload
