@@ -168,6 +168,7 @@ def process_claimed_capture_batch(batch_id: str, pipeline) -> None:
             if job.payload_expires_at <= now or not job.encrypted_payload or not job.payload_nonce:
                 _finish_failure(db, job, 410, "Encrypted capture is unavailable or expired.", now)
                 return
+            claimed_attempt = job.attempts
             attendance_session = db.get(AttendanceSession, job.attendance_session_id)
             group = db.get(ClassGroup, job.class_group_id)
             department = db.get(Department, group.department_id) if group else None
@@ -189,6 +190,7 @@ def process_claimed_capture_batch(batch_id: str, pipeline) -> None:
                 client_device_id=job.client_device_id, actor_id=job.device_actor_id,
                 attendance_session_id=job.attendance_session_id,
                 class_group_id=job.class_group_id, capture_batch_id=job.batch_id,
+                capture_batch_attempt=claimed_attempt,
             )
             job = db.get(CaptureBatchJob, batch_id)
             if job is None:
