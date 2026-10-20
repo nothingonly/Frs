@@ -14,7 +14,7 @@ Last updated: 2026-10-20
 ### Validation
 - Admin web: pnpm install, TypeScript type-check, ESLint and Next.js production build passed on GitHub Actions.
 - Backend checks passed on the Sprint 1 pull request.
-- Flutter analysis and tests passed; the Android debug build was still running at the latest check.
+- Flutter analysis, tests and Android debug APK build have subsequently passed on the Sprint 3 branch.
 - No live FastAPI/browser test was performed in the remote code-editing environment.
 
 ## Sprint 2 — College domain model and admin setup
@@ -32,7 +32,7 @@ Last updated: 2026-10-20
 - Exposed optional session association in the attendance admin view.
 
 ### Validation and known limits
-- GitHub Actions on the latest code revision: Python compile and Ruff passed; all 41 backend tests passed; Next.js dependency install, TypeScript, ESLint and production build passed. Flutter analysis and tests passed; the Android debug APK build was still running at the last check.
+- Sprint 2's latest branch checks passed before Sprint 3 integration; Sprint 3's current checks cover the combined backend, Next.js, and Flutter state. PR #3 remains open/draft and has not been merged.
 - Supabase credentials are not configured here, so no migration has been run against a live Supabase project.
 - No production identity provider or institutional role model exists yet; do not expose the development bearer-key console publicly.
 - Student enrollment images, Cloudinary integration, durable processing workers and class-scoped recognition are not yet implemented.
@@ -42,23 +42,30 @@ Last updated: 2026-10-20
 
 
 
-## Sprint 3 — Session-scoped capture-to-attendance (implementation in CI)
+## Sprint 3 — Session-scoped capture-to-attendance
 
 ### Delivered in this branch
 - Added the durable PostgreSQL/SQLAlchemy capture-job table and migration 0003; input frame bursts are packed and AES-GCM encrypted while queued.
 - Added device-authenticated endpoints to list OPEN sessions, enqueue a capture batch using an idempotency key, and check the status of a batch owned by the same kiosk credential.
-- Added a FastAPI background worker that atomically claims queued jobs, retries transient server failures, recovers stale PROCESSING leases and expires queued payloads after 24 hours.
+- Added a FastAPI background worker that atomically claims queued jobs, carries claim-generation tokens through the pipeline, retries transient server failures, recovers stale PROCESSING leases and expires queued payloads after 24 hours.
 - Connected the actual configured face recognition/liveness pipeline to session-aware processing. Eligible templates are limited to active students with an ACTIVE enrollment in the session's class group, including secondary-recognizer checks.
 - Made the accepted attendance-event write and batch SUCCEEDED transition atomic. The attendance event contains the selected attendance-session ID; session-aware cooldown and check-in/check-out state rules are scoped to that session.
 - Added admin-only queue inspection and retry endpoints; the Next.js console now has a Sessions & jobs page for creating/closing class sessions, reading job states and retrying eligible FAILED jobs.
 - Updated the Android kiosk to select a persisted OPEN attendance session, enqueue its real captured frames, poll the server job, and resume the same idempotent request after network errors. Retake/session switching is blocked while local state is holding an uncertain pending batch.
-- Added test coverage for encrypted queue payloads/idempotency/session closure and class-scoped template retrieval.
+- Added test coverage for encrypted queue payloads/idempotency/session closure, class-scoped template retrieval, and stale-worker attempts that must not overwrite newer claims.
 
 ### Validation and known limits
-- Sprint 3's final CI results are pending at the time of this status update; record actual outcomes after workflows finish.
+- Validation passed on code commit `478cd5dfe0916d294f2b0aaeac645e4fbc002d65`: backend compile and Ruff passed with 45 tests passed (1 dependency deprecation warning); Next.js install, TypeScript, ESLint and production build passed; Flutter analysis, Flutter tests, Android debug APK build and artifact upload passed. See [backend CI](https://github.com/nothingonly/Frs/actions/runs/39389732670), [admin web CI](https://github.com/nothingonly/Frs/actions/runs/39389732692), and [Flutter/APK CI](https://github.com/nothingonly/Frs/actions/runs/39389732655).
 - The queue is stored in the PostgreSQL database and survives API process restarts; the worker currently runs inside the FastAPI process and is not a separate autoscaled GPU worker service.
 - No Supabase database, Cloudinary account or target GPU worker is configured here. Migration 0003 has not been executed against a live provider.
 - The kiosk queue path requires an actual open class session and active enrollment linked to real biometric templates; roster rows alone are not biometric enrollment.
 - Legacy direct identify/verify routes still exist for existing clients and do not require class sessions. New college deployments should use the session batch path.
 - The branch does not add or fabricate model artifacts. Verified model licenses, real weights, calibration, attack evaluation and real Android/server end-to-end validation remain release blockers.
 - The pnpm lockfile is still not committed, so web CI has lockfile generation enabled during dependency install.
+
+
+## Next sprint candidate — Private enrollment/media and production worker separation
+- Decide the institution's biometric notice, retention/deletion period, incident response, and non-biometric alternative before retaining face source images.
+- Implement a private object-storage adapter (Cloudinary only if its private-access, signed URL, deletion, region, and retention semantics are approved) and an explicit enrollment image-to-real-template workflow.
+- Move job execution out of FastAPI into a separately supervised worker deployment, with operational metrics, lease/queue monitoring, deployment-specific concurrency validation and restart testing.
+- Reproducible workspace installs still need a reviewed/committed pnpm lockfile. Institutional authentication/roles, live provider migrations, lawful model/license attestation, calibration, liveness evaluation and real-device end-to-end trials remain release work.
