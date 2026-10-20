@@ -12,7 +12,7 @@ Do not treat architecture documentation, mocked/unit tests, CI green status, or 
 
 ## Scope
 
-1. Preserve the existing fail-closed decision policy and session-scoped active-enrollment matching.
+1. Preserve the existing fail-closed decision policy and session-scoped active-enrollment matching. Disable legacy unscoped `/identify` and `/verify` attendance routes in production so session/class scoping cannot be bypassed.
 2. Add/strengthen deterministic automated regression coverage for the complete API contract: open session, authenticated batch enqueue, idempotent retry, status polling, closed-session rejection, unknown/ambiguous recognition, and no attendance event on non-accept decisions.
 3. Add a repeatable test-environment runbook for applying migrations 0001–0003, creating a test department/class/student/session, provisioning authorized model artifacts, running the backend and worker, and collecting evidence.
 4. Define a signed-off end-to-end evidence report format tied to commit, database migration version, model artifact hashes, preprocessing IDs, configuration, device/build, test-set split, metrics, latency, and failure cases.
