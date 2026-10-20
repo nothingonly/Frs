@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../exceptions/api_exceptions.dart';
 import '../models/attendance_result.dart';
+import '../models/capture_batch.dart';
 import '../models/punch_type.dart';
 import '../services/api_service.dart';
 
@@ -33,6 +35,9 @@ class KioskState {
   PunchType _punchType = PunchType.checkIn;
   List<Uint8List> _capturedImages = <Uint8List>[];
   bool _isSubmitting = false;
+  String? _pendingSessionId;
+  String? _pendingBatchId;
+  String? _pendingIdempotencyKey;
 
   AttendanceVerificationResult? _lastSuccessResult;
   AttendanceIdentificationResult? _lastIdentificationResult;
@@ -59,6 +64,8 @@ class KioskState {
   List<Uint8List> get capturedImages => List<Uint8List>.unmodifiable(_capturedImages);
   bool get hasUsableBurst => _capturedImages.length >= 3 && _capturedImages.every((frame) => frame.isNotEmpty);
   bool get isSubmitting => _isSubmitting;
+  bool get hasPendingSessionBatch => _pendingSessionId != null;
+  String? get pendingBatchId => _pendingBatchId;
   AttendanceVerificationResult? get lastSuccessResult => _lastSuccessResult;
   AttendanceIdentificationResult? get lastIdentificationResult => _lastIdentificationResult;
 
@@ -141,6 +148,12 @@ class KioskState {
   void setCapturedImage(Uint8List imageBytes) => setCapturedImages([imageBytes]);
 
   void clearCapturedImage() {
+    if (_pendingSessionId != null) {
+      _status = KioskStatus.serverError;
+      _errorMessage = 'This capture is already queued or awaiting confirmation. Continue checking the same session instead of retaking it.';
+      notifyListeners();
+      return;
+    }
     _capturedImages = <Uint8List>[];
     _updateReadyStatus();
     notifyListeners();
@@ -190,6 +203,111 @@ class KioskState {
     }
   }
 
+  String _newCaptureIdempotencyKey() {
+    final random = math.Random.secure();
+    final entropy = List.generate(
+      16,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+    return '${DateTime.now().toUtc().microsecondsSinceEpoch}-$entropy';
+  }
+
+  /// Submits frames against a selected open attendance session using the durable job API.
+  /// Pending job identity is retained after network errors so a retry never creates a second job.
+  Future<void> submitSessionAttendance(FrsApiService apiService, String attendanceSessionId) async {
+    if (_isSubmitting) return;
+    if (!hasUsableBurst) {
+      _status = KioskStatus.idle;
+      _errorMessage = 'Capture at least three separate camera frames before submitting.';
+      notifyListeners();
+      return;
+    }
+    if (_pendingSessionId != null && _pendingSessionId != attendanceSessionId) {
+      _status = KioskStatus.serverError;
+      _errorMessage = 'A capture job is pending for another session. Re-select that session and check its result first.';
+      notifyListeners();
+      return;
+    }
+    if (_pendingSessionId == null) {
+      _pendingSessionId = attendanceSessionId;
+      _pendingIdempotencyKey = _newCaptureIdempotencyKey();
+    }
+
+    _isSubmitting = true;
+    _status = KioskStatus.submitting;
+    _errorMessage = null;
+    _cancelCooldownTimer();
+    _cancelAutoResetTimer();
+    notifyListeners();
+    try {
+      CaptureBatchJob job;
+      if (_pendingBatchId == null) {
+        job = await apiService.enqueueCaptureBatch(
+          attendanceSessionId: attendanceSessionId,
+          idempotencyKey: _pendingIdempotencyKey!,
+          imageFrames: _capturedImages,
+          punchType: _punchType,
+        );
+        _pendingBatchId = job.batchId;
+      } else {
+        job = await apiService.getCaptureBatch(_pendingBatchId!);
+      }
+
+      for (var attempt = 0; attempt < 120; attempt++) {
+        if (job.status == 'SUCCEEDED') {
+          final payload = job.result;
+          if (payload == null) {
+            throw const ServerException('The capture job succeeded without an attendance result payload.');
+          }
+          final result = AttendanceIdentificationResult.fromJson(payload);
+          _pendingSessionId = null;
+          _pendingBatchId = null;
+          _pendingIdempotencyKey = null;
+          _status = KioskStatus.accepted;
+          _lastIdentificationResult = result;
+          _matchedEmployeeName = result.fullName;
+          _matchedEmployeeId = result.employeeId;
+          _matchedDepartment = result.department;
+          _lastSimilarityScore = result.similarityScore;
+          _requiredThreshold = result.threshold;
+          _errorMessage = null;
+          _startAutoResetTimer(durationSeconds: 5);
+          return;
+        }
+        if (job.status == 'REJECTED') {
+          final message = job.errorMessage;
+          _pendingSessionId = null;
+          _pendingBatchId = null;
+          _pendingIdempotencyKey = null;
+          throw BiometricQualityException(message);
+        }
+        if (job.status == 'FAILED') {
+          throw ServerException('${job.errorMessage} Batch ID: ${job.batchId}.');
+        }
+        if (job.status != 'QUEUED' && job.status != 'PROCESSING') {
+          throw ServerException('Unexpected capture batch state: ${job.status}. Batch ID: ${job.batchId}.');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 750));
+        job = await apiService.getCaptureBatch(job.batchId);
+      }
+      throw ServerException('Capture batch ${job.batchId} is still ${job.status}. Tap the same session again to resume status checking.');
+    } on NetworkException catch (error) {
+      _status = KioskStatus.networkError;
+      _errorMessage = error.message;
+    } on BiometricQualityException catch (error) {
+      _status = KioskStatus.qualityError;
+      _errorMessage = error.message;
+    } on FrsApiException catch (error) {
+      _status = KioskStatus.serverError;
+      _errorMessage = error.message;
+    } catch (error) {
+      _status = KioskStatus.serverError;
+      _errorMessage = 'Capture batch could not be confirmed: $error';
+    } finally {
+      _isSubmitting = false;
+      notifyListeners();
+    }
+  }
   /// Primary 1:N automatic biometric attendance punch (No employee ID entered).
   Future<void> submitAutomaticIdentification(FrsApiService apiService) async {
     if (_isSubmitting) return;
@@ -379,6 +497,12 @@ class KioskState {
 
   /// Resets the kiosk state for the next person.
   void reset() {
+    if (_pendingSessionId != null) {
+      _status = KioskStatus.serverError;
+      _errorMessage = 'A queued capture is still pending. Select the same session to resume checking; do not discard its local evidence yet.';
+      notifyListeners();
+      return;
+    }
     _cancelCooldownTimer();
     _cancelAutoResetTimer();
     _status = KioskStatus.idle;
