@@ -1,0 +1,10 @@
+{
+  "name": "frs-workspace",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @frs/admin-web dev",
+    "build": "pnpm --filter @frs/admin-web build",
+    "lint": "pnpm --filter @frs/admin-web lint",
+    "typecheck": "pnpm --filter @frs/admin-web typecheck"
+  }
+}
