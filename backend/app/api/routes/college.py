@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/v1/admin/college", tags=["college administration
 
 def _audit(db: Session, actor: str, action: str, state: str, item_id: str, evidence: dict[str, Any]) -> None:
     db.add(AuditEvent(
-        session_id=f"college:{item_id}", actor_type="administrator", actor_id=actor,
+        session_id=item_id, actor_type="administrator", actor_id=actor,
         action=action, decision_state=state,
         reason_codes_json=json.dumps([action.upper().replace(".", "_")]),
         evidence_json=json.dumps(evidence, sort_keys=True),
