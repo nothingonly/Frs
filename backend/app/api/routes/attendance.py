@@ -51,6 +51,15 @@ async def _read_burst(
     return payloads
 
 
+def _require_session_scoped_attendance(settings) -> None:
+    """Prevent legacy unscoped attendance writes in production college deployments."""
+    if settings.env.strip().lower() == "production":
+        raise HTTPException(
+            status_code=409,
+            detail="Session-scoped attendance is required in production; use an open attendance session.",
+        )
+
+
 @router.post("/identify")
 async def identify_attendance(
     request: Request,
@@ -62,6 +71,7 @@ async def identify_attendance(
     image: Annotated[UploadFile | None, File()] = None,
 ):
     settings = request.app.state.settings
+    _require_session_scoped_attendance(settings)
     payloads = await _read_burst(
         images, image, settings.max_upload_bytes, settings.max_request_bytes,
         settings.minimum_identification_frames, settings.maximum_identification_frames,
@@ -87,6 +97,7 @@ async def verify_attendance(
     image: Annotated[UploadFile | None, File()] = None,
 ):
     settings = request.app.state.settings
+    _require_session_scoped_attendance(settings)
     payloads = await _read_burst(
         images, image, settings.max_upload_bytes, settings.max_request_bytes,
         settings.minimum_identification_frames, settings.maximum_identification_frames,
