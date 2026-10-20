@@ -158,8 +158,8 @@ export default function AttendanceSessionsPage() {
       setSubjectCode("");
       setSubjectName("");
       setStartsAt("");
-      setSelectedSessionId(created.session_id);
       await refresh();
+      await selectSession(created.session_id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create attendance session.");
     } finally {
