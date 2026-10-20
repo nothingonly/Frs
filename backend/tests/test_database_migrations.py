@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import create_engine, inspect, text
 
-from app.database import _upgrade_model_registry_provenance
+from app.database import _upgrade_attendance_session_link, _upgrade_model_registry_provenance
 
 
 def test_model_registry_provenance_columns_are_added_to_existing_database() -> None:
@@ -50,5 +50,29 @@ def test_model_registry_provenance_columns_are_added_to_existing_database() -> N
 
         # The migration is idempotent and does not fail on the already upgraded table.
         _upgrade_model_registry_provenance(engine)
+    finally:
+        engine.dispose()
+
+
+
+def test_attendance_session_link_is_added_to_an_existing_database() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE attendance_sessions (session_id VARCHAR(36) PRIMARY KEY)"
+            ))
+            connection.execute(text(
+                "CREATE TABLE attendance_events (attendance_id VARCHAR(36) PRIMARY KEY, employee_id VARCHAR(80) NOT NULL)"
+            ))
+
+        _upgrade_attendance_session_link(engine)
+        columns = {column["name"] for column in inspect(engine).get_columns("attendance_events")}
+        assert "attendance_session_id" in columns
+        indexes = {index["name"] for index in inspect(engine).get_indexes("attendance_events")}
+        assert "ix_attendance_events_attendance_session_id" in indexes
+
+        # Re-running the compatibility migration is safe.
+        _upgrade_attendance_session_link(engine)
     finally:
         engine.dispose()
