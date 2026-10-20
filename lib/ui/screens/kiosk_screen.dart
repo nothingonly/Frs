@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../config/app_config.dart';
 import '../../models/punch_type.dart';
+import '../../models/attendance_session.dart';
 import '../../services/api_service.dart';
 import '../../state/kiosk_state.dart';
 import '../theme/app_theme.dart';
@@ -30,6 +32,10 @@ class _KioskScreenState extends State<KioskScreen> {
   late FrsApiService _apiService;
   late final KioskState _state;
   bool _kioskCameraActive = true;
+  List<AttendanceSessionOption> _attendanceSessions = <AttendanceSessionOption>[];
+  String? _selectedAttendanceSessionId;
+  String? _sessionLoadError;
+  bool _sessionsLoading = false;
   final GlobalKey<CameraViewportState> _kioskCameraKey = GlobalKey<CameraViewportState>();
 
   @override
@@ -39,6 +45,7 @@ class _KioskScreenState extends State<KioskScreen> {
     _apiService = FrsApiService(config: _config);
     _state = KioskState();
     _state.addListener(_onStateChanged);
+    unawaited(_refreshOpenSessions());
   }
 
   @override
@@ -57,6 +64,32 @@ class _KioskScreenState extends State<KioskScreen> {
       _config = newConfig;
       _apiService = FrsApiService(config: _config);
     });
+    unawaited(_refreshOpenSessions());
+  }
+
+  Future<void> _refreshOpenSessions() async {
+    if (mounted) setState(() { _sessionsLoading = true; _sessionLoadError = null; });
+    try {
+      final sessions = await _apiService.listOpenAttendanceSessions();
+      if (!mounted) return;
+      setState(() {
+        final priorIndex = _attendanceSessions.indexWhere((item) => item.sessionId == _selectedAttendanceSessionId);
+        final priorSelection = priorIndex >= 0 ? _attendanceSessions[priorIndex] : null;
+        _attendanceSessions = sessions;
+        if (_state.hasPendingSessionBatch && _selectedAttendanceSessionId != null &&
+            !_attendanceSessions.any((item) => item.sessionId == _selectedAttendanceSessionId) && priorSelection != null) {
+          _attendanceSessions = [..._attendanceSessions, priorSelection];
+        }
+        if (!_state.hasPendingSessionBatch &&
+            !_attendanceSessions.any((item) => item.sessionId == _selectedAttendanceSessionId)) {
+          _selectedAttendanceSessionId = _attendanceSessions.isEmpty ? null : _attendanceSessions.first.sessionId;
+        }
+      });
+    } catch (error) {
+      if (mounted) setState(() => _sessionLoadError = error.toString());
+    } finally {
+      if (mounted) setState(() => _sessionsLoading = false);
+    }
   }
 
   Future<void> _openSettings() async {
@@ -217,6 +250,7 @@ class _KioskScreenState extends State<KioskScreen> {
                          isActive: _kioskCameraActive,
                         onRetakePressed: _state.clearCapturedImage,
                         isSubmitting: _state.isSubmitting,
+                        canRetake: !_state.hasPendingSessionBatch,
                       ),
                     ),
                   ),
@@ -246,6 +280,7 @@ class _KioskScreenState extends State<KioskScreen> {
                          isActive: _kioskCameraActive,
                         onRetakePressed: _state.clearCapturedImage,
                         isSubmitting: _state.isSubmitting,
+                        canRetake: !_state.hasPendingSessionBatch,
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -264,7 +299,49 @@ class _KioskScreenState extends State<KioskScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // 1. Punch Type Toggle (CHECK_IN vs CHECK_OUT)
+        // Choose a persisted OPEN class attendance session before submitting.
+        Row(
+          children: [
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                value: _selectedAttendanceSessionId,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Open attendance session',
+                  prefixIcon: Icon(Icons.class_outlined),
+                  border: OutlineInputBorder(),
+                ),
+                items: _attendanceSessions.map((session) => DropdownMenuItem<String>(
+                  value: session.sessionId,
+                  child: Text(session.displayLabel, overflow: TextOverflow.ellipsis),
+                )).toList(),
+                onChanged: (_state.isSubmitting || _state.hasPendingSessionBatch || _sessionsLoading)
+                    ? null
+                    : (value) => setState(() => _selectedAttendanceSessionId = value),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: 'Refresh open sessions',
+              onPressed: _sessionsLoading || _state.isSubmitting ? null : () => unawaited(_refreshOpenSessions()),
+              icon: _sessionsLoading
+                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.refresh),
+            ),
+          ],
+        ),
+        if (_sessionLoadError != null) ...[
+          const SizedBox(height: 6),
+          Text(_sessionLoadError!, style: const TextStyle(color: AppTheme.errorRed, fontSize: 12)),
+        ],
+        if (!_sessionsLoading && _attendanceSessions.isEmpty) ...[
+          const SizedBox(height: 6),
+          const Text('No open attendance sessions are available. Create and open a class session in the admin console.',
+            style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+        ],
+        const SizedBox(height: 16),
+
+        // Punch type is scoped to the selected attendance session.
         PunchSelector(
           selectedType: _state.punchType,
           onChanged: _state.setPunchType,
@@ -295,9 +372,9 @@ class _KioskScreenState extends State<KioskScreen> {
               ),
               SizedBox(height: 8),
               Text(
-                '1. Look directly at the camera with face centered.\n'
-                '2. Tap "Capture Face" on the camera preview.\n'
-                '3. Tap the button below to automatically record attendance.',
+                '1. Select the correct open class/session.\n'
+                '2. Look at the camera and capture three separate frames.\n'
+                '3. Submit once; the server queues, recognizes and confirms attendance.',
                 style: TextStyle(fontSize: 13, color: AppTheme.textSecondary, height: 1.4),
               ),
             ],
@@ -308,8 +385,8 @@ class _KioskScreenState extends State<KioskScreen> {
         // 3. Primary Action Button (Submit Automatic 1:N Punch)
         ElevatedButton(
           key: const ValueKey('submit_punch_button'),
-          onPressed: _state.canSubmit
-              ? () => _state.submitAutomaticIdentification(_apiService)
+          onPressed: _state.canSubmit && _selectedAttendanceSessionId != null
+              ? () => _state.submitSessionAttendance(_apiService, _selectedAttendanceSessionId!)
               : null,
           style: ElevatedButton.styleFrom(
             backgroundColor: _state.punchType == PunchType.checkIn
@@ -335,11 +412,15 @@ class _KioskScreenState extends State<KioskScreen> {
                   ],
                 )
               : Text(
-                  _state.capturedImage == null
-                      ? 'Capture 3 Frames to Punch'
-                      : (_state.punchType == PunchType.checkIn
-                          ? 'Submit CHECK IN'
-                          : 'Submit CHECK OUT'),
+                  _selectedAttendanceSessionId == null
+                      ? 'Select an open session'
+                      : (_state.hasPendingSessionBatch
+                          ? 'Resume attendance confirmation'
+                          : (_state.capturedImage == null
+                              ? 'Capture 3 Frames to Punch'
+                              : (_state.punchType == PunchType.checkIn
+                                  ? 'Submit CHECK IN to Session'
+                                  : 'Submit CHECK OUT to Session'))),
                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
         ),
@@ -348,7 +429,7 @@ class _KioskScreenState extends State<KioskScreen> {
           const SizedBox(height: 10),
           OutlinedButton.icon(
             key: const ValueKey('retake_button'),
-            onPressed: _state.clearCapturedImage,
+            onPressed: _state.hasPendingSessionBatch ? null : _state.clearCapturedImage,
             icon: const Icon(Icons.refresh, size: 18),
             label: const Text('Clear / Retake Photo'),
             style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(44)),

@@ -5,6 +5,8 @@ import 'package:http/http.dart' as http;
 import '../config/app_config.dart';
 import '../exceptions/api_exceptions.dart';
 import '../models/attendance_result.dart';
+import '../models/attendance_session.dart';
+import '../models/capture_batch.dart';
 import '../models/health_status.dart';
 import '../models/punch_type.dart';
 
@@ -90,6 +92,86 @@ class FrsApiService {
     throw ServerException('Unexpected identification response status ${response.statusCode}');
   }
 
+  /// Lists persisted OPEN sessions for this authenticated kiosk/device credential.
+  Future<List<AttendanceSessionOption>> listOpenAttendanceSessions() async {
+    config.validateTransport();
+    _requireDeviceCredential();
+    final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/sessions/open');
+    try {
+      final response = await _client.get(uri, headers: {
+        'Authorization': 'Bearer ${config.apiKeySecret}',
+      }).timeout(const Duration(seconds: 15));
+      final body = _parseJsonBody(response.bodyBytes);
+      if (response.statusCode == 200) {
+        final items = body['items'];
+        if (items is! List) throw const FormatException('Open-session response is missing its items list.');
+        return items
+            .whereType<Map<String, dynamic>>()
+            .map(AttendanceSessionOption.fromJson)
+            .toList(growable: false);
+      }
+      _handleErrorStatus(response.statusCode, body, response.body);
+      throw ServerException('Unexpected open-session response status ${response.statusCode}');
+    } catch (error) {
+      if (error is FrsApiException) rethrow;
+      throw NetworkException('Unable to load open attendance sessions: $error');
+    }
+  }
+
+  /// Enqueues a camera burst for one specific open class session. Retries with the same
+  /// idempotency key return the existing job instead of creating another attendance attempt.
+  Future<CaptureBatchJob> enqueueCaptureBatch({
+    required String attendanceSessionId,
+    required String idempotencyKey,
+    required List<Uint8List> imageFrames,
+    required PunchType punchType,
+    String? clientDeviceId,
+  }) async {
+    config.validateTransport();
+    _requireDeviceCredential();
+    _validateImageBurst(imageFrames);
+    if (idempotencyKey.trim().length < 12 || idempotencyKey.trim().length > 120) {
+      throw const FormatException('Capture idempotency key must be between 12 and 120 characters.');
+    }
+    final uri = Uri.parse(
+      '${config.apiBaseUrl}/api/v1/attendance/sessions/${Uri.encodeComponent(attendanceSessionId)}/batches',
+    );
+    final request = http.MultipartRequest('POST', uri);
+    request.headers['Authorization'] = 'Bearer ${config.apiKeySecret}';
+    request.fields['idempotency_key'] = idempotencyKey.trim();
+    request.fields['punch_type'] = punchType.value;
+    request.fields['client_device_id'] = clientDeviceId ?? config.clientDeviceId;
+    _addImageBurst(request, imageFrames, 'attendance_batch');
+    final streamed = await _send(request);
+    final response = await http.Response.fromStream(streamed);
+    final body = _parseJsonBody(response.bodyBytes);
+    if (response.statusCode == 200 || response.statusCode == 202) {
+      return CaptureBatchJob.fromJson(body);
+    }
+    _handleErrorStatus(response.statusCode, body, response.body);
+    throw ServerException('Unexpected capture-batch enqueue response status ${response.statusCode}');
+  }
+
+  /// Reads the server-persisted state for a previously enqueued capture batch.
+  Future<CaptureBatchJob> getCaptureBatch(String batchId) async {
+    config.validateTransport();
+    _requireDeviceCredential();
+    final uri = Uri.parse(
+      '${config.apiBaseUrl}/api/v1/attendance/batches/${Uri.encodeComponent(batchId)}',
+    );
+    try {
+      final response = await _client.get(uri, headers: {
+        'Authorization': 'Bearer ${config.apiKeySecret}',
+      }).timeout(const Duration(seconds: 15));
+      final body = _parseJsonBody(response.bodyBytes);
+      if (response.statusCode == 200) return CaptureBatchJob.fromJson(body);
+      _handleErrorStatus(response.statusCode, body, response.body);
+      throw ServerException('Unexpected capture-batch status response ${response.statusCode}');
+    } catch (error) {
+      if (error is FrsApiException) rethrow;
+      throw NetworkException('Unable to read capture-batch status: $error');
+    }
+  }
   /// Administrator enrollment. The admin credential is supplied explicitly by the
   /// protected admin gate and is never re-used as the ordinary kiosk device key.
   Future<Map<String, dynamic>> adminEnroll({

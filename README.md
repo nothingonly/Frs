@@ -155,3 +155,12 @@ No software license has been granted by this repository unless a separate licens
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Changes affecting recognition, security, persistence, audit or attendance state transitions must include tests and preserve fail-closed behavior.
+
+
+## Session-based college attendance (Sprint 3)
+
+The Next.js admin console includes a Sessions & jobs page for creating an open subject session for a configured class group, closing sessions, inspecting capture-job outcomes and retrying eligible failed jobs. The Android kiosk lists open sessions from the authenticated FastAPI server. Attendance capture is queued with an idempotency key; the server encrypts frames at rest while queued and processes the submitted burst through the configured biometric pipeline using only active enrollments in that class.
+
+Kiosk session flow: GET /api/v1/attendance/sessions/open, POST /api/v1/attendance/sessions/{session_id}/batches, then GET /api/v1/attendance/batches/{batch_id}. The administrative queue endpoints require the administrator bearer credential. Apply backend/migrations/0003_capture_batches.sql after migrations 0001 and 0002 on a fresh PostgreSQL/Supabase database.
+
+This implementation has not been tested against a live Supabase project or with target-device camera frames/model assets. The worker currently polls inside FastAPI; deployment-specific multi-instance and GPU-worker supervision still need implementation/review. See backend/migrations/README.md and SPRINT_STATUS.md for scope and validation boundaries.

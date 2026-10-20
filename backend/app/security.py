@@ -37,3 +37,17 @@ def encrypt_embedding(embedding: bytes, settings: Settings | None = None) -> tup
 def decrypt_embedding(ciphertext: bytes, nonce: bytes, settings: Settings | None = None) -> bytes:
     settings = settings or get_settings()
     return AESGCM(settings.encryption_key_bytes()).decrypt(nonce, ciphertext, b"frs-embedding-v1")
+
+
+def encrypt_capture_payload(payload: bytes, settings: Settings | None = None) -> tuple[bytes, bytes]:
+    """Encrypt a short-lived camera burst using a separate authenticated-data context."""
+    settings = settings or get_settings()
+    nonce = secrets.token_bytes(12)
+    encrypted = AESGCM(settings.encryption_key_bytes()).encrypt(nonce, payload, b"frs-capture-batch-v1")
+    return encrypted, nonce
+
+
+def decrypt_capture_payload(ciphertext: bytes, nonce: bytes, settings: Settings | None = None) -> bytes:
+    """Decrypt a queued camera burst; authentication failures must stop processing."""
+    settings = settings or get_settings()
+    return AESGCM(settings.encryption_key_bytes()).decrypt(nonce, ciphertext, b"frs-capture-batch-v1")

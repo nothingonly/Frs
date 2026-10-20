@@ -4,6 +4,7 @@ Run these scripts in order against a fresh PostgreSQL database, including a fres
 
 1. `0001_base_schema.sql` creates the existing FRS biometric base tables: people, encrypted embeddings, attendance events, audit events and model registry.
 2. `0002_college_domain.sql` creates departments, class groups, students, class enrollments and attendance sessions, then adds the optional attendance-session link to legacy attendance events.
+3. `0003_capture_batches.sql` creates the encrypted attendance capture queue and enables RLS without adding public policies.
 
 These scripts are idempotent for the current schema shape and intentionally insert no sample records. For a database already created by an earlier FRS version, back up first and apply the scripts in a staging copy before production.
 
@@ -28,7 +29,7 @@ RLS on its own is not a complete authorization design. Review grants, database r
 - `attendance_sessions`: a class-specific subject attendance event with open/closed state and optional idempotency key.
 - `attendance_events.attendance_session_id`: optional reference for new class-scoped attendance; old events remain unassigned.
 
-Creating a student through `POST /api/v1/admin/college/students` creates or links a `persons` identity record but does not make an embedding. Existing biometric enrollment remains a separate operation. No attendance recognition flow uses a class-group filter yet; that is a subsequent integration step and must not be inferred from this schema alone.
+Creating a student through `POST /api/v1/admin/college/students` creates or links a `persons` identity record but does not make an embedding. Existing biometric enrollment remains a separate operation. The session-aware kiosk queue invokes the configured recognition pipeline with the selected session and class group. The gallery is filtered to active students with active enrollments in that class, and accepted attendance events retain the session ID. Legacy identify/verify endpoints remain for existing non-session clients; new college kiosk deployments should use the session batch endpoint.
 
 ## API endpoints
 
@@ -42,3 +43,12 @@ All routes below require the configured administrator bearer credential.
 - `POST /api/v1/admin/college/attendance-sessions/{session_id}/close`
 
 Administrative creates, enrollment changes, withdrawals and session transitions write audit events. Withdrawals are soft status changes rather than destructive deletes.
+
+
+## Capture-to-attendance flow (Sprint 3)
+
+Authenticated kiosk clients call GET /api/v1/attendance/sessions/open, submit a burst to POST /api/v1/attendance/sessions/{session_id}/batches with a 12–120 character idempotency key, then poll GET /api/v1/attendance/batches/{batch_id}. The server stores only an AES-GCM-encrypted packed frame burst while work is pending; FRS_DATA_ENCRYPTION_KEY must be present on every API worker instance. The worker calls the same real AttendancePipeline used by direct attendance APIs; it does not generate model scores or synthesize accepted responses.
+
+A successful recognition and the capture-job transition to SUCCEEDED are committed in the same SQL transaction. This prevents two competing workers from creating two accepted events for one batch. Accepted/rejected payload bytes are cleared. Retries of transient server failures are limited to three attempts and payload retention is capped at 24 hours. Failed jobs can be inspected/retried by administrators while their payload is still retained and the source session remains open.
+
+The included worker polls from the FastAPI application process. For production GPU/scale deployments, separate the worker into a supervised worker service and validate lease, shutdown, concurrency, and metrics on the selected PostgreSQL deployment. The current code does not imply a Cloudinary integration or live database deployment.

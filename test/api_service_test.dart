@@ -104,6 +104,78 @@ void main() {
       expect(request.files, hasLength(3));
     });
 
+    test('open-session endpoint returns persisted session metadata', () async {
+      final client = BoundaryHttpClient(
+        statusCode: 200,
+        body: jsonEncode({
+          'items': [
+            {
+              'session_id': 'session-1', 'class_group_id': 'group-1',
+              'subject_name': 'Operating Systems', 'subject_code': 'CS401',
+              'starts_at': '2026-10-20T04:00:00Z', 'department_code': 'CSE',
+              'year_of_study': 3, 'section': 'A', 'academic_year': '2026-2027',
+            },
+          ],
+        }),
+      );
+      final sessions = await FrsApiService(config: config, client: client).listOpenAttendanceSessions();
+      expect(sessions, hasLength(1));
+      expect(sessions.single.sessionId, 'session-1');
+      expect(sessions.single.classGroupId, 'group-1');
+      expect(sessions.single.displayLabel, contains('Operating Systems'));
+      expect(client.lastRequest!.url.path, '/api/v1/attendance/sessions/open');
+      expect(client.lastRequest!.headers['Authorization'], 'Bearer ${config.apiKeySecret}');
+    });
+
+    test('session capture queue sends frames with stable idempotency key', () async {
+      final client = BoundaryHttpClient(
+        statusCode: 202,
+        body: jsonEncode({
+          'batch_id': 'batch-1', 'attendance_session_id': 'session-1',
+          'class_group_id': 'group-1', 'status': 'QUEUED', 'frame_count': 3,
+          'attempts': 0, 'max_attempts': 3, 'created_at': '2026-10-20T04:00:00Z',
+          'updated_at': '2026-10-20T04:00:00Z', 'result': null, 'error': null,
+        }),
+      );
+      final job = await FrsApiService(config: config, client: client).enqueueCaptureBatch(
+        attendanceSessionId: 'session-1',
+        idempotencyKey: 'stable-request-key-001',
+        imageFrames: frames,
+        punchType: PunchType.checkIn,
+      );
+      expect(job.batchId, 'batch-1');
+      expect(job.status, 'QUEUED');
+      final request = client.lastRequest! as http.MultipartRequest;
+      expect(request.url.path, '/api/v1/attendance/sessions/session-1/batches');
+      expect(request.headers['Authorization'], 'Bearer ${config.apiKeySecret}');
+      expect(request.fields['idempotency_key'], 'stable-request-key-001');
+      expect(request.fields['punch_type'], 'CHECK_IN');
+      expect(request.files, hasLength(3));
+      expect(request.files.every((part) => part.field == 'images'), isTrue);
+    });
+
+    test('capture batch status parses real server-persisted success result', () async {
+      final client = BoundaryHttpClient(
+        statusCode: 200,
+        body: jsonEncode({
+          'batch_id': 'batch-1', 'attendance_session_id': 'session-1',
+          'class_group_id': 'group-1', 'status': 'SUCCEEDED', 'frame_count': 3,
+          'attempts': 1, 'max_attempts': 3, 'created_at': '2026-10-20T04:00:00Z',
+          'updated_at': '2026-10-20T04:00:05Z', 'completed_at': '2026-10-20T04:00:05Z',
+          'error': null,
+          'result': {
+            'status': 'success', 'attendance_id': 'att-1', 'user_id': 'person-1',
+            'employee_id': 'CSE-001', 'full_name': 'Enrolled Student', 'department': 'CSE',
+            'punch_type': 'CHECK_IN', 'timestamp': '2026-10-20T04:00:05Z',
+            'similarity_score': 0.91, 'threshold': 0.76, 'message': 'Recorded',
+          },
+        }),
+      );
+      final job = await FrsApiService(config: config, client: client).getCaptureBatch('batch-1');
+      expect(job.status, 'SUCCEEDED');
+      expect(job.result?['attendance_id'], 'att-1');
+      expect(client.lastRequest!.url.path, '/api/v1/attendance/batches/batch-1');
+    });
     test('admin enrollment uses distinct admin credential', () async {
       const adminKey = 'independent-admin-api-credential-32-chars-min';
       final client = BoundaryHttpClient(
