@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -99,3 +99,102 @@ class ModelRegistryEntry(Base):
     benchmark_json: Mapped[str] = mapped_column(Text, default="{}")
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+
+class Department(Base):
+    __tablename__ = "departments"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_departments_code"),
+    )
+
+    department_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    code: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ClassGroup(Base):
+    __tablename__ = "class_groups"
+    __table_args__ = (
+        CheckConstraint("year_of_study BETWEEN 1 AND 4", name="ck_class_groups_year_of_study"),
+        UniqueConstraint(
+            "department_id", "year_of_study", "section", "academic_year",
+            name="uq_class_groups_cohort",
+        ),
+    )
+
+    class_group_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    department_id: Mapped[str] = mapped_column(
+        ForeignKey("departments.department_id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    year_of_study: Mapped[int] = mapped_column(Integer, nullable=False)
+    section: Mapped[str] = mapped_column(String(20), nullable=False)
+    academic_year: Mapped[str] = mapped_column(String(9), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class Student(Base):
+    __tablename__ = "students"
+    __table_args__ = (
+        UniqueConstraint("student_number", name="uq_students_student_number"),
+        UniqueConstraint("person_id", name="uq_students_person_id"),
+    )
+
+    student_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    student_number: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    full_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    # Optional link to the existing biometric identity record. New student API records create both.
+    person_id: Mapped[str | None] = mapped_column(
+        ForeignKey("persons.person_id", ondelete="SET NULL"), nullable=True
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ClassEnrollment(Base):
+    __tablename__ = "class_enrollments"
+    __table_args__ = (
+        UniqueConstraint("student_id", "class_group_id", name="uq_class_enrollments_student_group"),
+        CheckConstraint("status IN ('ACTIVE', 'WITHDRAWN')", name="ck_class_enrollments_status"),
+        Index("ix_class_enrollments_group_status", "class_group_id", "status"),
+    )
+
+    enrollment_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    student_id: Mapped[str] = mapped_column(
+        ForeignKey("students.student_id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    class_group_id: Mapped[str] = mapped_column(
+        ForeignKey("class_groups.class_group_id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
+    enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AttendanceSession(Base):
+    __tablename__ = "attendance_sessions"
+    __table_args__ = (
+        CheckConstraint("status IN ('OPEN', 'CLOSED', 'CANCELLED')", name="ck_attendance_sessions_status"),
+        UniqueConstraint("idempotency_key", name="uq_attendance_sessions_idempotency_key"),
+        Index("ix_attendance_sessions_group_started", "class_group_id", "starts_at"),
+    )
+
+    session_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    class_group_id: Mapped[str] = mapped_column(
+        ForeignKey("class_groups.class_group_id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    subject_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    subject_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
