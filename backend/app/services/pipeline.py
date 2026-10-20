@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.db.entities import AttendanceEvent, AttendanceSession, AuditEvent, ClassEnrollment, EmbeddingRecord, Person, Student
+from app.db.entities import AttendanceEvent, AttendanceSession, AuditEvent, CaptureBatchJob, ClassEnrollment, EmbeddingRecord, Person, Student
 from app.schemas.contracts import (
     DecisionState,
     RetrievalCandidate,
@@ -775,14 +775,7 @@ class AttendancePipeline:
             reason_codes_json=json.dumps(["TEMPORAL_CONFIRMATION_PASSED"], separators=(",", ":")),
             evidence_json=json.dumps(evidence, separators=(",", ":"), default=str),
         )
-        try:
-            db.add_all([attendance, audit])
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            raise HTTPException(status_code=503, detail="Attendance transaction failed; no success was reported") from exc
-
-        return {
+        result_payload = {
             "status": "success",
             "attendance_id": attendance.attendance_id,
             "user_id": person.person_id,
@@ -798,6 +791,31 @@ class AttendancePipeline:
             "attendance_session_id": attendance_session_id,
             "capture_batch_id": capture_batch_id,
         }
+        try:
+            db.add_all([attendance, audit])
+            if capture_batch_id is not None:
+                batch_job = db.execute(select(CaptureBatchJob).where(
+                    CaptureBatchJob.batch_id == capture_batch_id
+                ).with_for_update()).scalar_one_or_none()
+                if batch_job is None or batch_job.status != "PROCESSING":
+                    db.rollback()
+                    raise HTTPException(status_code=409, detail="Capture batch no longer owns a processing lease.")
+                batch_job.status = "SUCCEEDED"
+                batch_job.result_json = json.dumps(result_payload, separators=(",", ":"), default=str)
+                batch_job.error_json = None
+                batch_job.encrypted_payload = None
+                batch_job.payload_nonce = None
+                batch_job.completed_at = now
+                batch_job.updated_at = now
+            db.commit()
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=503, detail="Attendance transaction failed; no success was reported") from exc
+
+        return result_payload
 
     def _enrollment_fail(
         self,
