@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint react-hooks/set-state-in-effect: off -- These effects initiate external HTTP reads; state changes occur in async response/error handlers. */
+
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useAdmin, type AttendanceRecord, type HealthPayload, type ListPayload, type ModelPayload, type PersonRecord } from "@/components/admin-provider";
@@ -74,7 +76,7 @@ export default function OverviewPage() {
       <section className="content-grid">
         <article className="panel">
           <div className="panel-heading"><div><span className="eyebrow">RUNTIME GATE</span><h3>Recognition readiness</h3></div><span className={ready ? "pill pill-success" : "pill pill-warning"}>{ready ? "Ready by backend policy" : "Not ready"}</span></div>
-          <p className="panel-description">This indicator reflects the backend's own readiness response. A healthy HTTP process is not proof of accurate or safe biometric decisions.</p>
+          <p className="panel-description">This indicator reflects the backend&apos;s own readiness response. A healthy HTTP process is not proof of accurate or safe biometric decisions.</p>
           <div className="readiness-row"><span>Threshold calibration</span><strong>{describe(health?.threshold_status)}</strong></div>
           <div className="readiness-row"><span>Model registry entries</span><strong>{modelCount === null ? "Connect admin API" : modelCount}</strong></div>
           <div className="readiness-row"><span>Admin API connection</span><strong>{isConnected ? "Authenticated" : "Not connected"}</strong></div>
