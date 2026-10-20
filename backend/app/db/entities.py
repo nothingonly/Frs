@@ -64,6 +64,9 @@ class AttendanceEvent(Base):
     client_device_id: Mapped[str] = mapped_column(String(120))
     pipeline_version: Mapped[str] = mapped_column(String(120))
     evidence_id: Mapped[str] = mapped_column(String(36))
+    attendance_session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("attendance_sessions.session_id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
 
 class AuditEvent(Base):
