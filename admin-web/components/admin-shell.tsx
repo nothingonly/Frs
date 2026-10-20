@@ -7,6 +7,7 @@ import { useAdmin } from "./admin-provider";
 
 const navigation = [
   { href: "/", label: "Overview", marker: "OV" },
+  { href: "/college", label: "College setup", marker: "CL" },
   { href: "/people", label: "People", marker: "PE" },
   { href: "/attendance", label: "Attendance", marker: "AT" },
   { href: "/models", label: "Models & readiness", marker: "ML" },
