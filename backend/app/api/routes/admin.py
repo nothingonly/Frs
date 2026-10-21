@@ -292,12 +292,7 @@ def list_attendance(
     if attendance_session_id:
         sess = db.get(AttendanceSession, attendance_session_id)
         if sess:
-            if actor.role == ROLE_FACULTY:
-                check_class_access(actor, sess.class_group_id)
-            elif actor.role == ROLE_DEAN:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg:
-                    check_department_access(actor, cg.department_id)
+            _check_session_scope(db, actor, sess)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
     else:
         if actor.role == ROLE_FACULTY:
@@ -569,12 +564,10 @@ def retry_capture_batch(
     ).with_for_update()).scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="Capture batch not found.")
-    if actor.role == ROLE_FACULTY:
-        check_class_access(actor, job.class_group_id)
-    elif actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, job.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+    session_for_scope = db.get(AttendanceSession, job.attendance_session_id)
+    if session_for_scope is None:
+        raise HTTPException(status_code=404, detail="Associated attendance session not found.")
+    _check_session_scope(db, actor, session_for_scope)
     if job.status != "FAILED":
         raise HTTPException(status_code=409, detail="Only failed capture batches can be retried.")
     now = datetime.now(timezone.utc)
@@ -778,21 +771,17 @@ def correct_attendance_record(
 
     if event.attendance_session_id:
         sess = db.get(AttendanceSession, event.attendance_session_id)
-        if sess:
-            if actor.role == ROLE_FACULTY:
-                check_class_access(actor, sess.class_group_id)
-            elif actor.role == ROLE_DEAN:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg:
-                    check_department_access(actor, cg.department_id)
+        if sess is None:
+            raise HTTPException(status_code=409, detail="Attendance record references a missing session.")
+        _check_session_scope(db, actor, sess)
     else:
         if actor.role == ROLE_FACULTY:
             raise HTTPException(status_code=403, detail="Faculty can only correct session-scoped attendance records.")
         elif actor.role == ROLE_DEAN:
             dept = db.get(Department, actor.department_id) if actor.department_id else None
             person = db.get(Person, event.person_id) if event.person_id else None
-            if dept and person and person.department != dept.code:
-                raise HTTPException(status_code=403, detail="Deans can only modify attendance records in their department.")
+            if dept is None or person is None or person.department != dept.code:
+                raise HTTPException(status_code=403, detail="Deans can only modify verifiably scoped attendance records in their department.")
 
     previous_punch = event.punch_type
 
@@ -853,12 +842,7 @@ def manual_attendance_entry(
     if sess is None:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
 
-    if actor.role == ROLE_FACULTY:
-        check_class_access(actor, sess.class_group_id)
-    elif actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, sess.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+    _check_session_scope(db, actor, sess)
 
     enrollment = db.execute(
         select(ClassEnrollment)
