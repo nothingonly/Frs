@@ -99,13 +99,12 @@ def de_enroll_student_biometrics(
     storage_service: Any | None = None,
     signing_key: str | None = None,
 ) -> dict[str, Any]:
-    """Execute complete student biometric de-enrollment with cryptographic deletion verification.
-    
-    1. Removes all biometric embedding records.
-    2. Deactivates the Person identity record.
-    3. Purges associated cloud-stored face crops (if storage_service is provided).
-    4. Writes an immutable audit log entry.
-    5. Returns an HMAC-SHA256 authenticated digital deletion certificate.
+    """De-enroll biometric records and issue a shared-secret-authenticated evidence record.
+
+    The HMAC authenticates the recorded payload for holders of a dedicated secret. It is
+    not an asymmetric digital signature and does not establish non-repudiation. Media
+    deletion is classified as complete only when the configured storage provider confirms
+    deletion of every requested object.
     """
     student = db.get(Student, student_id)
     if student is None:
@@ -154,7 +153,7 @@ def de_enroll_student_biometrics(
         if all_confirmed:
             media_purged = True
             status_state = "DE_ENROLLED"
-            qualification = "FULL_DELETION_VERIFIED"
+            qualification = "MEDIA_PROVIDER_DELETION_CONFIRMED"
         else:
             media_purged = False
             status_state = "DELETION_INCOMPLETE"
@@ -166,8 +165,23 @@ def de_enroll_student_biometrics(
         qualification = "STORAGE_SERVICE_REQUIRED_FOR_VERIFIED_DELETION"
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    raw_cert_string = f"{student_id}:{student.person_id}:{now_iso}:{deleted_embeddings_count}:{operator_id}:{qualification}"
-    cert_hash = hashlib.sha256(raw_cert_string.encode("utf-8")).hexdigest()
+    certificate_payload = {
+        "student_id": student_id,
+        "person_id": student.person_id,
+        "deleted_embeddings_count": deleted_embeddings_count,
+        "operator_id": operator_id,
+        "qualification": qualification,
+        "issued_at": now_iso,
+        "media_purged": media_purged,
+        "media_deletion_details": media_outcomes,
+    }
+    canonical_payload = json.dumps(
+        certificate_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    cert_hash = hashlib.sha256(canonical_payload).hexdigest()
 
     settings = get_settings()
     secret = signing_key or settings.deletion_certificate_key
@@ -178,7 +192,11 @@ def de_enroll_student_biometrics(
     if not secret:
         raise RuntimeError("A dedicated biometric deletion-certificate signing key must be configured.")
     secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
-    cert_signature = hmac.new(secret_bytes, raw_cert_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    cert_signature = hmac.new(secret_bytes, canonical_payload, hashlib.sha256).hexdigest()
+    certificate_assurance = (
+        "SHARED_SECRET_HMAC_AUTHENTICATION_ONLY; NOT_AN_ASYMMETRIC_SIGNATURE; "
+        "DOES_NOT_INDEPENDENTLY_PROVE_REMOTE_MEDIA_ERASURE"
+    )
 
     audit_entry = AuditEvent(
         audit_id=f"audit-{cert_hash[:16]}",
@@ -195,6 +213,9 @@ def de_enroll_student_biometrics(
             "deleted_embeddings": deleted_embeddings_count,
             "deletion_certificate": cert_hash,
             "signature": cert_signature,
+            "signature_algorithm": "HMAC-SHA256",
+            "certificate_assurance": certificate_assurance,
+            "certificate_payload": certificate_payload,
             "media_purged": media_purged,
             "qualification": qualification,
             "media_deletion_details": media_outcomes,
@@ -215,12 +236,17 @@ def de_enroll_student_biometrics(
         "person_id": student.person_id,
         "deleted_embeddings_count": deleted_embeddings_count,
         "deletion_certificate": cert_hash,
+        # Compatibility alias retained; callers should use deletion_authentication_tag.
         "deletion_signature": cert_signature,
+        "deletion_authentication_tag": cert_signature,
         "signed_certificate": {
             "certificate_id": f"cert-{cert_hash[:16]}",
             "digest": cert_hash,
+            "payload": certificate_payload,
             "signature": cert_signature,
+            "authentication_tag": cert_signature,
             "algorithm": "HMAC-SHA256",
+            "assurance": certificate_assurance,
             "issuer": "FRS-Biometric-Privacy-Lifecycle",
             "qualification": qualification,
             "signed_at": now_iso,
