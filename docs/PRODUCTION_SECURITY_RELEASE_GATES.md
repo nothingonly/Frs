@@ -18,6 +18,6 @@ This checklist is part of the release record for FRS. A passing CI run is not a 
 
 The repository cannot grant a commercial or institutional license to third-party model weights. That is a procurement/legal decision. Do not merge or deploy until permitted weights are provisioned and the manifest is updated with verifiable provenance.
 
-An HMAC deletion certificate is shared-secret authentication, not an asymmetric digital signature. Consumers must preserve the certificate's `HMAC-SHA256` algorithm and qualification; they must not describe it as a public-key signature or independently verifiable proof.
+Deletion certificates are signed with Ed25519 and include the public key and its SHA-256 fingerprint. The public key embedded in a certificate is not a trust anchor: the institution must distribute and pin the expected public key through a separate trusted channel, verify the signature over the canonical payload, and retain key-rotation history. The signature proves payload integrity, not remote erasure; deletion is complete only when the storage provider confirms deletion of every target. Production startup requires `FRS_DELETION_CERTIFICATE_KEY` to contain a PEM-encoded Ed25519 private key.
 
 The alternative attendance endpoint deliberately fails closed with HTTP 503 until a server-side PIN/card/OTP verifier is implemented and provisioned. Do not re-enable attendance based only on a student number or a client-supplied method name.
