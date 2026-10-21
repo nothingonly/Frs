@@ -55,8 +55,15 @@ def device_actor(
             detail="Valid kiosk device bearer credentials are required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # Never use or log the submitted token as the actor identifier.
-    return "device:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    # Preserve the historic short actor ID for queue ownership while attaching the full,
+    # non-reversible credential fingerprint and server-configured class scope.
+    fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return SessionActor(
+        "device:" + fingerprint[:16],
+        role=ROLE_KIOSK,
+        class_group_ids=settings.device_class_group_scopes.get(fingerprint, ()),
+        device_fingerprint=fingerprint,
+    )
 
 
 def admin_actor(
