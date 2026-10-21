@@ -1677,8 +1677,29 @@ class AttendancePipeline:
             raise HTTPException(status_code=409, detail="Cannot modify closed session.")
 
         student = db.get(Student, student_id)
-        if student is None:
-            raise HTTPException(status_code=404, detail="Student not found.")
+        if student is None or not student.is_active:
+            raise HTTPException(status_code=404, detail="Student not found or inactive.")
+
+        group_ids = list(dict.fromkeys([
+            session.class_group_id,
+            *db.execute(
+                select(SessionClassGroup.class_group_id).where(
+                    SessionClassGroup.session_id == session_id
+                )
+            ).scalars().all(),
+        ]))
+        enrollment = db.execute(
+            select(ClassEnrollment.enrollment_id).where(
+                ClassEnrollment.student_id == student_id,
+                ClassEnrollment.class_group_id.in_(group_ids),
+                ClassEnrollment.status == "ACTIVE",
+            )
+        ).first()
+        if enrollment is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Student is not actively enrolled in any class group attached to this session.",
+            )
 
         prov = db.execute(
             select(SessionProvisionalAttendance)
@@ -1694,7 +1715,8 @@ class AttendancePipeline:
                 student_id=student_id,
                 person_id=student.person_id,
                 status=new_status,
-                similarity_score=1.0 if new_status == "PRESENT" else 0.0,
+                # A manual status decision is not biometric similarity evidence.
+                similarity_score=0.0,
                 notes=notes or "MANUAL_FACULTY_ACTION",
             )
             db.add(prov)
