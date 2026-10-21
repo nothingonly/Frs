@@ -719,7 +719,8 @@ def resolve_review_item(
             employee_id=student.student_number,
             punch_type=job.punch_type,
             timestamp=now,
-            similarity_score=1.0,
+            # Manual approval is an audited human decision, not a biometric match score.
+            similarity_score=0.0,
             threshold=1.0,
             client_device_id=job.client_device_id,
             pipeline_version="manual-administrative-review",
@@ -745,7 +746,7 @@ def resolve_review_item(
 
     audit = AuditEvent(
         session_id=job.attendance_session_id,
-        actor_type="administrator",
+        actor_type=actor.role,
         actor_id=actor_id_str,
         action="review_queue.resolve",
         decision_state=decision_state,
@@ -832,6 +833,12 @@ def manual_attendance_entry(
     if student is None or not student.is_active:
         raise HTTPException(status_code=404, detail="Student not found or inactive.")
     if not student.person_id:
+    sess = db.get(AttendanceSession, payload.attendance_session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail="Attendance session not found.")
+
+    _check_session_scope(db, actor, sess)
+    if not student.person_id:
         person = Person(
             person_id=str(uuid.uuid4()),
             employee_id=student.student_number,
@@ -843,12 +850,6 @@ def manual_attendance_entry(
         db.flush()
         student.person_id = person.person_id
         db.add(student)
-
-    sess = db.get(AttendanceSession, payload.attendance_session_id)
-    if sess is None:
-        raise HTTPException(status_code=404, detail="Attendance session not found.")
-
-    _check_session_scope(db, actor, sess)
 
     enrollment = db.execute(
         select(ClassEnrollment)
@@ -867,7 +868,8 @@ def manual_attendance_entry(
         employee_id=student.student_number,
         punch_type=payload.punch_type,
         timestamp=now,
-        similarity_score=1.0,
+        # Manual entry is not a similarity measurement.
+        similarity_score=0.0,
         threshold=1.0,
         client_device_id=f"manual:{actor_id_str}",
         pipeline_version="manual-administrative-entry",
@@ -878,7 +880,7 @@ def manual_attendance_entry(
 
     audit = AuditEvent(
         session_id=sess.session_id,
-        actor_type="administrator",
+        actor_type=actor.role,
         actor_id=actor_id_str,
         action="attendance.manual_entry",
         decision_state="MANUAL_ENTRY",
@@ -1012,22 +1014,19 @@ def de_enroll_student(
     if student is None:
         raise HTTPException(status_code=404, detail=f"Student '{student_id}' does not exist.")
     if actor.role == ROLE_DEAN:
-        dept = db.get(Department, actor.department_id) if actor.department_id else None
-        in_dept = False
-        if dept:
-            enrolled = db.execute(
-                select(ClassGroup)
-                .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
-                .where(ClassEnrollment.student_id == student_id, ClassGroup.department_id == actor.department_id)
-            ).scalars().first()
-            if enrolled:
-                in_dept = True
-            elif student.person_id:
-                person = db.get(Person, student.person_id)
-                if person and person.department == dept.code:
-                    in_dept = True
-        if not in_dept:
-            raise HTTPException(status_code=403, detail="Deans can only de-enroll students within their own department.")
+        active_departments = set(db.execute(
+            select(ClassGroup.department_id)
+            .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
+            .where(
+                ClassEnrollment.student_id == student_id,
+                ClassEnrollment.status == "ACTIVE",
+            )
+        ).scalars().all())
+        if active_departments != {actor.department_id}:
+            raise HTTPException(
+                status_code=403,
+                detail="Deans can only de-enroll students whose active enrollments are entirely within their own department.",
+            )
 
     storage = getattr(request.app.state, "storage", None)
     try:
