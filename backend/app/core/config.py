@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_issuer: str = "frs-auth"
     jwt_expiry_minutes: int = 60
+    # Scope kiosk credentials to an explicit allowlist of class-group IDs. Keys are full
+    # SHA-256 hex digests of device tokens, never raw device secrets.
+    device_class_group_scopes_json: str = "{}"
+    deletion_certificate_key: str = ""
     worker_in_process: bool = Field(default=True, validation_alias=AliasChoices("FRS_WORKER_IN_PROCESS", "WORKER_IN_PROCESS"))
     max_capture_batch_retries: int = Field(default=3, ge=1, le=10)
     retention_purge_days: int = Field(default=30, ge=1, le=365)
@@ -60,6 +64,8 @@ class Settings(BaseSettings):
     lti_deployment_id: str = Field(default="", validation_alias=AliasChoices("FRS_LTI_DEPLOYMENT_ID", "LTI_DEPLOYMENT_ID"))
     lti_issuer: str = Field(default="https://canvas.instructure.com", validation_alias=AliasChoices("FRS_LTI_ISSUER", "LTI_ISSUER"))
     lti_keyset_url: str = Field(default="", validation_alias=AliasChoices("FRS_LTI_KEYSET_URL", "LTI_KEYSET_URL"))
+    # PEM-encoded LMS platform public key used for RS256 ID-token verification.
+    lti_platform_public_key_pem: str = Field(default="", validation_alias=AliasChoices("FRS_LTI_PLATFORM_PUBLIC_KEY_PEM", "LTI_PLATFORM_PUBLIC_KEY_PEM"))
 
     model_pack: str = "buffalo_l"
     model_root: str = "~/.insightface"
@@ -121,6 +127,22 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid similarity threshold for {model_name}")
         return value
 
+    @field_validator("device_class_group_scopes_json")
+    @classmethod
+    def validate_device_class_group_scopes(cls, value: str) -> str:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("FRS_DEVICE_CLASS_GROUP_SCOPES_JSON must be a JSON object") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("FRS_DEVICE_CLASS_GROUP_SCOPES_JSON must be a JSON object")
+        for digest, groups in parsed.items():
+            if not isinstance(digest, str) or len(digest) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in digest):
+                raise ValueError("Device scope keys must be full 64-character SHA-256 hex digests")
+            if not isinstance(groups, list) or any(not isinstance(group, str) or not group.strip() for group in groups):
+                raise ValueError("Each device scope must be a list of non-empty class-group IDs")
+        return value
+
     def validate_startup_security(self) -> None:
         if self.minimum_identification_frames > self.maximum_identification_frames:
             raise ValueError("Minimum identification frames cannot exceed maximum frames")
@@ -163,6 +185,10 @@ class Settings(BaseSettings):
                     self.threshold_for(model_id)
             if self.sftp_host and self.sftp_host != "mock" and not (self.sftp_host_key_fingerprint or self.sftp_known_hosts_file):
                 raise ValueError("Production startup refused: SFTP export requires sftp_host_key_fingerprint or sftp_known_hosts_file to pin server identity")
+            if len(self.deletion_certificate_key.strip()) < 32:
+                raise ValueError("Production requires a dedicated FRS_DELETION_CERTIFICATE_KEY of at least 32 characters")
+            if self.lti_client_id and not self.lti_platform_public_key_pem.strip():
+                raise ValueError("Production LTI is enabled but FRS_LTI_PLATFORM_PUBLIC_KEY_PEM is missing")
 
     @property
     def is_production(self) -> bool:
@@ -171,6 +197,14 @@ class Settings(BaseSettings):
     @property
     def device_keys(self) -> tuple[str, ...]:
         return tuple(token.strip() for token in self.device_api_keys.split(",") if token.strip())
+
+    @property
+    def device_class_group_scopes(self) -> dict[str, tuple[str, ...]]:
+        parsed = json.loads(self.device_class_group_scopes_json)
+        return {
+            digest.lower(): tuple(dict.fromkeys(group.strip() for group in groups))
+            for digest, groups in parsed.items()
+        }
 
     @property
     def calibrated_models(self) -> tuple[str, ...]:
