@@ -2,10 +2,10 @@
 
 > High-throughput multi-photo group attendance verification and identification system engineered for collegiate engineering environments. Combines a Flutter Android mobile/tablet camera interface, a high-performance FastAPI multi-face vision backend, and a Next.js 16 administrative console.
 
-[![Backend checks](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/actions/workflows/backend.yml/badge.svg?branch=main)](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/actions/workflows/backend.yml)
-[![Admin web checks](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/actions/workflows/admin-web.yml/badge.svg?branch=main)](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/actions/workflows/admin-web.yml)
-[![Flutter quality gate](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/actions/workflows/flutter.yml/badge.svg?branch=main)](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/actions/workflows/flutter.yml)
-[![Staging vision CI](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/actions/workflows/staging-vision-ci.yml/badge.svg?branch=main)](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/actions/workflows/staging-vision-ci.yml)
+[![Backend checks](https://github.com/nothingonly/Frs/actions/workflows/backend.yml/badge.svg?branch=main)](https://github.com/nothingonly/Frs/actions/workflows/backend.yml)
+[![Admin web checks](https://github.com/nothingonly/Frs/actions/workflows/admin-web.yml/badge.svg?branch=main)](https://github.com/nothingonly/Frs/actions/workflows/admin-web.yml)
+[![Flutter quality gate](https://github.com/nothingonly/Frs/actions/workflows/flutter.yml/badge.svg?branch=main)](https://github.com/nothingonly/Frs/actions/workflows/flutter.yml)
+[![Staging vision CI](https://github.com/nothingonly/Frs/actions/workflows/staging-vision-ci.yml/badge.svg?branch=main)](https://github.com/nothingonly/Frs/actions/workflows/staging-vision-ci.yml)
 
 ---
 
@@ -195,21 +195,21 @@ All administrative endpoints require `Authorization: Bearer <FRS_ADMIN_API_KEY>`
 
 ## Releases & Version History
 
-- **[`v0.3.0-beta.1`](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/releases/tag/v0.3.0-beta.1)** *(Latest)*
+- **[`v0.3.0-beta.1`](https://github.com/nothingonly/Frs/releases/tag/v0.3.0-beta.1)** *(Latest)*
   - **Collegiate Group-Photo Attendance Redesign**: Replaced front-camera kiosk reticle with rear-camera multi-photo classroom group capture covering 60–70+ students.
   - **7 B.Tech Departments Seeding**: Built-in support for `CSE`, `CSD`, `MECH`, `CIVIL`, `IT`, `ECE`, `EEE`, B.Tech years (1–4), semesters (1–8), sections (A–D), and labs.
   - **Cross-Photo Deduplication**: Multi-angle group capture aggregation preventing duplicate attendance records.
   - **Interactive Faculty Review**: Searchable roster with filter tabs (`All`, `Present`, `Review Required`, `Absent`), similarity match scores, and manual toggle overrides.
   - **Admin Web Bulk Onboarding**: Added bulk CSV/Excel student import with dry-run preview and bulk student biometric photo enrollment with roll-number mapping.
   - **Dual Mode Support**: Seamless toggle between Group Photo Attendance and Individual 1:N Kiosk Punch modes.
-- **[`v0.2.0-beta.2`](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/releases/tag/v0.2.0-beta.2)**
+- **[`v0.2.0-beta.2`](https://github.com/nothingonly/Frs/releases/tag/v0.2.0-beta.2)**
   - Hardened offline queue cryptographic framing & SHA-256 tamper detection in Android Keystore.
   - Database migration fail-closed integrity & startup assertions.
   - Production fail-closed guards for SFTP exports and LTI trust root validation.
-- **[`v0.2.0-beta.1`](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/releases/tag/v0.2.0-beta.1)**
+- **[`v0.2.0-beta.1`](https://github.com/nothingonly/Frs/releases/tag/v0.2.0-beta.1)**
   - Hardware-encrypted offline burst buffer in Flutter with 24h fail-closed TTL.
   - Route-wide RBAC & scoping matrix restricting Deans to department and Faculty to class cohorts.
-- **[`v0.1.0-alpha.1`](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/releases/tag/v0.1.0-alpha.1)**
+- **[`v0.1.0-alpha.1`](https://github.com/nothingonly/Frs/releases/tag/v0.1.0-alpha.1)**
   - Initial foundation release with FastAPI vision engine, Next.js 16 admin console, and Flutter kiosk.
 
 ---
