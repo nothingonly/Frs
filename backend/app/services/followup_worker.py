@@ -215,10 +215,9 @@ def main() -> None:
     parser.add_argument("--channel", type=str, default="email", choices=["email", "sms"], help="Notification channel.")
     args = parser.parse_args()
 
+    settings = get_settings()
+    settings.validate_startup_security()
     create_schema()
-    from app.database import engine
-    from app.db.migrator import assert_production_schema_ready
-    assert_production_schema_ready(engine)
     daemon = AttendanceFollowupDaemon(interval_seconds=args.interval_seconds, channel=args.channel)
 
     signal.signal(signal.SIGINT, daemon.request_shutdown)
