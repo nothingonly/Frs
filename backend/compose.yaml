@@ -27,8 +27,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     networks: [frs-internal]
 
   api:
@@ -65,6 +63,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./model-artifacts:/models:ro
     networks: [frs-internal]
@@ -82,6 +82,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     networks: [frs-internal]
 
 volumes:
