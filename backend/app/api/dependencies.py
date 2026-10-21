@@ -4,6 +4,7 @@ import hashlib
 import time
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
 
 
 
@@ -19,6 +20,8 @@ from app.core.auth import (
     require_role,
 )
 from app.core.config import Settings, get_settings
+from app.database import get_db
+from app.db.entities import Department
 from app.security import authenticate_admin, authenticate_device
 
 _bearer = HTTPBearer(auto_error=False)
@@ -94,6 +97,7 @@ def scoped_admin(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
 ) -> TokenClaims:
     """Resolve caller into TokenClaims, requiring Super Admin or Dean role."""
     token = credentials.credentials if credentials and credentials.scheme.lower() == "bearer" else None
@@ -126,8 +130,10 @@ def scoped_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Forbidden: role '{actor.role}' lacks administrator or dean authority.",
         )
-    if actor.role == ROLE_DEAN and not actor.department_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dean token must be scoped to a department.")
+    if actor.role == ROLE_DEAN and (
+        not actor.department_id or db.get(Department, actor.department_id) is None
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dean token must reference an existing department.")
     return actor
 
 
