@@ -160,8 +160,11 @@ class Settings(BaseSettings):
                 raise ValueError("Production requires device API keys of at least 32 characters")
             if len(self.admin_api_key) < 32:
                 raise ValueError("Production requires a separate admin API key of at least 32 characters")
-            if self.jwt_secret and len(self.jwt_secret) < 32:
-                raise ValueError("Production requires FRS_JWT_SECRET of at least 32 characters when configured")
+            jwt_secret = self.jwt_secret.strip()
+            if len(jwt_secret) < 32:
+                raise ValueError("Production requires an explicit FRS_JWT_SECRET of at least 32 characters")
+            if jwt_secret == self.admin_api_key.strip() or jwt_secret in self.device_keys:
+                raise ValueError("Production requires FRS_JWT_SECRET to be distinct from admin and device API keys")
             self.encryption_key_bytes()
             if not self.threshold_calibrated or "ArcFace" not in self.calibrated_models:
                 raise ValueError("Production startup refused: ArcFace threshold must be calibrated on project data")
