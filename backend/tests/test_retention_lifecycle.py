@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -109,13 +110,24 @@ def test_de_enroll_student_with_signed_certificate_and_media_purge(db_session: S
     signed_cert = result["signed_certificate"]
     assert signed_cert["algorithm"] == "HMAC-SHA256"
     assert signed_cert["issuer"] == "FRS-Biometric-Privacy-Lifecycle"
+    assert "NOT_AN_ASYMMETRIC_SIGNATURE" in signed_cert["assurance"]
     assert len(signed_cert["signature"]) == 64
 
-    # Verify signature calculation matches expected HMAC
-    raw_str = f"s-de1:p-de1:{result['timestamp']}:1:dean-smith:FULL_DELETION_VERIFIED"
-    expected_sig = hmac.new(b"super-secret-institution-signing-key", raw_str.encode("utf-8"), hashlib.sha256).hexdigest()
+    # Verify certificate digest and HMAC over the returned canonical payload.
+    canonical_payload = json.dumps(
+        signed_cert["payload"],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    expected_sig = hmac.new(
+        b"super-secret-institution-signing-key",
+        canonical_payload,
+        hashlib.sha256,
+    ).hexdigest()
     assert signed_cert["signature"] == expected_sig
-    assert signed_cert["qualification"] == "FULL_DELETION_VERIFIED"
+    assert hashlib.sha256(canonical_payload).hexdigest() == signed_cert["digest"]
+    assert signed_cert["qualification"] == "MEDIA_PROVIDER_DELETION_CONFIRMED"
 
 
 def test_de_enroll_storage_delete_false_fails_closed(db_session: Session) -> None:
