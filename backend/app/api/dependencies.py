@@ -141,6 +141,7 @@ def scoped_actor(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
 ) -> TokenClaims:
     """Resolve caller into TokenClaims, allowing Super Admin, Dean, or Faculty."""
     token = credentials.credentials if credentials and credentials.scheme.lower() == "bearer" else None
@@ -173,8 +174,10 @@ def scoped_actor(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Forbidden: role '{actor.role}' lacks administrative or academic authority.",
         )
-    if actor.role == ROLE_DEAN and not actor.department_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dean token must be scoped to a department.")
+    if actor.role == ROLE_DEAN and (
+        not actor.department_id or db.get(Department, actor.department_id) is None
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dean token must reference an existing department.")
     return actor
 
 
