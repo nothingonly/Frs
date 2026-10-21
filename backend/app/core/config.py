@@ -191,21 +191,25 @@ class Settings(BaseSettings):
             if self.sftp_host and self.sftp_host != "mock" and not (self.sftp_host_key_fingerprint or self.sftp_known_hosts_file):
                 raise ValueError("Production startup refused: SFTP export requires sftp_host_key_fingerprint or sftp_known_hosts_file to pin server identity")
             try:
+                import base64
+                import binascii
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-                from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-                deletion_signing_key = load_pem_private_key(
-                    self.deletion_certificate_key.encode("utf-8"),
-                    password=None,
+                deletion_seed = base64.b64decode(
+                    self.deletion_certificate_key.strip().encode("ascii"),
+                    altchars=b"-_",
+                    validate=True,
                 )
-            except (TypeError, ValueError) as exc:
+            except (UnicodeError, ValueError, binascii.Error) as exc:
                 raise ValueError(
-                    "Production requires FRS_DELETION_CERTIFICATE_KEY to contain a PEM-encoded Ed25519 private key"
+                    "Production requires FRS_DELETION_CERTIFICATE_KEY to be URL-safe base64 for a 32-byte Ed25519 private-key seed"
                 ) from exc
-            if not isinstance(deletion_signing_key, Ed25519PrivateKey):
+            if len(deletion_seed) != 32:
                 raise ValueError(
-                    "Production FRS_DELETION_CERTIFICATE_KEY must be an Ed25519 private key"
+                    "FRS_DELETION_CERTIFICATE_KEY must decode to exactly 32 bytes for Ed25519"
                 )
+            # Construction validates that the seed is accepted by the configured crypto library.
+            Ed25519PrivateKey.from_private_bytes(deletion_seed)
             if self.lti_client_id and not self.lti_platform_public_key_pem.strip():
                 raise ValueError("Production LTI is enabled but FRS_LTI_PLATFORM_PUBLIC_KEY_PEM is missing")
             if self.lti_client_id and (not self.lti_issuer.strip() or not self.lti_deployment_id.strip()):
