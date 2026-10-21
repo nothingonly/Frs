@@ -167,6 +167,10 @@ def apply_all_migrations(engine: Engine, directory: Path | None = None) -> list[
         init_migration_table(engine)
         applied = get_applied_migrations(engine, create_if_missing=False)
         available = get_migration_files(directory)
+        if not available:
+            raise MigrationIntegrityError(
+                "No SQL migration files were found. Refusing to report the database as migrated."
+            )
         available_versions = {version for version, _ in available}
 
         unknown = sorted(set(applied) - available_versions)
@@ -206,6 +210,8 @@ def apply_all_migrations(engine: Engine, directory: Path | None = None) -> list[
 def verify_all_migrations(engine: Engine, directory: Path | None = None) -> tuple[bool, list[str]]:
     """Verify pending migrations, historical checksums, and migration-registry integrity."""
     available = get_migration_files(directory)
+    if not available:
+        return False, ["no migration files found"]
     available_by_version = {version: path for version, path in available}
 
     if not inspect(engine).has_table("schema_migrations"):
@@ -400,7 +406,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     if args.status:
-        applied = get_applied_migrations(default_engine)
+        applied = get_applied_migrations(default_engine, create_if_missing=False)
         available = get_migration_files()
         print("\n=== FRS Database Migrations Status ===")
         print(f"Database dialect: {default_engine.dialect.name}")
