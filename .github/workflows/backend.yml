@@ -27,18 +27,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: |
-            backend/pyproject.toml
-            backend/requirements.lock
-      - name: Install backend and test dependencies from lockfile
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend and test dependencies from current project constraints
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          if [ -f requirements.lock ]; then
-            python -m pip install -r requirements.lock
-            python -m pip install -e . --no-deps
-          else
-            python -m pip install -e ".[dev]"
-          fi
+          python -m pip install -e ".[dev]"
           python -m pip install pip-audit
       - name: Compile Python packages
         run: python -m compileall -q app tests
@@ -46,23 +39,5 @@ jobs:
         run: ruff check app tests
       - name: Run backend unit tests
         run: pytest
-      - name: Audit backend dependencies
-        # Fail closed on any vulnerability, with explicit exceptions for reviewed upstream library advisories:
-        # - PYSEC-2026-1845: pytest /tmp runner advisory (dev-only tool, not shipped in production)
-        # - PYSEC-2026-3554, 3552, 3553, GHSA-537c-gmf6-5ccf: cryptography 46.0.7 upstream x509 verification constraints
-        # - CVE-2026-112895, 112400, 112397, 112896, 112897, 112395, 112404, 112899: pillow 12.3.0 decompression bomb threshold
-        run: |
-          pip-audit --desc \
-            --ignore-vuln PYSEC-2026-1845 \
-            --ignore-vuln PYSEC-2026-3554 \
-            --ignore-vuln PYSEC-2026-3552 \
-            --ignore-vuln PYSEC-2026-3553 \
-            --ignore-vuln GHSA-537c-gmf6-5ccf \
-            --ignore-vuln CVE-2026-112895 \
-            --ignore-vuln CVE-2026-112400 \
-            --ignore-vuln CVE-2026-112397 \
-            --ignore-vuln CVE-2026-112896 \
-            --ignore-vuln CVE-2026-112897 \
-            --ignore-vuln CVE-2026-112395 \
-            --ignore-vuln CVE-2026-112404 \
-            --ignore-vuln CVE-2026-112899
+      - name: Audit installed backend dependencies
+        run: pip-audit --desc
