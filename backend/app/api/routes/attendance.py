@@ -81,6 +81,17 @@ def _can_access_session(
     return False
 
 
+def _audit_actor_type(actor: SessionActor | str) -> str:
+    if not isinstance(actor, SessionActor):
+        return "device" if str(actor).lower().startswith("device:") else "faculty"
+    return {
+        ROLE_SUPER_ADMIN: "administrator",
+        ROLE_DEAN: "dean",
+        ROLE_FACULTY: "faculty",
+        ROLE_KIOSK: "device",
+    }.get(actor.role, "unknown")
+
+
 def _require_session_scope(
     db: Session,
     session_id: str,
@@ -383,89 +394,6 @@ def record_alternative_attendance(
         status_code=503,
         detail="Alternative attendance is unavailable: a server-side PIN/card/OTP verifier is not configured.",
     )
-    attendance_session = db.get(AttendanceSession, attendance_session_id)
-    if attendance_session is None:
-        raise HTTPException(status_code=404, detail="Attendance session not found.")
-    if attendance_session.status != "OPEN":
-        raise HTTPException(status_code=409, detail="Attendance session is not open.")
-
-    student = db.execute(
-        select(Student).where(
-            Student.student_number == payload.student_number.strip(),
-            Student.is_active.is_(True),
-        )
-    ).scalar_one_or_none()
-    if student is None:
-        raise HTTPException(status_code=404, detail="Student not found or inactive.")
-
-    enrollment = db.execute(
-        select(ClassEnrollment).where(
-            ClassEnrollment.student_id == student.student_id,
-            ClassEnrollment.class_group_id == attendance_session.class_group_id,
-            ClassEnrollment.status == "ACTIVE",
-        )
-    ).scalar_one_or_none()
-    if enrollment is None:
-        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
-
-    now = datetime.now(timezone.utc)
-    cooldown_cutoff = now - timedelta(seconds=60)
-    recent_punch = db.execute(
-        select(AttendanceEvent).where(
-            AttendanceEvent.employee_id == student.student_number,
-            AttendanceEvent.attendance_session_id == attendance_session.session_id,
-            AttendanceEvent.timestamp >= cooldown_cutoff,
-        )
-    ).first()
-    if recent_punch is not None:
-        raise HTTPException(status_code=429, detail="Attendance punch cooldown active. Please wait before punching again.")
-
-    event = AttendanceEvent(
-        attendance_id=str(uuid.uuid4()),
-        person_id=student.person_id,
-        employee_id=student.student_number,
-        punch_type=payload.punch_type,
-        timestamp=now,
-        similarity_score=1.0,
-        threshold=0.0,
-        client_device_id=payload.client_device_id,
-        pipeline_version=f"kiosk-alternative:{payload.alternative_method.lower()}",
-        evidence_id=f"alt:{uuid.uuid4()}",
-        attendance_session_id=attendance_session.session_id,
-    )
-    db.add(event)
-
-    audit = AuditEvent(
-        session_id=attendance_session.session_id,
-        actor_type="device",
-        actor_id=actor_id,
-        action="attendance.kiosk_alternative",
-        decision_state="ACCEPTED",
-        reason_codes_json=json.dumps([payload.alternative_method]),
-        evidence_json=json.dumps({
-            "attendance_id": event.attendance_id,
-            "student_id": student.student_id,
-            "student_number": student.student_number,
-            "method": payload.alternative_method,
-            "punch_type": payload.punch_type,
-            "client_device_id": payload.client_device_id,
-        }),
-    )
-    db.add(audit)
-    db.commit()
-
-    return {
-        "status": "ACCEPTED",
-        "decision_state": "ACCEPTED",
-        "employee_id": student.student_number,
-        "full_name": student.full_name,
-        "similarity_score": 1.0,
-        "threshold": 0.0,
-        "punch_type": payload.punch_type,
-        "attendance_id": event.attendance_id,
-        "timestamp": now.isoformat(),
-        "method": payload.alternative_method,
-    }
 
 
 # ============================================================================
@@ -510,7 +438,11 @@ async def process_group_photo_capture(
         raise HTTPException(status_code=422, detail="Empty or corrupted image file.")
 
     return request.app.state.pipeline.process_group_photo(
-        db, session_id=session_id, image_bytes=payload, actor_id=actor_id
+        db,
+        session_id=session_id,
+        image_bytes=payload,
+        actor_id=actor_id,
+        actor_type=_audit_actor_type(actor_id),
     )
 
 
@@ -549,6 +481,7 @@ def toggle_session_provisional_attendance_endpoint(
         new_status=payload.new_status,
         actor_id=actor_id,
         notes=payload.notes,
+        actor_type=_audit_actor_type(actor_id),
     )
 
 
@@ -562,6 +495,9 @@ def finalize_session_attendance_endpoint(
     """Confirm and finalize attendance: writes durable AttendanceEvents and closes session."""
     _require_session_scope(db, session_id, actor_id, allow_kiosk=False)
     return request.app.state.pipeline.finalize_session_attendance(
-        db, session_id=session_id, actor_id=actor_id
+        db,
+        session_id=session_id,
+        actor_id=actor_id,
+        actor_type=_audit_actor_type(actor_id),
     )
 
