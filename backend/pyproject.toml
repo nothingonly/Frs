@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 insightface = ["insightface==0.7.3"]
-dev = ["pytest>=8.3,<9", "httpx>=0.28,<1", "ruff>=0.9,<1"]
+dev = ["pytest>=9.0.3,<10", "httpx>=0.28,<1", "ruff>=0.9,<1"]
 
 [tool.setuptools.packages.find]
 where = ["."]
