@@ -84,6 +84,18 @@ class AuditEvent(Base):
     # Store controlled references and non-biometric evidence, never raw images or embeddings.
 
 
+class LtiLaunchNonce(Base):
+    """Short-lived server-issued nonce challenge for a production LTI launch."""
+
+    __tablename__ = "lti_launch_nonces"
+
+    nonce: Mapped[str] = mapped_column(String(255), primary_key=True)
+    issued_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class LtiNonceUse(Base):
     """Persistent one-time nonce consumption prevents reuse of a validated LTI launch token."""
 
