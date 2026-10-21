@@ -83,6 +83,10 @@ def compute_file_checksum(file_path: Path) -> str:
 def apply_migration(engine: Engine, version: str, file_path: Path) -> None:
     """Apply a single SQL migration file inside a transaction and record it."""
     sql_text = file_path.read_text(encoding="utf-8")
+    if engine.dialect.name == "sqlite" and "-- POSTGRESQL_ONLY" in sql_text:
+        # PostgreSQL-specific trigger/function migrations are checksum-tracked but not executed
+        # by SQLite unit-test fixtures. Production remains fail-closed on PostgreSQL.
+        sql_text = ""
     checksum = compute_file_checksum(file_path)
     now = datetime.now(timezone.utc)
 
@@ -177,6 +181,7 @@ def verify_and_enforce_rls(engine: Engine) -> list[str]:
         "persons", "embedding_records", "attendance_events", "audit_events",
         "model_registry", "departments", "class_groups", "students",
         "class_enrollments", "attendance_sessions", "capture_batch_jobs",
+        "lti_nonce_uses",
     ]
 
     enforced: list[str] = []
