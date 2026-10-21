@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import (
@@ -17,7 +19,7 @@ from app.api.dependencies import (
 )
 from app.core.config import get_settings
 from app.database import get_db
-from app.db.entities import AttendanceSession, ClassGroup
+from app.db.entities import AttendanceSession, ClassGroup, LtiNonceUse
 from app.services.integrations import (
     AbsenteeAlertService,
     LtiService,
@@ -157,6 +159,7 @@ def trigger_sftp_attendance_export(
 def validate_lti_launch(
     payload: LtiLaunchValidationRequest,
     _actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Validate incoming 1EdTech LTI 1.3 launch token or claims for Canvas/Moodle LMS integration."""
     settings = get_settings()
@@ -175,9 +178,18 @@ def validate_lti_launch(
         expected_deployment = payload.expected_deployment_id or (settings.lti_deployment_id if settings.lti_deployment_id else None)
 
     if payload.id_token:
-        secret_or_key = payload.signing_key_or_secret if not settings.is_production and payload.signing_key_or_secret else settings.effective_jwt_secret
+        if settings.is_production:
+            if not settings.lti_platform_public_key_pem.strip():
+                raise HTTPException(status_code=503, detail="Trusted LMS platform verification key is not configured.")
+            if not payload.nonce:
+                raise HTTPException(status_code=422, detail="Production LTI launch requires a server-initiated nonce.")
+            if not expected_client_id or not expected_issuer or not expected_deployment:
+                raise HTTPException(status_code=503, detail="Production LTI issuer, client ID, and deployment ID must be configured.")
+            secret_or_key = settings.lti_platform_public_key_pem
+        else:
+            secret_or_key = payload.signing_key_or_secret or settings.lti_platform_public_key_pem or settings.effective_jwt_secret
         try:
-            return LtiService.validate_launch_id_token(
+            verified = LtiService.validate_launch_id_token(
                 id_token=payload.id_token,
                 signing_key_or_secret=secret_or_key,
                 expected_issuer=expected_issuer,
@@ -186,7 +198,22 @@ def validate_lti_launch(
                 expected_nonce=payload.nonce,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        if settings.is_production:
+            nonce = verified.get("nonce")
+            if not isinstance(nonce, str) or not nonce:
+                raise HTTPException(status_code=422, detail="Verified LTI ID token does not contain a nonce.")
+            db.add(LtiNonceUse(
+                nonce=nonce,
+                token_sha256=hashlib.sha256(payload.id_token.encode("utf-8")).hexdigest(),
+            ))
+            try:
+                db.commit()
+            except IntegrityError as exc:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="LTI nonce has already been consumed; launch replay rejected.") from exc
+        return verified
 
     if payload.claims:
         if settings.is_production:
