@@ -24,6 +24,26 @@ from app.security import authenticate_admin, authenticate_device
 _bearer = HTTPBearer(auto_error=False)
 
 
+class SessionActor(str):
+    """String-compatible authenticated principal carrying server-verified scope claims."""
+
+    def __new__(
+        cls,
+        actor_id: str,
+        *,
+        role: str,
+        department_id: str | None = None,
+        class_group_ids: tuple[str, ...] | list[str] = (),
+        device_fingerprint: str | None = None,
+    ):
+        instance = str.__new__(cls, actor_id)
+        instance.role = role
+        instance.department_id = department_id
+        instance.class_group_ids = tuple(dict.fromkeys(class_group_ids))
+        instance.device_fingerprint = device_fingerprint
+        return instance
+
+
 def device_actor(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
@@ -148,13 +168,17 @@ def session_actor(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
-) -> str:
-    """Accepts either a valid kiosk device token or an authenticated academic/admin actor."""
+) -> SessionActor | str:
+    """Authenticate an attendance actor and preserve verified authorization scopes."""
     token = credentials.credentials if credentials and credentials.scheme.lower() == "bearer" else None
     if not token and device_actor in request.app.dependency_overrides:
+        # Preserve dependency override compatibility for isolated unit-test fixtures.
         return str(request.app.dependency_overrides[device_actor]())
     if not token and admin_actor in request.app.dependency_overrides:
-        return str(request.app.dependency_overrides[admin_actor]())
+        return SessionActor(
+            str(request.app.dependency_overrides[admin_actor]()),
+            role=ROLE_SUPER_ADMIN,
+        )
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -162,13 +186,25 @@ def session_actor(
             headers={"WWW-Authenticate": "Bearer"},
         )
     if authenticate_device(token, settings):
-        return "device:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+        fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        allowed_groups = settings.device_class_group_scopes.get(fingerprint, ())
+        return SessionActor(
+            "device:" + fingerprint[:16],
+            role=ROLE_KIOSK,
+            class_group_ids=allowed_groups,
+            device_fingerprint=fingerprint,
+        )
     if authenticate_admin(token, settings):
-        return "administrator:configured-admin-key"
+        return SessionActor("administrator:configured-admin-key", role=ROLE_SUPER_ADMIN)
     try:
         actor = get_current_actor(credentials, settings)
         if actor.role in (ROLE_SUPER_ADMIN, ROLE_DEAN, ROLE_FACULTY, ROLE_KIOSK):
-            return f"{actor.role.lower()}:{actor.email or actor.sub}"
+            return SessionActor(
+                f"{actor.role.lower()}:{actor.email or actor.sub}",
+                role=actor.role,
+                department_id=actor.department_id,
+                class_group_ids=actor.class_group_ids,
+            )
     except HTTPException:
         pass
     raise HTTPException(
