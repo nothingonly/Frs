@@ -3,13 +3,16 @@ from __future__ import annotations
 from collections.abc import Generator
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.dependencies import ROLE_DEAN, ROLE_FACULTY, ROLE_KIOSK, ROLE_SUPER_ADMIN, SessionActor
-from app.api.routes.attendance import _can_access_session
-from app.database import Base
+from app.api.routes.attendance import _can_access_session, router as attendance_router
+from app.api.dependencies import session_actor
+from app.database import Base, get_db
 from app.db.entities import AttendanceSession, ClassGroup, Department, SessionClassGroup
 
 
@@ -89,3 +92,26 @@ def test_super_admin_remains_unrestricted_and_missing_session_is_denied(scope_db
     admin = SessionActor("administrator:root", role=ROLE_SUPER_ADMIN)
     assert _can_access_session(scope_db, "session-mixed", admin)
     assert not _can_access_session(scope_db, "missing", admin)
+
+
+def test_roster_route_denies_mixed_session_for_single_department_actor(scope_db: Session) -> None:
+    dean_cse = SessionActor("dean:cse", role=ROLE_DEAN, department_id="dept-cse")
+    app = FastAPI()
+    app.include_router(attendance_router)
+
+    def override_get_db():
+        yield scope_db
+
+    class StubPipeline:
+        def get_session_roster(self, _db, _session_id):
+            return [{"student_id": "test"}]
+
+    app.state.pipeline = StubPipeline()
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[session_actor] = lambda: dean_cse
+
+    with TestClient(app) as client:
+        denied = client.get("/api/v1/attendance/sessions/session-mixed/roster")
+        assert denied.status_code == 403
+        allowed = client.get("/api/v1/attendance/sessions/session-cse/roster")
+        assert allowed.status_code == 200
