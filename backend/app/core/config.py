@@ -190,8 +190,22 @@ class Settings(BaseSettings):
                     self.threshold_for(model_id)
             if self.sftp_host and self.sftp_host != "mock" and not (self.sftp_host_key_fingerprint or self.sftp_known_hosts_file):
                 raise ValueError("Production startup refused: SFTP export requires sftp_host_key_fingerprint or sftp_known_hosts_file to pin server identity")
-            if len(self.deletion_certificate_key.strip()) < 32:
-                raise ValueError("Production requires a dedicated FRS_DELETION_CERTIFICATE_KEY of at least 32 characters")
+            try:
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+                from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+                deletion_signing_key = load_pem_private_key(
+                    self.deletion_certificate_key.encode("utf-8"),
+                    password=None,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Production requires FRS_DELETION_CERTIFICATE_KEY to contain a PEM-encoded Ed25519 private key"
+                ) from exc
+            if not isinstance(deletion_signing_key, Ed25519PrivateKey):
+                raise ValueError(
+                    "Production FRS_DELETION_CERTIFICATE_KEY must be an Ed25519 private key"
+                )
             if self.lti_client_id and not self.lti_platform_public_key_pem.strip():
                 raise ValueError("Production LTI is enabled but FRS_LTI_PLATFORM_PUBLIC_KEY_PEM is missing")
             if self.lti_client_id and (not self.lti_issuer.strip() or not self.lti_deployment_id.strip()):
