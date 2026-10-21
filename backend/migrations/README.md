@@ -8,7 +8,8 @@ Run these scripts in order against a fresh PostgreSQL database, including a fres
 4. `0004_dead_letter_status.sql` updates the `capture_batch_jobs` status check constraint to include `DEAD_LETTER` for forward compatibility on existing PostgreSQL deployments.
 5. `0005_group_attendance_workflow.sql` creates group-photo captures and provisional attendance review state.
 6. `0006_lti_nonce_uses.sql` creates the unique nonce-consumption ledger used to reject repeated production LTI launch tokens.
-7. `0007_audit_events_append_only.sql` installs PostgreSQL triggers that reject updates and deletes on `audit_events`. SQLite test runs checksum-track but skip this PostgreSQL-only migration.
+7. `0007_audit_events_append_only.sql` installs PostgreSQL triggers that reject updates and deletes on `audit_events`.
+8. `0008_lti_launch_nonces.sql` stores short-lived, server-issued LTI nonce challenges and enables row-level security. Production launch validation requires an unused, unexpired challenge and consumes it atomically with the replay ledger. SQLite test runs checksum-track but skip PostgreSQL-specific operations.
 
 These scripts are idempotent for the current schema shape and intentionally insert no sample records. For a database already created by an earlier FRS version, back up first and apply the scripts in a staging copy before production.
 
