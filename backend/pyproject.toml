@@ -16,8 +16,8 @@ dependencies = [
   "python-multipart>=0.0.20,<1",
   "numpy>=1.26,<2.2",
   "opencv-python-headless>=4.10,<5",
-  "pillow>=11,<13",
-  "cryptography>=44,<47",
+  "pillow>=13.0.0,<14",
+  "cryptography>=48.0.1,<51",
   "onnxruntime>=1.20,<2",
   "cloudinary>=1.41,<2",
 ]
