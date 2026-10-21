@@ -294,20 +294,10 @@ def list_attendance(
         if sess:
             _check_session_scope(db, actor, sess)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
-    else:
-        if actor.role == ROLE_FACULTY:
-            statement = statement.join(
-                AttendanceSession,
-                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
-            ).where(AttendanceSession.class_group_id.in_(actor.class_group_ids or ["__none__"]))
-        elif actor.role == ROLE_DEAN:
-            statement = statement.join(
-                AttendanceSession,
-                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
-            ).join(
-                ClassGroup,
-                AttendanceSession.class_group_id == ClassGroup.class_group_id,
-            ).where(ClassGroup.department_id == actor.department_id)
+    elif actor.role != ROLE_SUPER_ADMIN:
+        statement = statement.where(
+            AttendanceEvent.attendance_session_id.in_(_scoped_session_ids(actor))
+        )
 
     rows = db.execute(statement.order_by(AttendanceEvent.timestamp.desc()).limit(limit).offset(offset)).scalars().all()
     return {
@@ -536,13 +526,10 @@ def list_capture_batches(
                 if cg:
                     check_department_access(actor, cg.department_id)
         statement = statement.where(CaptureBatchJob.attendance_session_id == attendance_session_id)
-    else:
-        if actor.role == ROLE_FACULTY:
-            statement = statement.where(CaptureBatchJob.class_group_id.in_(actor.class_group_ids or ["__none__"]))
-        elif actor.role == ROLE_DEAN:
-            statement = statement.join(
-                ClassGroup, CaptureBatchJob.class_group_id == ClassGroup.class_group_id
-            ).where(ClassGroup.department_id == actor.department_id)
+    elif actor.role != ROLE_SUPER_ADMIN:
+        statement = statement.where(
+            CaptureBatchJob.attendance_session_id.in_(_scoped_session_ids(actor))
+        )
 
     if status:
         normalized_status = status.strip().upper()
@@ -599,13 +586,78 @@ def get_system_stats(
     now = datetime.now(timezone.utc)
     today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
 
-    dept_count = db.scalar(select(func.count(Department.department_id)).where(Department.is_active.is_(True))) or 0
-    group_count = db.scalar(select(func.count(ClassGroup.class_group_id)).where(ClassGroup.is_active.is_(True))) or 0
-    student_count = db.scalar(select(func.count(Student.student_id)).where(Student.is_active.is_(True))) or 0
-    biometric_count = db.scalar(select(func.count(func.distinct(EmbeddingRecord.person_id)))) or 0
-    open_sess_count = db.scalar(select(func.count(AttendanceSession.session_id)).where(AttendanceSession.status == "OPEN")) or 0
-    today_att_count = db.scalar(select(func.count(AttendanceEvent.attendance_id)).where(AttendanceEvent.timestamp >= today_start)) or 0
-    pending_rev_count = db.scalar(select(func.count(CaptureBatchJob.batch_id)).where(CaptureBatchJob.status.in_(["FAILED", "REJECTED"]))) or 0
+    if _actor.role == ROLE_SUPER_ADMIN:
+        allowed_group_ids = None
+    elif _actor.role == ROLE_DEAN:
+        allowed_group_ids = select(ClassGroup.class_group_id).where(
+            ClassGroup.department_id == _actor.department_id
+        )
+    else:
+        allowed_group_ids = tuple(_actor.class_group_ids) or ("__none__",)
+
+    if allowed_group_ids is None:
+        dept_scope = select(Department.department_id).where(Department.is_active.is_(True))
+        group_scope = select(ClassGroup.class_group_id).where(ClassGroup.is_active.is_(True))
+    elif isinstance(allowed_group_ids, tuple):
+        group_scope = select(ClassGroup.class_group_id).where(
+            ClassGroup.class_group_id.in_(allowed_group_ids),
+            ClassGroup.is_active.is_(True),
+        )
+        dept_scope = select(ClassGroup.department_id).where(
+            ClassGroup.class_group_id.in_(group_scope)
+        ).distinct()
+    else:
+        group_scope = select(ClassGroup.class_group_id).where(
+            ClassGroup.class_group_id.in_(allowed_group_ids),
+            ClassGroup.is_active.is_(True),
+        )
+        dept_scope = select(ClassGroup.department_id).where(
+            ClassGroup.class_group_id.in_(group_scope)
+        ).distinct()
+
+    scoped_students = (
+        select(ClassEnrollment.student_id)
+        .where(
+            ClassEnrollment.class_group_id.in_(group_scope),
+            ClassEnrollment.status == "ACTIVE",
+        )
+        .distinct()
+    )
+    scoped_sessions = _scoped_session_ids(_actor)
+
+    dept_count = db.scalar(select(func.count()).select_from(dept_scope.subquery())) or 0
+    group_count = db.scalar(select(func.count()).select_from(group_scope.subquery())) or 0
+    student_count = db.scalar(
+        select(func.count(func.distinct(Student.student_id)))
+        .where(Student.is_active.is_(True), Student.student_id.in_(scoped_students))
+    ) or 0
+    biometric_count = db.scalar(
+        select(func.count(func.distinct(EmbeddingRecord.person_id)))
+        .join(Student, Student.person_id == EmbeddingRecord.person_id)
+        .where(
+            Student.is_active.is_(True),
+            Student.student_id.in_(scoped_students),
+            EmbeddingRecord.accepted.is_(True),
+        )
+    ) or 0
+    open_sess_count = db.scalar(
+        select(func.count(AttendanceSession.session_id)).where(
+            AttendanceSession.status == "OPEN",
+            AttendanceSession.session_id.in_(scoped_sessions),
+        )
+    ) or 0
+    today_att_count = db.scalar(
+        select(func.count(AttendanceEvent.attendance_id)).where(
+            AttendanceEvent.timestamp >= today_start,
+            AttendanceEvent.attendance_session_id.in_(scoped_sessions),
+        )
+    ) or 0
+    pending_rev_count = db.scalar(
+        select(func.count(CaptureBatchJob.batch_id)).where(
+            CaptureBatchJob.status.in_(["FAILED", "REJECTED"]),
+            CaptureBatchJob.attendance_session_id.in_(scoped_sessions),
+        )
+    ) or 0
 
     return {
         "departments_count": dept_count,
@@ -629,12 +681,10 @@ def list_review_queue(
         select(CaptureBatchJob)
         .where(CaptureBatchJob.status.in_(["REJECTED", "FAILED"]))
     )
-    if actor.role == ROLE_FACULTY:
-        statement = statement.where(CaptureBatchJob.class_group_id.in_(actor.class_group_ids or ["__none__"]))
-    elif actor.role == ROLE_DEAN:
-        statement = statement.join(
-            ClassGroup, CaptureBatchJob.class_group_id == ClassGroup.class_group_id
-        ).where(ClassGroup.department_id == actor.department_id)
+    if actor.role != ROLE_SUPER_ADMIN:
+        statement = statement.where(
+            CaptureBatchJob.attendance_session_id.in_(_scoped_session_ids(actor))
+        )
 
     jobs = db.execute(statement.order_by(CaptureBatchJob.created_at.desc()).limit(limit)).scalars().all()
     items = []
