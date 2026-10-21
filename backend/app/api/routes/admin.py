@@ -402,26 +402,14 @@ def list_audit_events(
     offset: int = Query(default=0, ge=0),
 ):
     statement = select(AuditEvent)
-    if actor.role == ROLE_DEAN and actor.department_id:
-        dept = db.get(Department, actor.department_id)
+    if actor.role == ROLE_DEAN:
         if session_id:
-            sess = db.get(AttendanceSession, session_id)
-            if sess:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg and cg.department_id != actor.department_id:
-                    raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
-            elif session_id.startswith("admin:"):
-                emp_id = session_id.split(":", 1)[1]
-                person = db.execute(select(Person).where(Person.employee_id == emp_id)).scalar_one_or_none()
-                if person and dept and person.department != dept.code:
-                    raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
+            _audit_object_scope(db, actor, session_id)
         else:
-            dept_sessions = select(AttendanceSession.session_id).join(
-                ClassGroup, AttendanceSession.class_group_id == ClassGroup.class_group_id
-            ).where(ClassGroup.department_id == actor.department_id)
             actor_id_str = actor.email or actor.sub
             statement = statement.where(
-                (AuditEvent.session_id.in_(dept_sessions)) | (AuditEvent.actor_id == actor_id_str)
+                (AuditEvent.session_id.in_(_scoped_session_ids(actor)))
+                | (AuditEvent.actor_id == actor_id_str)
             )
 
     if session_id:
@@ -455,18 +443,8 @@ def get_audit(
     event = db.get(AuditEvent, audit_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Audit event not found.")
-    if actor.role == ROLE_DEAN and actor.department_id:
-        dept = db.get(Department, actor.department_id)
-        sess = db.get(AttendanceSession, event.session_id) if event.session_id else None
-        if sess:
-            cg = db.get(ClassGroup, sess.class_group_id)
-            if cg and cg.department_id != actor.department_id:
-                raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
-        elif event.session_id and event.session_id.startswith("admin:"):
-            emp_id = event.session_id.split(":", 1)[1]
-            person = db.execute(select(Person).where(Person.employee_id == emp_id)).scalar_one_or_none()
-            if person and dept and person.department != dept.code:
-                raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
+    if actor.role == ROLE_DEAN:
+        _audit_object_scope(db, actor, event.session_id or "")
     return {
         "audit_id": event.audit_id,
         "session_id": event.session_id,
