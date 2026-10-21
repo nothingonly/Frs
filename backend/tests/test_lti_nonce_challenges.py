@@ -7,6 +7,7 @@ from collections.abc import Generator
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.dependencies import scoped_admin
+import app.api.routes.integrations as integration_routes
+import app.services.integrations as integration_services
 from app.core.auth import ROLE_SUPER_ADMIN, TokenClaims, _b64url_encode
 from app.core.config import Settings, get_settings
 from app.database import Base, get_db
@@ -46,7 +49,7 @@ def _signed_lti_token(private_key, nonce: str) -> str:
     return f"{header_segment}.{payload_segment}.{_b64url_encode(signature)}"
 
 
-def _app_and_db():
+def _app_and_db(monkeypatch: pytest.MonkeyPatch):
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -74,6 +77,9 @@ def _app_and_db():
         lti_deployment_id="campus-prod",
         lti_platform_public_key_pem=public_key_pem,
     )
+    monkeypatch.setattr(integration_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(integration_services, "get_settings", lambda: settings)
+
     app = FastAPI()
     app.include_router(integrations_router)
     app.dependency_overrides[get_db] = override_db
@@ -88,8 +94,8 @@ def _app_and_db():
     return app, engine, factory, private_key
 
 
-def test_production_lti_requires_and_consumes_server_nonce_once() -> None:
-    app, engine, factory, private_key = _app_and_db()
+def test_production_lti_requires_and_consumes_server_nonce_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, engine, factory, private_key = _app_and_db(monkeypatch)
     try:
         with TestClient(app) as client:
             issued = client.post("/api/v1/integrations/lti/launch/nonce")
@@ -116,8 +122,8 @@ def test_production_lti_requires_and_consumes_server_nonce_once() -> None:
         engine.dispose()
 
 
-def test_production_lti_rejects_caller_chosen_nonce_without_challenge() -> None:
-    app, engine, _factory, private_key = _app_and_db()
+def test_production_lti_rejects_caller_chosen_nonce_without_challenge(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, engine, _factory, private_key = _app_and_db(monkeypatch)
     try:
         token = _signed_lti_token(private_key, "attacker-chosen-nonce")
         with TestClient(app) as client:
