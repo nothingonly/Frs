@@ -965,8 +965,20 @@ def get_dead_letter_batches(
     limit: int = Query(default=50, ge=1, le=100),
 ):
     """List poisoned or retry-exhausted capture batches for operator triage."""
-    dept_id = actor.department_id if actor.role == ROLE_DEAN else None
-    items = list_dead_letter_batches(db, limit=limit, department_id=dept_id)
+    if actor.role == ROLE_DEAN:
+        statement = (
+            select(CaptureBatchJob)
+            .where(
+                CaptureBatchJob.status == "DEAD_LETTER",
+                CaptureBatchJob.attendance_session_id.in_(_scoped_session_ids(actor)),
+            )
+            .order_by(CaptureBatchJob.updated_at.desc())
+            .limit(min(max(1, limit), 100))
+        )
+        rows = db.execute(statement).scalars().all()
+        items = [serialize_capture_batch(row) for row in rows]
+    else:
+        items = list_dead_letter_batches(db, limit=limit)
     return {"items": items, "total": len(items)}
 
 
@@ -978,6 +990,13 @@ def requeue_batch(
     db: Annotated[Session, Depends(get_db)],
 ):
     """Requeue an exhausted dead-letter batch back to the queue for reprocessing."""
+    job = db.get(CaptureBatchJob, batch_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Capture batch not found.")
+    session = db.get(AttendanceSession, job.attendance_session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Associated attendance session not found.")
+    _check_session_scope(db, actor, session)
     allowed_dept = actor.department_id if actor.role == ROLE_DEAN else None
     return requeue_dead_letter_batch(
         db, batch_id, operator_id=actor.email or actor.sub, allowed_department_id=allowed_dept
