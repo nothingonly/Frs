@@ -171,6 +171,10 @@ def de_enroll_student_biometrics(
 
     settings = get_settings()
     secret = signing_key or settings.deletion_certificate_key
+    if not secret and not settings.is_production:
+        # Stable, dedicated development-only material keeps local test certificates verifiable.
+        # Production startup separately requires an institution-managed key.
+        secret = "frs-development-only-deletion-certificate-key-not-for-production"
     if not secret:
         raise RuntimeError("A dedicated biometric deletion-certificate signing key must be configured.")
     secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
