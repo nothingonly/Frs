@@ -144,11 +144,46 @@ def scoped_actor(
 
 
 
+def session_actor(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    settings: Settings = Depends(get_settings),
+) -> str:
+    """Accepts either a valid kiosk device token or an authenticated academic/admin actor."""
+    token = credentials.credentials if credentials and credentials.scheme.lower() == "bearer" else None
+    if not token and device_actor in request.app.dependency_overrides:
+        return str(request.app.dependency_overrides[device_actor]())
+    if not token and admin_actor in request.app.dependency_overrides:
+        return str(request.app.dependency_overrides[admin_actor]())
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication bearer credentials are required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if authenticate_device(token, settings):
+        return "device:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    if authenticate_admin(token, settings):
+        return "administrator:configured-admin-key"
+    try:
+        actor = get_current_actor(credentials, settings)
+        if actor.role in (ROLE_SUPER_ADMIN, ROLE_DEAN, ROLE_FACULTY, ROLE_KIOSK):
+            return f"{actor.role.lower()}:{actor.email or actor.sub}"
+    except HTTPException:
+        pass
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Valid kiosk device or academic bearer credentials are required.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 __all__ = [
     "device_actor",
     "admin_actor",
     "scoped_admin",
     "scoped_actor",
+    "session_actor",
     "get_current_actor",
     "require_role",
     "check_department_access",

@@ -136,6 +136,9 @@ class ClassGroup(Base):
     year_of_study: Mapped[int] = mapped_column(Integer, nullable=False)
     section: Mapped[str] = mapped_column(String(20), nullable=False)
     academic_year: Mapped[str] = mapped_column(String(9), nullable=False)
+    semester: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_lab: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    lab_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
@@ -193,6 +196,9 @@ class AttendanceSession(Base):
     class_group_id: Mapped[str] = mapped_column(
         ForeignKey("class_groups.class_group_id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    session_type: Mapped[str] = mapped_column(String(20), default="SPECIFIC", nullable=False)
+    lab_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    semester: Mapped[int | None] = mapped_column(Integer, nullable=True)
     subject_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
     subject_name: Mapped[str] = mapped_column(String(160), nullable=False)
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -201,6 +207,66 @@ class AttendanceSession(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_by: Mapped[str] = mapped_column(String(120), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SessionClassGroup(Base):
+    """Associates multiple class groups with a single session for mixed-class or lab attendance."""
+    __tablename__ = "session_class_groups"
+
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("attendance_sessions.session_id", ondelete="CASCADE"), primary_key=True
+    )
+    class_group_id: Mapped[str] = mapped_column(
+        ForeignKey("class_groups.class_group_id", ondelete="RESTRICT"), primary_key=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SessionGroupCapture(Base):
+    """Tracks each multi-face group photograph taken during an active attendance session."""
+    __tablename__ = "session_group_captures"
+    __table_args__ = (
+        Index("ix_session_captures_session_idx", "session_id", "photo_index"),
+    )
+
+    capture_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("attendance_sessions.session_id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    photo_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    faces_detected_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    faces_matched_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    faces_uncertain_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    faces_unknown_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duplicates_ignored_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class SessionProvisionalAttendance(Base):
+    """Provisional recognized attendance for a session, deduplicated per student, awaiting faculty finalization."""
+    __tablename__ = "session_provisional_attendance"
+    __table_args__ = (
+        UniqueConstraint("session_id", "student_id", name="uq_session_provisional_student"),
+        Index("ix_session_provisional_session_status", "session_id", "status"),
+    )
+
+    provisional_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("attendance_sessions.session_id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    student_id: Mapped[str] = mapped_column(
+        ForeignKey("students.student_id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    person_id: Mapped[str | None] = mapped_column(
+        ForeignKey("persons.person_id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="PRESENT", nullable=False)
+    similarity_score: Mapped[float] = mapped_column(Float, default=0.0)
+    first_capture_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    notes: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class CaptureBatchJob(Base):

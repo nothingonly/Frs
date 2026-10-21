@@ -130,6 +130,7 @@ class _AdminEnrollmentDialogState extends State<AdminEnrollmentDialog> {
                       onImagesCaptured: (frames) => setState(() => _capturedImages = frames),
                       onRetakePressed: () => setState(() => _capturedImages = <Uint8List>[]),
                       isSubmitting: _isSubmitting,
+                      isGroupMode: false,
                     ),
                   ),
                   const SizedBox(height: 16),

@@ -8,11 +8,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import device_actor
+from app.api.dependencies import device_actor, session_actor
 from app.database import get_db
 from app.db.entities import (
     AttendanceEvent,
@@ -22,6 +22,7 @@ from app.db.entities import (
     ClassEnrollment,
     ClassGroup,
     Department,
+    SessionClassGroup,
     Student,
 )
 from app.security import encrypt_capture_payload
@@ -126,10 +127,10 @@ async def verify_attendance(
 
 @router.get("/sessions/open")
 def list_open_attendance_sessions(
-    _actor_id: Annotated[str, Depends(device_actor)],
+    _actor_id: Annotated[str, Depends(session_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """List open attendance sessions in active class groups for an authenticated kiosk."""
+    """List open attendance sessions in active class groups for an authenticated kiosk or faculty portal."""
     rows = db.execute(
         select(AttendanceSession, ClassGroup, Department)
         .join(ClassGroup, ClassGroup.class_group_id == AttendanceSession.class_group_id)
@@ -141,17 +142,38 @@ def list_open_attendance_sessions(
         )
         .order_by(AttendanceSession.starts_at.desc())
     ).all()
-    return {"items": [{
-        "session_id": session.session_id,
-        "subject_code": session.subject_code,
-        "subject_name": session.subject_name,
-        "starts_at": session.starts_at.isoformat(),
-        "class_group_id": group.class_group_id,
-        "department_code": department.code,
-        "year_of_study": group.year_of_study,
-        "section": group.section,
-        "academic_year": group.academic_year,
-    } for session, group, department in rows]}
+
+    items = []
+    for session, group, department in rows:
+        extra_gids = db.execute(
+            select(SessionClassGroup.class_group_id)
+            .where(SessionClassGroup.session_id == session.session_id)
+        ).scalars().all()
+        all_group_ids = list(dict.fromkeys([group.class_group_id, *extra_gids]))
+        expected_count = db.scalar(
+            select(func.count(func.distinct(ClassEnrollment.student_id))).where(
+                ClassEnrollment.class_group_id.in_(all_group_ids),
+                ClassEnrollment.status == "ACTIVE",
+            )
+        ) or 0
+
+        items.append({
+            "session_id": session.session_id,
+            "session_type": getattr(session, "session_type", "SPECIFIC"),
+            "lab_name": getattr(session, "lab_name", None),
+            "semester": getattr(session, "semester", None),
+            "subject_code": session.subject_code,
+            "subject_name": session.subject_name,
+            "starts_at": session.starts_at.isoformat(),
+            "class_group_id": group.class_group_id,
+            "class_group_ids": all_group_ids,
+            "expected_roster_count": expected_count,
+            "department_code": department.code,
+            "year_of_study": group.year_of_study,
+            "section": group.section,
+            "academic_year": group.academic_year,
+        })
+    return {"items": items}
 
 
 @router.post("/sessions/{attendance_session_id}/batches", status_code=202)
@@ -367,3 +389,97 @@ def record_alternative_attendance(
         "timestamp": now.isoformat(),
         "method": payload.alternative_method,
     }
+
+
+# ============================================================================
+# Group-Photo Multi-Face Attendance Workflow Endpoints
+# ============================================================================
+
+@router.get("/sessions/{session_id}/roster")
+def get_session_roster_endpoint(
+    session_id: str,
+    request: Request,
+    _actor_id: Annotated[str, Depends(session_actor)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Retrieve the deduplicated expected student roster for a session."""
+    roster = request.app.state.pipeline.get_session_roster(db, session_id)
+    return {
+        "session_id": session_id,
+        "expected_count": len(roster),
+        "roster": roster,
+    }
+
+
+@router.post("/sessions/{session_id}/group-captures")
+async def process_group_photo_capture(
+    session_id: str,
+    request: Request,
+    actor_id: Annotated[str, Depends(session_actor)],
+    db: Annotated[Session, Depends(get_db)],
+    image: Annotated[UploadFile, File()],
+):
+    """Process a classroom group photo containing multiple student faces."""
+    content_type = (image.content_type or "").lower()
+    if content_type and content_type not in {"image/jpeg", "image/png", "image/webp", "application/octet-stream"}:
+        raise HTTPException(status_code=415, detail=f"Unsupported image content type: {content_type}")
+    max_bytes = 20 * 1024 * 1024  # 20MB
+    payload = await image.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise HTTPException(status_code=413, detail="Group photo exceeds 20MB limit.")
+    if len(payload) < 500:
+        raise HTTPException(status_code=422, detail="Empty or corrupted image file.")
+
+    return request.app.state.pipeline.process_group_photo(
+        db, session_id=session_id, image_bytes=payload, actor_id=actor_id
+    )
+
+
+@router.get("/sessions/{session_id}/provisional")
+def get_session_provisional_state_endpoint(
+    session_id: str,
+    request: Request,
+    _actor_id: Annotated[str, Depends(session_actor)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Retrieve current provisional attendance state and metrics across all group captures."""
+    return request.app.state.pipeline.get_session_provisional_state(db, session_id)
+
+
+class ProvisionalTogglePayload(BaseModel):
+    new_status: str = Field(pattern=r"^(PRESENT|PENDING_REVIEW|MARKED_ABSENT|UNRESOLVED)$")
+    notes: str | None = Field(default=None, max_length=255)
+
+
+@router.post("/sessions/{session_id}/provisional/{student_id}/toggle")
+def toggle_session_provisional_attendance_endpoint(
+    session_id: str,
+    student_id: str,
+    payload: ProvisionalTogglePayload,
+    request: Request,
+    actor_id: Annotated[str, Depends(session_actor)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Manually resolve or toggle a student's provisional attendance status."""
+    return request.app.state.pipeline.toggle_provisional_attendance(
+        db,
+        session_id=session_id,
+        student_id=student_id,
+        new_status=payload.new_status,
+        actor_id=actor_id,
+        notes=payload.notes,
+    )
+
+
+@router.post("/sessions/{session_id}/finalize")
+def finalize_session_attendance_endpoint(
+    session_id: str,
+    request: Request,
+    actor_id: Annotated[str, Depends(session_actor)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Confirm and finalize attendance: writes durable AttendanceEvents and closes session."""
+    return request.app.state.pipeline.finalize_session_attendance(
+        db, session_id=session_id, actor_id=actor_id
+    )
+

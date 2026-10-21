@@ -43,6 +43,18 @@ class FrameObservation:
     frame_sha256: str
 
 
+@dataclass
+class GroupFaceObservation:
+    face_index: int
+    bbox: list[float]
+    detection_confidence: float
+    keypoints: list[list[float]] | None
+    primary_embedding: np.ndarray | None
+    quality_score: float
+    is_usable: bool
+    rejection_reason: str | None
+
+
 class VisionEngine:
     """Runs real model inference. It never substitutes generated or synthetic identity scores."""
 
@@ -404,3 +416,98 @@ class VisionEngine:
         if crop.size == 0:
             raise VisionError("Liveness face crop is empty")
         return self.liveness.predict_live_probability(crop)
+
+    def detect_all_faces(self, image_bytes: bytes) -> list[GroupFaceObservation]:
+        """Detect and extract ArcFace embeddings for all usable faces in a multi-person group photo."""
+        image = self._decode_image(image_bytes)
+        try:
+            from insightface.utils.face_align import norm_crop
+        except ImportError:
+            from app.vision.onnx_models import norm_crop
+
+        try:
+            bboxes, keypoints = self._detect(self.detector, image, max_num=0)
+        except Exception as exc:
+            raise VisionError(f"Primary detector inference failed: {type(exc).__name__}") from exc
+
+        if len(bboxes) == 0 and self.recovery_detector is not None:
+            try:
+                bboxes, keypoints = self._detect(self.recovery_detector, image, max_num=0)
+            except Exception as exc:
+                raise VisionError(f"RetinaFace recovery detector failed: {type(exc).__name__}") from exc
+
+        observations: list[GroupFaceObservation] = []
+        for idx in range(len(bboxes)):
+            box = np.asarray(bboxes[idx], dtype=np.float32)
+            kps = np.asarray(keypoints[idx], dtype=np.float32) if keypoints is not None and len(keypoints) > idx else None
+            conf = float(box[4]) if box.size > 4 else 1.0
+            x1, y1, x2, y2 = [float(v) for v in box[:4]]
+            bw, bh = x2 - x1, y2 - y1
+
+            if conf < 0.40:
+                observations.append(GroupFaceObservation(
+                    face_index=idx,
+                    bbox=[x1, y1, x2, y2],
+                    detection_confidence=conf,
+                    keypoints=kps.tolist() if kps is not None else None,
+                    primary_embedding=None,
+                    quality_score=conf,
+                    is_usable=False,
+                    rejection_reason="LOW_DETECTION_CONFIDENCE",
+                ))
+                continue
+
+            if bw < 14 or bh < 14:
+                observations.append(GroupFaceObservation(
+                    face_index=idx,
+                    bbox=[x1, y1, x2, y2],
+                    detection_confidence=conf,
+                    keypoints=kps.tolist() if kps is not None else None,
+                    primary_embedding=None,
+                    quality_score=conf,
+                    is_usable=False,
+                    rejection_reason="FACE_TOO_SMALL",
+                ))
+                continue
+
+            if kps is None or kps.shape != (5, 2):
+                observations.append(GroupFaceObservation(
+                    face_index=idx,
+                    bbox=[x1, y1, x2, y2],
+                    detection_confidence=conf,
+                    keypoints=None,
+                    primary_embedding=None,
+                    quality_score=conf,
+                    is_usable=False,
+                    rejection_reason="LANDMARKS_MISSING",
+                ))
+                continue
+
+            try:
+                aligned = norm_crop(image, kps, image_size=getattr(self.recognizer, "input_size", (112, 112))[0])
+                embedding = self._extract_embedding(aligned)
+                gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
+                sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                observations.append(GroupFaceObservation(
+                    face_index=idx,
+                    bbox=[x1, y1, x2, y2],
+                    detection_confidence=conf,
+                    keypoints=kps.tolist(),
+                    primary_embedding=embedding,
+                    quality_score=sharpness,
+                    is_usable=True,
+                    rejection_reason=None,
+                ))
+            except Exception as exc:
+                observations.append(GroupFaceObservation(
+                    face_index=idx,
+                    bbox=[x1, y1, x2, y2],
+                    detection_confidence=conf,
+                    keypoints=kps.tolist() if kps is not None else None,
+                    primary_embedding=None,
+                    quality_score=conf,
+                    is_usable=False,
+                    rejection_reason=f"ALIGNMENT_OR_EMBEDDING_FAILED:{type(exc).__name__}",
+                ))
+
+        return observations

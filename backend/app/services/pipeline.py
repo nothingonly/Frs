@@ -15,7 +15,21 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.db.entities import AttendanceEvent, AttendanceSession, AuditEvent, CaptureBatchJob, ClassEnrollment, EmbeddingRecord, Person, Student
+from app.db.entities import (
+    AttendanceEvent,
+    AttendanceSession,
+    AuditEvent,
+    CaptureBatchJob,
+    ClassEnrollment,
+    ClassGroup,
+    Department,
+    EmbeddingRecord,
+    Person,
+    SessionClassGroup,
+    SessionGroupCapture,
+    SessionProvisionalAttendance,
+    Student,
+)
 from app.schemas.contracts import (
     DecisionState,
     RetrievalCandidate,
@@ -1242,3 +1256,574 @@ class AttendancePipeline:
             },
             "audit_id": audit_id,
         }
+
+    def get_session_roster(self, db: Session, session_id: str) -> list[dict[str, Any]]:
+        """Return the unified, deduplicated expected roster for an attendance session."""
+        session = db.get(AttendanceSession, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+
+        group_ids = db.execute(
+            select(SessionClassGroup.class_group_id).where(SessionClassGroup.session_id == session_id)
+        ).scalars().all()
+        all_group_ids = set(group_ids)
+        if session.class_group_id:
+            all_group_ids.add(session.class_group_id)
+
+        if not all_group_ids:
+            return []
+
+        rows = db.execute(
+            select(Student, Department.code, ClassGroup.year_of_study, ClassGroup.section)
+            .join(ClassEnrollment, ClassEnrollment.student_id == Student.student_id)
+            .join(ClassGroup, ClassGroup.class_group_id == ClassEnrollment.class_group_id)
+            .join(Department, Department.department_id == ClassGroup.department_id)
+            .where(
+                ClassEnrollment.class_group_id.in_(all_group_ids),
+                ClassEnrollment.status == "ACTIVE",
+                Student.is_active.is_(True),
+            )
+            .order_by(Student.student_number)
+        ).all()
+
+        seen_ids = set()
+        roster: list[dict[str, Any]] = []
+        for student, dept_code, year, section in rows:
+            if student.student_id in seen_ids:
+                continue
+            seen_ids.add(student.student_id)
+            has_bio = False
+            if student.person_id:
+                has_bio = bool(db.execute(
+                    select(EmbeddingRecord.embedding_id)
+                    .where(EmbeddingRecord.person_id == student.person_id, EmbeddingRecord.accepted.is_(True))
+                ).first())
+            roster.append({
+                "student_id": student.student_id,
+                "student_number": student.student_number,
+                "full_name": student.full_name,
+                "email": student.email,
+                "department_code": dept_code,
+                "year_of_study": year,
+                "section": section,
+                "person_id": student.person_id,
+                "is_biometric_enrolled": has_bio,
+            })
+        return roster
+
+    def process_group_photo(
+        self,
+        db: Session,
+        session_id: str,
+        image_bytes: bytes,
+        photo_index: int = 1,
+        client_device_id: str = "kiosk-camera",
+        actor_id: str = "faculty:kiosk",
+    ) -> dict[str, Any]:
+        """Detect all faces in a classroom group photo and match against the session roster."""
+        session = db.get(AttendanceSession, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+        if session.status != "OPEN":
+            raise HTTPException(status_code=409, detail="Attendance session is not open.")
+
+        roster = self.get_session_roster(db, session_id)
+        roster_by_person_id = {s["person_id"]: s for s in roster if s["person_id"]}
+        roster_person_ids = list(roster_by_person_id.keys())
+
+        gallery_vectors: list[np.ndarray] = []
+        gallery_person_ids: list[str] = []
+        if roster_person_ids:
+            records = db.execute(
+                select(EmbeddingRecord)
+                .where(
+                    EmbeddingRecord.person_id.in_(roster_person_ids),
+                    EmbeddingRecord.accepted.is_(True),
+                    EmbeddingRecord.recognizer_id == self.vision.recognizer_id,
+                )
+            ).scalars().all()
+            for rec in records:
+                try:
+                    raw_bytes = decrypt_embedding(rec.ciphertext, rec.nonce, self.settings)
+                    vec = np.frombuffer(raw_bytes, dtype=np.float32)
+                    gallery_vectors.append(_normalise(vec))
+                    gallery_person_ids.append(rec.person_id)
+                except Exception:
+                    continue
+
+        # Non-roster persons for detecting outside-roster attendees
+        outside_vectors: list[np.ndarray] = []
+        outside_person_ids: list[str] = []
+        outside_records = db.execute(
+            select(EmbeddingRecord.person_id, EmbeddingRecord.ciphertext, EmbeddingRecord.nonce)
+            .where(
+                EmbeddingRecord.accepted.is_(True),
+                EmbeddingRecord.recognizer_id == self.vision.recognizer_id,
+                EmbeddingRecord.person_id.notin_(roster_person_ids) if roster_person_ids else True,
+            )
+            .limit(300)
+        ).all()
+        for pid, ctext, n in outside_records:
+            try:
+                raw_bytes = decrypt_embedding(ctext, n, self.settings)
+                vec = np.frombuffer(raw_bytes, dtype=np.float32)
+                outside_vectors.append(_normalise(vec))
+                outside_person_ids.append(pid)
+            except Exception:
+                continue
+
+        observations = self.vision.detect_all_faces(image_bytes)
+        capture_id = str(uuid.uuid4())
+        threshold = self.settings.similarity_threshold
+
+        faces_matched = 0
+        faces_uncertain = 0
+        faces_unknown = 0
+        duplicates_ignored = 0
+        detected_faces: list[dict[str, Any]] = []
+
+        now = _utcnow()
+        for obs in observations:
+            if not obs.is_usable or obs.primary_embedding is None:
+                faces_unknown += 1
+                detected_faces.append({
+                    "face_index": obs.face_index,
+                    "bbox": obs.bbox,
+                    "status": "UNUSABLE",
+                    "reason": obs.rejection_reason or "QUALITY_FAIL",
+                })
+                continue
+
+            matched_student = None
+            best_score = -1.0
+            is_uncertain = False
+            is_outside_roster = False
+
+            if gallery_vectors:
+                G = np.asarray(gallery_vectors, dtype=np.float32)
+                scores = np.clip(np.dot(G, obs.primary_embedding), -1.0, 1.0)
+                best_idx = int(np.argmax(scores))
+                best_score = float(scores[best_idx])
+                matched_pid = gallery_person_ids[best_idx]
+                student_info = roster_by_person_id.get(matched_pid)
+
+                if best_score >= threshold:
+                    matched_student = student_info
+                elif best_score >= (threshold - 0.08):
+                    matched_student = student_info
+                    is_uncertain = True
+
+            if matched_student is None and outside_vectors:
+                G_out = np.asarray(outside_vectors, dtype=np.float32)
+                out_scores = np.clip(np.dot(G_out, obs.primary_embedding), -1.0, 1.0)
+                out_best_idx = int(np.argmax(out_scores))
+                out_best_score = float(out_scores[out_best_idx])
+                if out_best_score >= threshold:
+                    out_pid = outside_person_ids[out_best_idx]
+                    out_student = db.execute(
+                        select(Student).where(Student.person_id == out_pid)
+                    ).scalar_one_or_none()
+                    is_outside_roster = True
+                    best_score = out_best_score
+                    matched_student = {
+                        "student_id": out_student.student_id if out_student else "unknown",
+                        "student_number": out_student.student_number if out_student else "OTHER",
+                        "full_name": out_student.full_name if out_student else "Enrolled Student (Other Class)",
+                        "person_id": out_pid,
+                    }
+
+            if matched_student and not is_outside_roster and not is_uncertain:
+                prov = db.execute(
+                    select(SessionProvisionalAttendance)
+                    .where(
+                        SessionProvisionalAttendance.session_id == session_id,
+                        SessionProvisionalAttendance.student_id == matched_student["student_id"],
+                    )
+                ).scalar_one_or_none()
+                if prov and prov.status == "PRESENT":
+                    duplicates_ignored += 1
+                    detected_faces.append({
+                        "face_index": obs.face_index,
+                        "bbox": obs.bbox,
+                        "status": "DUPLICATE_IGNORED",
+                        "student_id": matched_student["student_id"],
+                        "student_number": matched_student["student_number"],
+                        "full_name": matched_student["full_name"],
+                        "similarity_score": round(best_score, 4),
+                    })
+                else:
+                    if not prov:
+                        db.add(SessionProvisionalAttendance(
+                            session_id=session_id,
+                            student_id=matched_student["student_id"],
+                            person_id=matched_student["person_id"],
+                            status="PRESENT",
+                            similarity_score=best_score,
+                            first_capture_id=capture_id,
+                        ))
+                    else:
+                        prov.status = "PRESENT"
+                        prov.similarity_score = max(prov.similarity_score, best_score)
+                    faces_matched += 1
+                    detected_faces.append({
+                        "face_index": obs.face_index,
+                        "bbox": obs.bbox,
+                        "status": "MATCHED",
+                        "student_id": matched_student["student_id"],
+                        "student_number": matched_student["student_number"],
+                        "full_name": matched_student["full_name"],
+                        "similarity_score": round(best_score, 4),
+                    })
+            elif is_uncertain and matched_student:
+                faces_uncertain += 1
+                prov = db.execute(
+                    select(SessionProvisionalAttendance)
+                    .where(
+                        SessionProvisionalAttendance.session_id == session_id,
+                        SessionProvisionalAttendance.student_id == matched_student["student_id"],
+                    )
+                ).scalar_one_or_none()
+                if not prov:
+                    db.add(SessionProvisionalAttendance(
+                        session_id=session_id,
+                        student_id=matched_student["student_id"],
+                        person_id=matched_student["person_id"],
+                        status="PENDING_REVIEW",
+                        similarity_score=best_score,
+                        first_capture_id=capture_id,
+                        notes="MARGINAL_CONFIDENCE",
+                    ))
+                detected_faces.append({
+                    "face_index": obs.face_index,
+                    "bbox": obs.bbox,
+                    "status": "PENDING_REVIEW",
+                    "student_id": matched_student["student_id"],
+                    "student_number": matched_student["student_number"],
+                    "full_name": matched_student["full_name"],
+                    "similarity_score": round(best_score, 4),
+                })
+            elif is_outside_roster and matched_student:
+                faces_uncertain += 1
+                detected_faces.append({
+                    "face_index": obs.face_index,
+                    "bbox": obs.bbox,
+                    "status": "FLAGGED_OUTSIDE_ROSTER",
+                    "student_id": matched_student["student_id"],
+                    "student_number": matched_student["student_number"],
+                    "full_name": matched_student["full_name"],
+                    "similarity_score": round(best_score, 4),
+                })
+            else:
+                faces_unknown += 1
+                detected_faces.append({
+                    "face_index": obs.face_index,
+                    "bbox": obs.bbox,
+                    "status": "UNKNOWN_FACE",
+                    "similarity_score": round(best_score, 4) if best_score > 0 else 0.0,
+                })
+
+        capture = SessionGroupCapture(
+            capture_id=capture_id,
+            session_id=session_id,
+            captured_at=now,
+            photo_index=photo_index,
+            image_sha256=hashlib.sha256(image_bytes).hexdigest(),
+            faces_detected_count=len(observations),
+            faces_matched_count=faces_matched,
+            faces_uncertain_count=faces_uncertain,
+            faces_unknown_count=faces_unknown,
+            duplicates_ignored_count=duplicates_ignored,
+            metadata_json=json.dumps(detected_faces),
+        )
+        db.add(capture)
+        self._audit(
+            db,
+            session_id=session_id,
+            actor_type="faculty",
+            actor_id=actor_id,
+            action="session.group_capture",
+            state="PROCESSED",
+            reasons=["GROUP_PHOTO_CAPTURED"],
+            evidence={
+                "capture_id": capture_id,
+                "photo_index": photo_index,
+                "faces_detected": len(observations),
+                "faces_matched": faces_matched,
+                "faces_uncertain": faces_uncertain,
+                "faces_unknown": faces_unknown,
+                "duplicates_ignored": duplicates_ignored,
+                "client_device_id": client_device_id,
+            },
+        )
+        db.commit()
+
+        # Cumulative state
+        cumulative = self.get_session_provisional_state(db, session_id)
+        return {
+            "status": "success",
+            "capture_id": capture_id,
+            "photo_index": photo_index,
+            "faces_detected_count": len(observations),
+            "faces_matched_count": faces_matched,
+            "faces_uncertain_count": faces_uncertain,
+            "faces_unknown_count": faces_unknown,
+            "duplicates_ignored_count": duplicates_ignored,
+            "capture": {
+                "capture_id": capture_id,
+                "photo_index": photo_index,
+                "faces_detected": len(observations),
+                "faces_matched": faces_matched,
+                "faces_uncertain": faces_uncertain,
+                "faces_unknown": faces_unknown,
+                "duplicates_ignored": duplicates_ignored,
+            },
+            "detected_faces": detected_faces,
+            "summary_message": (
+                f"{len(observations)} faces detected • {faces_matched} matched • "
+                f"{faces_uncertain} review • {faces_unknown} unknown • {duplicates_ignored} duplicates ignored"
+            ),
+            "session_cumulative": cumulative,
+            "cumulative_state": cumulative,
+        }
+
+    def get_session_provisional_state(self, db: Session, session_id: str) -> dict[str, Any]:
+        """Return cumulative session attendance stats, roster status, and photo capture history."""
+        session = db.get(AttendanceSession, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+
+        roster = self.get_session_roster(db, session_id)
+        provisional_rows = db.execute(
+            select(SessionProvisionalAttendance).where(SessionProvisionalAttendance.session_id == session_id)
+        ).scalars().all()
+        prov_map = {p.student_id: p for p in provisional_rows}
+
+        captures = db.execute(
+            select(SessionGroupCapture)
+            .where(SessionGroupCapture.session_id == session_id)
+            .order_by(SessionGroupCapture.photo_index)
+        ).scalars().all()
+
+        roster_results = []
+        present_count = 0
+        review_count = 0
+        absent_count = 0
+
+        for student in roster:
+            prov = prov_map.get(student["student_id"])
+            if prov and prov.status == "PRESENT":
+                status = "PRESENT"
+                present_count += 1
+                score = prov.similarity_score
+            elif prov and prov.status == "PENDING_REVIEW":
+                status = "PENDING_REVIEW"
+                review_count += 1
+                score = prov.similarity_score
+            elif prov and prov.status == "MARKED_ABSENT":
+                status = "MARKED_ABSENT"
+                absent_count += 1
+                score = 0.0
+            else:
+                status = "UNRESOLVED"
+                score = 0.0
+
+            roster_results.append({
+                **student,
+                "status": status,
+                "similarity_score": round(score, 4),
+                "notes": prov.notes if prov else None,
+            })
+
+        total_unknown_faces = sum(c.faces_unknown_count for c in captures)
+
+        return {
+            "session_id": session_id,
+            "status": session.status,
+            "expected_count": len(roster),
+            "present_count": present_count,
+            "pending_review_count": review_count,
+            "unresolved_count": len(roster) - present_count - review_count - absent_count,
+            "unknown_faces_count": total_unknown_faces,
+            "photos_captured_count": len(captures),
+            "roster": roster_results,
+            "captures": [{
+                "capture_id": c.capture_id,
+                "photo_index": c.photo_index,
+                "captured_at": c.captured_at.isoformat(),
+                "faces_detected": c.faces_detected_count,
+                "faces_matched": c.faces_matched_count,
+                "faces_uncertain": c.faces_uncertain_count,
+                "faces_unknown": c.faces_unknown_count,
+                "duplicates_ignored": c.duplicates_ignored_count,
+            } for c in captures],
+        }
+
+    def toggle_provisional_attendance(
+        self,
+        db: Session,
+        session_id: str,
+        student_id: str,
+        new_status: str,
+        actor_id: str = "faculty",
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Manually toggle or resolve a student's provisional attendance status."""
+        session = db.get(AttendanceSession, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+        if session.status != "OPEN":
+            raise HTTPException(status_code=409, detail="Cannot modify closed session.")
+
+        student = db.get(Student, student_id)
+        if student is None:
+            raise HTTPException(status_code=404, detail="Student not found.")
+
+        prov = db.execute(
+            select(SessionProvisionalAttendance)
+            .where(
+                SessionProvisionalAttendance.session_id == session_id,
+                SessionProvisionalAttendance.student_id == student_id,
+            )
+        ).scalar_one_or_none()
+
+        if not prov:
+            prov = SessionProvisionalAttendance(
+                session_id=session_id,
+                student_id=student_id,
+                person_id=student.person_id,
+                status=new_status,
+                similarity_score=1.0 if new_status == "PRESENT" else 0.0,
+                notes=notes or "MANUAL_FACULTY_ACTION",
+            )
+            db.add(prov)
+        else:
+            prov.status = new_status
+            if notes:
+                prov.notes = notes
+
+        self._audit(
+            db,
+            session_id=session_id,
+            actor_type="faculty",
+            actor_id=actor_id,
+            action="session.provisional_toggle",
+            state=new_status,
+            reasons=["MANUAL_FACULTY_OVERRIDE"],
+            evidence={"student_id": student_id, "new_status": new_status, "notes": notes},
+        )
+        db.commit()
+        return {"status": "success", "student_id": student_id, "provisional_status": new_status}
+
+    def finalize_session_attendance(
+        self,
+        db: Session,
+        session_id: str,
+        actor_id: str = "faculty",
+    ) -> dict[str, Any]:
+        """Finalize attendance for an open session: persist durable AttendanceEvents and close session."""
+        session = db.execute(
+            select(AttendanceSession).where(AttendanceSession.session_id == session_id).with_for_update()
+        ).scalar_one_or_none()
+        if session is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+        if session.status == "CLOSED":
+            # Idempotent return
+            cumulative = self.get_session_provisional_state(db, session_id)
+            return {
+                "status": "already_finalized",
+                "session_id": session_id,
+                "message": "Session attendance was already confirmed and finalized.",
+                "summary": cumulative,
+            }
+        if session.status != "OPEN":
+            raise HTTPException(status_code=409, detail=f"Cannot finalize session with status '{session.status}'.")
+
+        roster = self.get_session_roster(db, session_id)
+        provisional_rows = db.execute(
+            select(SessionProvisionalAttendance).where(SessionProvisionalAttendance.session_id == session_id)
+        ).scalars().all()
+        prov_map = {p.student_id: p for p in provisional_rows}
+
+        now = _utcnow()
+        created_events_count = 0
+        present_count = 0
+        absent_count = 0
+
+        for student_info in roster:
+            sid = student_info["student_id"]
+            prov = prov_map.get(sid)
+            is_present = prov is not None and prov.status == "PRESENT"
+
+            if is_present:
+                present_count += 1
+                pid = student_info["person_id"]
+                if pid:
+                    existing_evt = db.execute(
+                        select(AttendanceEvent.attendance_id)
+                        .where(
+                            AttendanceEvent.person_id == pid,
+                            AttendanceEvent.attendance_session_id == session_id,
+                        )
+                    ).first()
+                    if not existing_evt:
+                        audit_id = str(uuid.uuid4())
+                        evt = AttendanceEvent(
+                            attendance_id=str(uuid.uuid4()),
+                            person_id=pid,
+                            employee_id=student_info["student_number"],
+                            punch_type="CHECK_IN",
+                            timestamp=now,
+                            similarity_score=prov.similarity_score if prov else 1.0,
+                            threshold=self.settings.similarity_threshold,
+                            client_device_id="kiosk-group-photo",
+                            pipeline_version=self.vision.pipeline_version,
+                            evidence_id=audit_id,
+                            attendance_session_id=session_id,
+                        )
+                        db.add(evt)
+                        created_events_count += 1
+            else:
+                absent_count += 1
+                if not prov:
+                    db.add(SessionProvisionalAttendance(
+                        session_id=session_id,
+                        student_id=sid,
+                        person_id=student_info["person_id"],
+                        status="MARKED_ABSENT",
+                        similarity_score=0.0,
+                        notes="AUTO_MARKED_ABSENT_ON_FINALIZATION",
+                    ))
+                elif prov.status != "MARKED_ABSENT":
+                    prov.status = "MARKED_ABSENT"
+
+        session.status = "CLOSED"
+        session.ends_at = now
+
+        self._audit(
+            db,
+            session_id=session_id,
+            actor_type="faculty",
+            actor_id=actor_id,
+            action="attendance_session.finalize",
+            state="FINALIZED",
+            reasons=["SESSION_ATTENDANCE_FINALIZED"],
+            evidence={
+                "total_expected": len(roster),
+                "present_count": present_count,
+                "absent_count": absent_count,
+                "created_events_count": created_events_count,
+            },
+        )
+        db.commit()
+
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "state": "CLOSED",
+            "total_expected": len(roster),
+            "present_count": present_count,
+            "absent_count": absent_count,
+            "attendance_rate_pct": round((present_count / len(roster) * 100.0), 1) if roster else 0.0,
+            "finalized_at": now.isoformat(),
+        }
+

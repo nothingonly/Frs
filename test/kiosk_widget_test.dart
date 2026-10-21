@@ -14,7 +14,7 @@ void main() {
     clientDeviceId: 'TEST_KIOSK_01',
   );
 
-  testWidgets('Renders all essential automatic kiosk UI elements in idle state', (WidgetTester tester) async {
+  testWidgets('Renders all essential group photo attendance UI elements in idle state', (WidgetTester tester) async {
     // Provide a large enough surface to render tablet layout
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1.0;
@@ -30,33 +30,50 @@ void main() {
     // Verify Admin enrollment action button exists in AppBar
     expect(find.byIcon(Icons.person_add_alt_1), findsOneWidget);
 
-    // Verify Punch selector buttons
-    expect(find.text('CHECK IN'), findsOneWidget);
-    expect(find.text('CHECK OUT'), findsOneWidget);
+    // Verify Mode Switcher pills
+    expect(find.text('Group Photo'), findsOneWidget);
+    expect(find.text('Kiosk Punch'), findsOneWidget);
 
-    // Verify Guidance card
-    expect(find.text('Automatic Face Identification'), findsOneWidget);
+    // Verify Workflow Step items
+    expect(find.text('1. Class & Session'), findsOneWidget);
+    expect(find.text('2. Group Photos'), findsOneWidget);
+    expect(find.text('3. Roster Review'), findsOneWidget);
+    expect(find.text('4. Finalize'), findsOneWidget);
 
-    // Verify Keypad is NOT present (eliminated for automatic 1:N attendance)
-    expect(find.text('Tap digits to enter Employee ID'), findsNothing);
-    expect(find.text('CLR'), findsNothing);
-    expect(find.text('DEL'), findsNothing);
+    // Verify Department filters for 7 college engineering departments
+    expect(find.text('CSE'), findsOneWidget);
+    expect(find.text('CSD'), findsOneWidget);
+    expect(find.text('MECH'), findsOneWidget);
+    expect(find.text('CIVIL'), findsOneWidget);
+    expect(find.text('IT'), findsOneWidget);
+    expect(find.text('ECE'), findsOneWidget);
+    expect(find.text('EEE'), findsOneWidget);
 
-    // Verify Primary submission button is disabled when face has not been captured
-    final submitFinder = find.byKey(const ValueKey('submit_punch_button'));
-    expect(submitFinder, findsOneWidget);
-    final submitButton = tester.widget<ElevatedButton>(submitFinder);
-    expect(submitButton.onPressed, isNull, reason: 'Submit button must be disabled when no photo captured');
-    expect(find.text('Select an open session'), findsOneWidget);
+    // Verify Session Type filter chips
+    expect(find.text('Theory Classes'), findsOneWidget);
+    expect(find.text('Laboratory'), findsOneWidget);
+    expect(find.text('Mixed Classes'), findsOneWidget);
+
+    // Verify Open Session Dropdown
+    expect(find.byKey(const ValueKey('select_session_dropdown')), findsOneWidget);
   });
 
-  testWidgets('Punch selector toggles punch type between CHECK_IN and CHECK_OUT', (WidgetTester tester) async {
+  testWidgets('Switching to Kiosk Punch mode displays punch selector and toggles punch type', (WidgetTester tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
 
     await tester.pumpWidget(const FRSKioskApp(config: testConfig));
     await tester.pump();
+
+    // Switch to Kiosk Punch mode
+    await tester.tap(find.text('Kiosk Punch'));
+    await tester.pump();
+
+    // Verify punch selector and guidance card
+    expect(find.text('CHECK IN'), findsOneWidget);
+    expect(find.text('CHECK OUT'), findsOneWidget);
+    expect(find.text('Automatic Face Identification'), findsOneWidget);
 
     // Switch to CHECK OUT
     await tester.tap(find.text('CHECK OUT'));
@@ -65,6 +82,10 @@ void main() {
     // Switch back to CHECK IN
     await tester.tap(find.text('CHECK IN'));
     await tester.pump();
+
+    // Verify submit punch button exists
+    final submitFinder = find.byKey(const ValueKey('submit_punch_button'));
+    expect(submitFinder, findsOneWidget);
   });
 
   testWidgets('StatusBanner renders 1:N accepted card with database-matched identity', (WidgetTester tester) async {

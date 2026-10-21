@@ -8,6 +8,7 @@ import '../exceptions/api_exceptions.dart';
 import '../models/attendance_result.dart';
 import '../models/attendance_session.dart';
 import '../models/capture_batch.dart';
+import '../models/group_attendance_models.dart';
 import '../models/health_status.dart';
 import '../models/punch_type.dart';
 
@@ -132,6 +133,134 @@ class FrsApiService {
       if (error is FrsApiException) rethrow;
       throw NetworkException('Unable to load open attendance sessions: $error');
     }
+  }
+
+  /// Retrieves the expected student roster for a session.
+  Future<List<RosterStudent>> getSessionRoster(String sessionId, {String? correlationId}) async {
+    config.validateTransport();
+    _requireDeviceCredential();
+    final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/sessions/${Uri.encodeComponent(sessionId)}/roster');
+    try {
+      final response = await _client.get(uri, headers: {
+        'Authorization': 'Bearer ${config.apiKeySecret}',
+        'X-Correlation-ID': correlationId ?? generateCorrelationId('kiosk-roster'),
+      }).timeout(const Duration(seconds: 15));
+      final body = _parseJsonBody(response.bodyBytes);
+      if (response.statusCode == 200) {
+        final roster = body['roster'] as List? ?? [];
+        return roster.whereType<Map<String, dynamic>>().map(RosterStudent.fromJson).toList();
+      }
+      _handleErrorStatus(response.statusCode, body, response.body);
+      throw ServerException('Unexpected roster response status ${response.statusCode}');
+    } catch (error) {
+      if (error is FrsApiException) rethrow;
+      throw NetworkException('Unable to load session roster: $error');
+    }
+  }
+
+  /// Uploads a classroom group photo containing multiple faces.
+  Future<GroupCaptureResult> uploadGroupPhoto({
+    required String sessionId,
+    required Uint8List imageBytes,
+    String? correlationId,
+  }) async {
+    config.validateTransport();
+    _requireDeviceCredential();
+    if (imageBytes.isEmpty) {
+      throw const FormatException('Group photo payload cannot be empty.');
+    }
+    final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/sessions/${Uri.encodeComponent(sessionId)}/group-captures');
+    final request = http.MultipartRequest('POST', uri);
+    request.headers['Authorization'] = 'Bearer ${config.apiKeySecret}';
+    request.headers['X-Correlation-ID'] = correlationId ?? generateCorrelationId('kiosk-group-photo');
+
+    request.files.add(http.MultipartFile.fromBytes(
+      'image',
+      imageBytes,
+      filename: 'group_capture_${DateTime.now().millisecondsSinceEpoch}.jpg',
+    ));
+
+    final streamed = await _send(request);
+    final response = await http.Response.fromStream(streamed);
+    final body = _parseJsonBody(response.bodyBytes);
+    if (response.statusCode == 200) {
+      return GroupCaptureResult.fromJson(body);
+    }
+    _handleErrorStatus(response.statusCode, body, response.body);
+    throw ServerException('Unexpected group capture response status ${response.statusCode}');
+  }
+
+  /// Retrieves the current cumulative provisional state for an open session.
+  Future<SessionProvisionalState> getSessionProvisionalState(String sessionId, {String? correlationId}) async {
+    config.validateTransport();
+    _requireDeviceCredential();
+    final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/sessions/${Uri.encodeComponent(sessionId)}/provisional');
+    try {
+      final response = await _client.get(uri, headers: {
+        'Authorization': 'Bearer ${config.apiKeySecret}',
+        'X-Correlation-ID': correlationId ?? generateCorrelationId('kiosk-provisional'),
+      }).timeout(const Duration(seconds: 15));
+      final body = _parseJsonBody(response.bodyBytes);
+      if (response.statusCode == 200) {
+        return SessionProvisionalState.fromJson(body);
+      }
+      _handleErrorStatus(response.statusCode, body, response.body);
+      throw ServerException('Unexpected provisional state status ${response.statusCode}');
+    } catch (error) {
+      if (error is FrsApiException) rethrow;
+      throw NetworkException('Unable to load provisional state: $error');
+    }
+  }
+
+  /// Manually toggle or resolve a student's provisional attendance status.
+  Future<void> toggleProvisionalAttendance({
+    required String sessionId,
+    required String studentId,
+    required String newStatus,
+    String? notes,
+    String? correlationId,
+  }) async {
+    config.validateTransport();
+    _requireDeviceCredential();
+    final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/sessions/${Uri.encodeComponent(sessionId)}/provisional/${Uri.encodeComponent(studentId)}/toggle');
+    final response = await _client.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer ${config.apiKeySecret}',
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId ?? generateCorrelationId('kiosk-toggle'),
+      },
+      body: jsonEncode({
+        'new_status': newStatus,
+        if (notes != null) 'notes': notes,
+      }),
+    ).timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) {
+      final body = _parseJsonBody(response.bodyBytes);
+      _handleErrorStatus(response.statusCode, body, response.body);
+    }
+  }
+
+  /// Confirms and finalizes session attendance: creates durable events and closes session.
+  Future<FinalizeAttendanceResult> finalizeSessionAttendance(String sessionId, {String? correlationId}) async {
+    config.validateTransport();
+    _requireDeviceCredential();
+    final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/sessions/${Uri.encodeComponent(sessionId)}/finalize');
+    final response = await _client.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer ${config.apiKeySecret}',
+        'X-Correlation-ID': correlationId ?? generateCorrelationId('kiosk-finalize'),
+      },
+    ).timeout(const Duration(seconds: 30));
+
+    final body = _parseJsonBody(response.bodyBytes);
+    if (response.statusCode == 200) {
+      return FinalizeAttendanceResult.fromJson(body);
+    }
+    _handleErrorStatus(response.statusCode, body, response.body);
+    throw ServerException('Failed to finalize session: status ${response.statusCode}');
   }
 
   /// Enqueues a camera burst for one specific open class session. Retries with the same

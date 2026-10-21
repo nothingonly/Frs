@@ -25,6 +25,9 @@ class ClassGroupCreate(StrictPayload):
     year_of_study: int = Field(ge=1, le=4)
     section: str = Field(min_length=1, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
     academic_year: str = Field(min_length=9, max_length=9, pattern=r"^\d{4}-\d{4}$")
+    semester: int | None = Field(default=None, ge=1, le=8)
+    is_lab: bool = Field(default=False)
+    lab_name: str | None = Field(default=None, max_length=160)
 
     @field_validator("section")
     @classmethod
@@ -66,6 +69,10 @@ class AttendanceSessionCreate(StrictPayload):
     class_group_id: str = Field(min_length=1, max_length=36)
     subject_name: str = Field(min_length=1, max_length=160)
     subject_code: str | None = Field(default=None, max_length=40)
+    session_type: str = Field(default="SPECIFIC", pattern=r"^(SPECIFIC|LAB|MIXED)$")
+    lab_name: str | None = Field(default=None, max_length=160)
+    semester: int | None = Field(default=None, ge=1, le=8)
+    class_group_ids: list[str] | None = None
     starts_at: datetime | None = None
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
 

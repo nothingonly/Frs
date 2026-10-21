@@ -1,10 +1,13 @@
-from __future__ import annotations
-
+import csv
+import hashlib
+import io
 import json
+import re
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+import numpy as np
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,8 +23,19 @@ from app.api.dependencies import (
     scoped_admin,
 )
 from app.database import get_db
-from app.db.entities import AttendanceSession, AuditEvent, ClassEnrollment, ClassGroup, Department, Person, Student
+from app.db.entities import (
+    AttendanceSession,
+    AuditEvent,
+    ClassEnrollment,
+    ClassGroup,
+    Department,
+    EmbeddingRecord,
+    Person,
+    SessionClassGroup,
+    Student,
+)
 from app.schemas.college import AttendanceSessionCreate, ClassGroupCreate, DepartmentCreate, StudentCreate
+from app.security import encrypt_embedding
 
 router = APIRouter(prefix="/api/v1/admin/college", tags=["college administration"])
 
@@ -39,7 +53,6 @@ def _audit(db: Session, actor: TokenClaims | str, action: str, state: str, item_
         reason_codes_json=json.dumps([action.upper().replace(".", "_")]),
         evidence_json=json.dumps(evidence, sort_keys=True),
     ))
-
 
 
 def _commit(db: Session, message: str) -> None:
@@ -63,20 +76,48 @@ def _group(row: ClassGroup, department: Department, active_count: int = 0) -> di
         "class_group_id": row.class_group_id, "department_id": row.department_id,
         "department_code": department.code, "department_name": department.name,
         "year_of_study": row.year_of_study, "section": row.section,
-        "academic_year": row.academic_year, "is_active": row.is_active,
+        "academic_year": row.academic_year,
+        "semester": getattr(row, "semester", None),
+        "is_lab": getattr(row, "is_lab", False),
+        "lab_name": getattr(row, "lab_name", None),
+        "is_active": row.is_active,
         "active_enrollments": active_count, "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
     }
 
 
-def _session(row: AttendanceSession) -> dict[str, Any]:
+def _session(row: AttendanceSession, db: Session | None = None) -> dict[str, Any]:
+    linked_group_ids = [row.class_group_id]
+    expected_count = 0
+    if db is not None:
+        extra_groups = db.execute(
+            select(SessionClassGroup.class_group_id).where(SessionClassGroup.session_id == row.session_id)
+        ).scalars().all()
+        if extra_groups:
+            linked_group_ids = list(dict.fromkeys([row.class_group_id, *extra_groups]))
+        expected_count = db.scalar(
+            select(func.count(func.distinct(ClassEnrollment.student_id))).where(
+                ClassEnrollment.class_group_id.in_(linked_group_ids),
+                ClassEnrollment.status == "ACTIVE",
+            )
+        ) or 0
+
     return {
-        "session_id": row.session_id, "class_group_id": row.class_group_id,
-        "subject_code": row.subject_code, "subject_name": row.subject_name,
+        "session_id": row.session_id,
+        "class_group_id": row.class_group_id,
+        "session_type": getattr(row, "session_type", "SPECIFIC"),
+        "lab_name": getattr(row, "lab_name", None),
+        "semester": getattr(row, "semester", None),
+        "class_group_ids": linked_group_ids,
+        "expected_roster_count": expected_count,
+        "subject_code": row.subject_code,
+        "subject_name": row.subject_name,
         "starts_at": row.starts_at.isoformat(),
         "ends_at": row.ends_at.isoformat() if row.ends_at else None,
-        "status": row.status, "idempotency_key": row.idempotency_key,
-        "created_by": row.created_by, "created_at": row.created_at.isoformat(),
+        "status": row.status,
+        "idempotency_key": row.idempotency_key,
+        "created_by": row.created_by,
+        "created_at": row.created_at.isoformat(),
     }
 
 
@@ -169,12 +210,14 @@ def create_class_group(
     row = ClassGroup(
         department_id=payload.department_id, year_of_study=payload.year_of_study,
         section=payload.section, academic_year=payload.academic_year,
+        semester=payload.semester, is_lab=payload.is_lab, lab_name=payload.lab_name,
     )
     db.add(row)
     db.flush()
     _audit(db, actor, "class_group.create", "CREATED", row.class_group_id, {
         "department_code": dept.code, "year_of_study": row.year_of_study,
         "section": row.section, "academic_year": row.academic_year,
+        "semester": row.semester, "is_lab": row.is_lab, "lab_name": row.lab_name,
     })
     _commit(db, "This class group already exists for the academic year.")
     db.refresh(row)
@@ -391,10 +434,15 @@ def enroll_student(
             ClassEnrollment.student_id == student_id, ClassEnrollment.status == "ACTIVE",
             ClassGroup.department_id == group.department_id, ClassGroup.year_of_study == group.year_of_study,
             ClassGroup.academic_year == group.academic_year, ClassGroup.class_group_id != group.class_group_id,
+            ClassGroup.is_lab == group.is_lab,
         )
     ).first()
     if conflict:
-        raise HTTPException(status_code=409, detail="Student already has an active enrollment in another section of this cohort.")
+        raise HTTPException(
+            status_code=409,
+            detail="Student already has an active enrollment in another lab section of this cohort."
+            if group.is_lab else "Student already has an active enrollment in another section of this cohort."
+        )
 
     now = datetime.now(timezone.utc)
     if existing:
@@ -458,8 +506,8 @@ def list_attendance_sessions(
         if actor.role == ROLE_FACULTY and class_group_id not in actor.class_group_ids:
             raise HTTPException(status_code=403, detail=f"Forbidden: actor lacks authority over class group '{class_group_id}'.")
         stmt = stmt.where(AttendanceSession.class_group_id == class_group_id)
-    rows = db.execute(stmt.order_by(AttendanceSession.starts_at.desc()).limit(limit)).scalars()
-    return {"items": [_session(row) for row in rows]}
+    rows = db.execute(stmt.order_by(AttendanceSession.starts_at.desc()).limit(limit)).scalars().all()
+    return {"items": [_session(row, db) for row in rows]}
 
 
 @router.post("/attendance-sessions", status_code=201)
@@ -474,6 +522,18 @@ def create_attendance_session(
     dept = db.get(Department, group.department_id)
     if dept is None or not dept.is_active:
         raise HTTPException(status_code=409, detail="The class group's department is inactive.")
+
+    target_group_ids = [payload.class_group_id]
+    if payload.class_group_ids:
+        for gid in payload.class_group_ids:
+            if gid not in target_group_ids:
+                target_group_ids.append(gid)
+        for gid in target_group_ids:
+            other_grp = db.get(ClassGroup, gid)
+            if other_grp is None or not other_grp.is_active:
+                raise HTTPException(status_code=404, detail=f"Linked class group '{gid}' not found or inactive.")
+            check_class_access(actor, gid, other_grp.department_id)
+
     if payload.idempotency_key:
         existing = db.execute(select(AttendanceSession).where(
             AttendanceSession.idempotency_key == payload.idempotency_key
@@ -486,22 +546,36 @@ def create_attendance_session(
             ):
                 raise HTTPException(status_code=409, detail="Idempotency key was reused with a different session payload.")
             response.status_code = 200
-            return {**_session(existing), "idempotent_replay": True}
+            return {**_session(existing, db), "idempotent_replay": True}
 
     row = AttendanceSession(
-        class_group_id=payload.class_group_id, subject_code=payload.subject_code,
-        subject_name=payload.subject_name, starts_at=payload.starts_at or datetime.now(timezone.utc),
-        status="OPEN", idempotency_key=payload.idempotency_key, created_by=_actor_id(actor),
+        class_group_id=payload.class_group_id,
+        session_type=payload.session_type,
+        lab_name=payload.lab_name,
+        semester=payload.semester,
+        subject_code=payload.subject_code,
+        subject_name=payload.subject_name,
+        starts_at=payload.starts_at or datetime.now(timezone.utc),
+        status="OPEN",
+        idempotency_key=payload.idempotency_key,
+        created_by=_actor_id(actor),
     )
     db.add(row)
     db.flush()
+
+    for gid in target_group_ids:
+        db.add(SessionClassGroup(session_id=row.session_id, class_group_id=gid))
+
     _audit(db, actor, "attendance_session.create", "OPEN", row.session_id, {
-        "class_group_id": row.class_group_id, "subject_code": row.subject_code,
+        "class_group_id": row.class_group_id,
+        "linked_group_ids": target_group_ids,
+        "session_type": row.session_type,
+        "subject_code": row.subject_code,
         "subject_name": row.subject_name,
     })
     _commit(db, "This attendance session conflicts with an existing idempotency key.")
     db.refresh(row)
-    return _session(row)
+    return _session(row, db)
 
 
 @router.post("/attendance-sessions/{session_id}/close")
@@ -525,3 +599,353 @@ def close_attendance_session(
         })
         db.commit()
     return _session(row)
+
+
+COLLEGE_DEPARTMENTS = [
+    ("CSE", "Computer Science and Engineering"),
+    ("CSD", "Computer Science and Data Science"),
+    ("MECH", "Mechanical Engineering"),
+    ("CIVIL", "Civil Engineering"),
+    ("IT", "Information Technology"),
+    ("ECE", "Electronics and Communication Engineering"),
+    ("EEE", "Electrical and Electronics Engineering"),
+]
+
+
+@router.post("/departments/seed-defaults", status_code=200)
+def seed_default_departments(
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Ensures all 7 engineering departments are seeded in the database."""
+    created = []
+    for code, name in COLLEGE_DEPARTMENTS:
+        existing = db.execute(select(Department).where(Department.code == code)).scalar_one_or_none()
+        if not existing:
+            dept = Department(code=code, name=name, is_active=True)
+            db.add(dept)
+            created.append(code)
+    if created:
+        _audit(db, actor, "department.seed_defaults", "SEEDED", "college", {"created_codes": created})
+        db.commit()
+    return {"status": "success", "seeded": created}
+
+
+@router.post("/students/bulk-import", status_code=200)
+async def bulk_import_students(
+    file: Annotated[UploadFile, File()],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    dry_run: bool = Query(default=False),
+):
+    """
+    Bulk import students from CSV or Excel file.
+    Validates required fields, duplicate IDs in file/DB, and class/department assignments.
+    Supports dry_run preview before permanent import.
+    """
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=422, detail="Empty file uploaded.")
+
+    rows: list[dict[str, str]] = []
+    filename = (file.filename or "").lower()
+    if filename.endswith(".xlsx") or filename.endswith(".xls"):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+            sheet = wb.active
+            headers = [str(cell.value or "").strip().lower() for cell in sheet[1]]
+            for row_cells in sheet.iter_rows(min_row=2, values_only=True):
+                if any(row_cells):
+                    row_dict = {headers[i]: str(row_cells[i] or "").strip() for i in range(min(len(headers), len(row_cells)))}
+                    rows.append(row_dict)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Failed to parse Excel file: {str(exc)}")
+    else:
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = content.decode("latin-1")
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            rows.append({k.strip().lower(): (v or "").strip() for k, v in row.items() if k})
+
+    if not rows:
+        raise HTTPException(status_code=422, detail="No student data rows found in uploaded file.")
+
+    errors: list[dict[str, Any]] = []
+    valid_records: list[dict[str, Any]] = []
+    seen_student_numbers: set[str] = set()
+
+    depts = {d.code.upper(): d for d in db.execute(select(Department).where(Department.is_active.is_(True))).scalars().all()}
+
+    for index, row in enumerate(rows, start=2):
+        roll_no = (
+            row.get("student_number")
+            or row.get("roll_number")
+            or row.get("roll_no")
+            or row.get("student_id")
+            or row.get("id")
+            or ""
+        ).strip().upper()
+        name = (row.get("full_name") or row.get("name") or row.get("student_name") or "").strip()
+        dept_code = (row.get("department_code") or row.get("department") or row.get("dept") or "").strip().upper()
+        year_str = (row.get("year_of_study") or row.get("year") or "").strip()
+        sec = (row.get("section") or row.get("sec") or "A").strip().upper()
+        acad_year = (row.get("academic_year") or "2026-2027").strip()
+        email = (row.get("email") or "").strip().lower() or None
+        sem_str = (row.get("semester") or row.get("sem") or "").strip()
+
+        row_errors: list[str] = []
+
+        if not roll_no:
+            row_errors.append("Student number / Roll number is required.")
+        elif not re.fullmatch(r"^[A-Za-z0-9._/-]+$", roll_no):
+            row_errors.append(f"Invalid student number format: '{roll_no}'.")
+        elif roll_no in seen_student_numbers:
+            row_errors.append(f"Duplicate student number '{roll_no}' within uploaded file.")
+        else:
+            seen_student_numbers.add(roll_no)
+            existing_student = db.execute(select(Student.student_id).where(Student.student_number == roll_no)).first()
+            if existing_student:
+                row_errors.append(f"Student '{roll_no}' already exists in database.")
+
+        if not name:
+            row_errors.append("Full name is required.")
+
+        if not dept_code:
+            row_errors.append("Department code is required.")
+        elif dept_code not in depts:
+            row_errors.append(f"Department '{dept_code}' is invalid or inactive.")
+        elif actor.role == ROLE_DEAN and actor.department_id and depts[dept_code].department_id != actor.department_id:
+            row_errors.append(f"Forbidden: You do not have authority over department '{dept_code}'.")
+
+        try:
+            year_val = int(year_str)
+            if year_val < 1 or year_val > 4:
+                row_errors.append(f"Year of study must be between 1 and 4, got '{year_str}'.")
+        except ValueError:
+            row_errors.append(f"Invalid year of study: '{year_str}'. Must be an integer 1-4.")
+            year_val = 1
+
+        sem_val = None
+        if sem_str:
+            try:
+                sem_val = int(sem_str)
+                if sem_val < 1 or sem_val > 8:
+                    row_errors.append(f"Semester must be between 1 and 8, got '{sem_str}'.")
+            except ValueError:
+                row_errors.append(f"Invalid semester: '{sem_str}'.")
+
+        if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+            row_errors.append(f"Invalid email format: '{email}'.")
+
+        if row_errors:
+            errors.append({
+                "row_index": index,
+                "student_number": roll_no or "N/A",
+                "errors": row_errors,
+            })
+        else:
+            valid_records.append({
+                "row_index": index,
+                "student_number": roll_no,
+                "full_name": name,
+                "department_code": dept_code,
+                "department_id": depts[dept_code].department_id,
+                "year_of_study": year_val,
+                "section": sec,
+                "academic_year": acad_year,
+                "semester": sem_val,
+                "email": email,
+            })
+
+    if dry_run or errors:
+        return {
+            "dry_run": dry_run,
+            "status": "VALIDATED" if not errors else "VALIDATION_FAILED",
+            "total_rows": len(rows),
+            "valid_rows_count": len(valid_records),
+            "invalid_rows_count": len(errors),
+            "errors": errors,
+            "preview": valid_records[:20],
+        }
+
+    imported = []
+    class_groups_cache: dict[tuple, ClassGroup] = {}
+
+    for rec in valid_records:
+        dept_id = rec["department_id"]
+        cg_key = (dept_id, rec["year_of_study"], rec["section"], rec["academic_year"])
+        if cg_key not in class_groups_cache:
+            grp = db.execute(select(ClassGroup).where(
+                ClassGroup.department_id == dept_id,
+                ClassGroup.year_of_study == rec["year_of_study"],
+                ClassGroup.section == rec["section"],
+                ClassGroup.academic_year == rec["academic_year"],
+            )).scalar_one_or_none()
+            if not grp:
+                grp = ClassGroup(
+                    department_id=dept_id,
+                    year_of_study=rec["year_of_study"],
+                    section=rec["section"],
+                    academic_year=rec["academic_year"],
+                    semester=rec["semester"],
+                )
+                db.add(grp)
+                db.flush()
+            class_groups_cache[cg_key] = grp
+        group = class_groups_cache[cg_key]
+
+        person = Person(
+            employee_id=rec["student_number"],
+            full_name=rec["full_name"],
+            department=rec["department_code"],
+        )
+        db.add(person)
+        db.flush()
+
+        student = Student(
+            student_number=rec["student_number"],
+            full_name=rec["full_name"],
+            email=rec["email"],
+            person_id=person.person_id,
+        )
+        db.add(student)
+        db.flush()
+
+        db.add(ClassEnrollment(student_id=student.student_id, class_group_id=group.class_group_id))
+        imported.append({"student_id": student.student_id, "student_number": student.student_number})
+
+    _audit(db, actor, "student.bulk_import", "IMPORTED", "college", {
+        "imported_count": len(imported),
+        "total_rows": len(rows),
+    })
+    db.commit()
+
+    return {
+        "dry_run": False,
+        "status": "SUCCESS",
+        "total_rows": len(rows),
+        "imported_count": len(imported),
+        "failed_count": 0,
+        "errors": [],
+        "imported": imported,
+    }
+
+
+@router.post("/students/bulk-enroll-photos", status_code=200)
+async def bulk_enroll_photos(
+    request: Request,
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    images: list[UploadFile] = File(...),
+):
+    """
+    Bulk enroll biometric face photos for enrolled students.
+    Maps filename to student_number (e.g., 22BD1A0501.jpg -> student 22BD1A0501).
+    Validates face quality, extracts ArcFace embedding, encrypts, and creates EmbeddingRecord.
+    """
+    pipeline = request.app.state.pipeline
+    results = []
+    success_count = 0
+    fail_count = 0
+
+    for file in images:
+        fname = file.filename or ""
+        base = re.sub(r"\.[^.]+$", "", fname).strip()
+        roll_no = re.split(r"[-_ ]", base)[0].strip().upper()
+
+        if not roll_no:
+            results.append({"filename": fname, "student_number": None, "status": "FAILED", "reason": "UNPARSEABLE_FILENAME"})
+            fail_count += 1
+            continue
+
+        student = db.execute(
+            select(Student).where(
+                func.upper(Student.student_number) == roll_no,
+                Student.is_active.is_(True),
+            )
+        ).scalar_one_or_none()
+
+        if not student:
+            results.append({"filename": fname, "student_number": roll_no, "status": "FAILED", "reason": f"STUDENT_NOT_FOUND: '{roll_no}'"})
+            fail_count += 1
+            continue
+
+        if not student.person_id:
+            person = Person(employee_id=student.student_number, full_name=student.full_name)
+            db.add(person)
+            db.flush()
+            student.person_id = person.person_id
+
+        person = db.get(Person, student.person_id)
+        if not person or not person.is_active:
+            results.append({"filename": fname, "student_number": roll_no, "status": "FAILED", "reason": "PERSON_IDENTITY_INACTIVE"})
+            fail_count += 1
+            continue
+
+        image_bytes = await file.read(15 * 1024 * 1024)
+        try:
+            face_obs = pipeline.vision.detect_all_faces(image_bytes)
+        except Exception as exc:
+            results.append({"filename": fname, "student_number": roll_no, "status": "FAILED", "reason": f"IMAGE_DECODE_OR_VISION_ERROR: {type(exc).__name__}"})
+            fail_count += 1
+            continue
+
+        usable = [f for f in face_obs if f.is_usable and f.primary_embedding is not None]
+        if len(usable) == 0:
+            reasons = [f.rejection_reason for f in face_obs if f.rejection_reason]
+            results.append({"filename": fname, "student_number": roll_no, "status": "FAILED", "reason": f"NO_USABLE_FACE: {reasons or 'NO_FACE_DETECTED'}"})
+            fail_count += 1
+            continue
+        if len(usable) > 1:
+            results.append({"filename": fname, "student_number": roll_no, "status": "FAILED", "reason": f"MULTIPLE_FACES_DETECTED: {len(usable)} faces found. Enrollment photo must contain exactly one student."})
+            fail_count += 1
+            continue
+
+        target = usable[0]
+        vector = target.primary_embedding
+        ciphertext, nonce = encrypt_embedding(vector.astype(np.float32).tobytes(), pipeline.settings)
+        sample_sha = hashlib.sha256(image_bytes).hexdigest()
+
+        person.enrollment_version = (person.enrollment_version or 1) + 1
+        person.updated_at = datetime.now(timezone.utc)
+
+        db.add(EmbeddingRecord(
+            person_id=person.person_id,
+            enrollment_version=person.enrollment_version,
+            recognizer_id="ArcFace",
+            model_version=pipeline.vision.recognizer_version,
+            preprocessing_id="arcface:norm_crop",
+            embedding_dim=int(vector.size),
+            ciphertext=ciphertext,
+            nonce=nonce,
+            sample_sha256=sample_sha,
+            quality_json=json.dumps({"sharpness": target.quality_score, "detection_confidence": target.detection_confidence}),
+            accepted=True,
+        ))
+
+        success_count += 1
+        results.append({
+            "filename": fname,
+            "student_number": roll_no,
+            "student_name": student.full_name,
+            "status": "ENROLLED",
+            "quality_score": round(target.quality_score, 2),
+        })
+
+    _audit(db, actor, "student.bulk_photo_enroll", "COMPLETED", "college", {
+        "total_files": len(images),
+        "enrolled_count": success_count,
+        "failed_count": fail_count,
+    })
+    db.commit()
+
+    return {
+        "status": "COMPLETED",
+        "total_files": len(images),
+        "enrolled_count": success_count,
+        "failed_count": fail_count,
+        "results": results,
+    }
