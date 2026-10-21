@@ -162,14 +162,17 @@ def de_enroll_student_biometrics(
     else:
         for mid in target_ids:
             media_outcomes[mid] = "NO_STORAGE_SERVICE_PROVIDED"
-        status_state = "DE_ENROLLED"
-        qualification = "DATABASE_ONLY_UNVERIFIED_MEDIA"
+        status_state = "DELETION_INCOMPLETE"
+        qualification = "STORAGE_SERVICE_REQUIRED_FOR_VERIFIED_DELETION"
 
     now_iso = datetime.now(timezone.utc).isoformat()
     raw_cert_string = f"{student_id}:{student.person_id}:{now_iso}:{deleted_embeddings_count}:{operator_id}:{qualification}"
     cert_hash = hashlib.sha256(raw_cert_string.encode("utf-8")).hexdigest()
 
-    secret = signing_key or get_settings().effective_jwt_secret
+    settings = get_settings()
+    secret = signing_key or settings.deletion_certificate_key
+    if not secret:
+        raise RuntimeError("A dedicated biometric deletion-certificate signing key must be configured.")
     secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
     cert_signature = hmac.new(secret_bytes, raw_cert_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
