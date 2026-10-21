@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -15,6 +14,8 @@ from app.api.dependencies import admin_actor
 from app.database import Base
 from app.db.entities import AuditEvent, CaptureBatchJob, EmbeddingRecord, Person, Student
 from app.main import app
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
 from app.services.retention import (
     de_enroll_student_biometrics,
     run_retention_purge,
@@ -108,24 +109,22 @@ def test_de_enroll_student_with_signed_certificate_and_media_purge(db_session: S
 
     # Verify cryptographic signature on certificate
     signed_cert = result["signed_certificate"]
-    assert signed_cert["algorithm"] == "HMAC-SHA256"
+    assert signed_cert["algorithm"] == "Ed25519"
     assert signed_cert["issuer"] == "FRS-Biometric-Privacy-Lifecycle"
-    assert "NOT_AN_ASYMMETRIC_SIGNATURE" in signed_cert["assurance"]
-    assert len(signed_cert["signature"]) == 64
+    assert "ED25519_SIGNATURE_OVER_CANONICAL_PAYLOAD" in signed_cert["assurance"]
+    assert len(signed_cert["signature"]) == 128
+    assert len(signed_cert["public_key_sha256"]) == 64
 
-    # Verify certificate digest and HMAC over the returned canonical payload.
+    # Verify the asymmetric signature independently using the certificate's public key.
+    # Production consumers must additionally pin this key against an institutional trust record.
     canonical_payload = json.dumps(
         signed_cert["payload"],
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
-    expected_sig = hmac.new(
-        b"super-secret-institution-signing-key",
-        canonical_payload,
-        hashlib.sha256,
-    ).hexdigest()
-    assert signed_cert["signature"] == expected_sig
+    public_key = load_pem_public_key(signed_cert["public_key_pem"].encode("ascii"))
+    public_key.verify(bytes.fromhex(signed_cert["signature"]), canonical_payload)
     assert hashlib.sha256(canonical_payload).hexdigest() == signed_cert["digest"]
     assert signed_cert["qualification"] == "MEDIA_PROVIDER_DELETION_CONFIRMED"
 
