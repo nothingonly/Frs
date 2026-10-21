@@ -13,6 +13,7 @@ WORKDIR /srv/frs
 
 COPY pyproject.toml ./pyproject.toml
 COPY app ./app
+COPY migrations ./migrations
 
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install "Cython<3" \
