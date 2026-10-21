@@ -800,6 +800,8 @@ class LtiService:
             "course_id": context.get("id"),
             "course_title": context.get("title"),
             "resource_link_id": resource_link.get("id"),
+            "nonce": payload.get("nonce"),
+            "jti": payload.get("jti"),
             "verified_at": now,
         }
 
