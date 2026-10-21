@@ -627,7 +627,10 @@ class SftpExportService:
                 "server_host_key_fingerprint": server_fingerprint,
                 "dispatched_at": now_ts,
             }
-        except ImportError:
+        except ImportError as imp_err:
+            if settings.is_production:
+                logger.error("paramiko is not installed; live SFTP export cannot execute in production.")
+                raise RuntimeError("Production requires paramiko for live SFTP exports.") from imp_err
             logger.warning("paramiko not installed; staged SFTP package without live transfer.")
             return {
                 "status": "STAGED_MOCK",

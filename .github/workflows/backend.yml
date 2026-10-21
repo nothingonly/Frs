@@ -47,4 +47,22 @@ jobs:
       - name: Run backend unit tests
         run: pytest
       - name: Audit backend dependencies
-        run: pip-audit --desc || echo "::warning::pip-audit identified dependency advisories to review"
+        # Fail closed on any vulnerability, with explicit exceptions for reviewed upstream library advisories:
+        # - PYSEC-2026-1845: pytest /tmp runner advisory (dev-only tool, not shipped in production)
+        # - PYSEC-2026-3554, 3552, 3553, GHSA-537c-gmf6-5ccf: cryptography 46.0.7 upstream x509 verification constraints
+        # - CVE-2026-112895, 112400, 112397, 112896, 112897, 112395, 112404, 112899: pillow 12.3.0 decompression bomb threshold
+        run: |
+          pip-audit --desc \
+            --ignore-vuln PYSEC-2026-1845 \
+            --ignore-vuln PYSEC-2026-3554 \
+            --ignore-vuln PYSEC-2026-3552 \
+            --ignore-vuln PYSEC-2026-3553 \
+            --ignore-vuln GHSA-537c-gmf6-5ccf \
+            --ignore-vuln CVE-2026-112895 \
+            --ignore-vuln CVE-2026-112400 \
+            --ignore-vuln CVE-2026-112397 \
+            --ignore-vuln CVE-2026-112896 \
+            --ignore-vuln CVE-2026-112897 \
+            --ignore-vuln CVE-2026-112395 \
+            --ignore-vuln CVE-2026-112404 \
+            --ignore-vuln CVE-2026-112899

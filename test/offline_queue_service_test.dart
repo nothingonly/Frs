@@ -258,6 +258,68 @@ void main() {
       // Batch remains safely pending in encrypted offline queue
       expect(await queueService.getPendingCount(), equals(1));
     });
+
+    test('tampered payload fails SHA-256 integrity verification and fails closed', () async {
+      final frames = [
+        Uint8List.fromList([1, 2, 3]),
+        Uint8List.fromList([4, 5, 6]),
+        Uint8List.fromList([7, 8, 9]),
+      ];
+
+      final batch = await queueService.enqueueBatch(
+        sessionId: 'sess-tamper',
+        classGroupId: 'cg-1',
+        punchType: PunchType.checkIn,
+        frames: frames,
+        idempotencyKey: 'idemp-tamper-12345678',
+      );
+
+      // Tamper with the raw bytes in storage
+      final storedRaw = await fakeStorage.read(key: 'frs_offline_batch_${batch.batchId}');
+      final map = jsonDecode(storedRaw!) as Map<String, dynamic>;
+      final bytes = base64Decode(map['encrypted_burst_payload'] as String);
+      bytes[10] ^= 0xFF; // Alter payload byte
+      map['encrypted_burst_payload'] = base64Encode(bytes);
+      await fakeStorage.write(key: 'frs_offline_batch_${batch.batchId}', value: jsonEncode(map));
+
+      // Attempt drain: must fail because the payload is corrupt/tampered
+      final client = _MockHttpClient((request) async {
+        if (request.url.path == '/health') {
+          return http.Response(
+            jsonEncode({
+              'status': 'online',
+              'database': 'healthy',
+              'ready_for_attendance': true,
+              'environment': 'development',
+              'model_version': 'v5',
+              'similarity_threshold': 0.72,
+              'threshold_status': 'CALIBRATED',
+              'liveness_required': true,
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response('OK', 200);
+      });
+      final api = FrsApiService(
+        config: const AppConfig(
+          apiBaseUrl: 'http://localhost:8000',
+          apiKeySecret: 'test-device-credential-32chars-min',
+          clientDeviceId: 'TEST_KIOSK_01',
+          allowInsecureDevelopmentHttp: true,
+        ),
+        client: client,
+      );
+
+      final result = await queueService.drainQueue(api);
+      expect(result.failedCount, equals(1));
+      expect(result.syncedCount, equals(0));
+
+      final failedBatch = await queueService.getBatch(batch.batchId);
+      expect(failedBatch!.syncStatus, equals(OfflineSyncStatus.failed));
+      expect(failedBatch.lastSyncError, contains('corrupt'));
+    });
   });
 }
 

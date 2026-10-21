@@ -216,6 +216,9 @@ def main() -> None:
     args = parser.parse_args()
 
     create_schema()
+    from app.database import engine
+    from app.db.migrator import assert_production_schema_ready
+    assert_production_schema_ready(engine)
     daemon = AttendanceFollowupDaemon(interval_seconds=args.interval_seconds, channel=args.channel)
 
     signal.signal(signal.SIGINT, daemon.request_shutdown)

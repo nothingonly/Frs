@@ -20,6 +20,11 @@ logger = logging.getLogger("frs.migrator")
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent.parent / "migrations"
 
 
+class MigrationIntegrityError(RuntimeError):
+    """Raised when a historical migration file's checksum does not match its recorded applied state."""
+    pass
+
+
 def get_migration_files(directory: Path | None = None) -> list[tuple[str, Path]]:
     """Return sorted list of (version_name, path) for all valid SQL migration files."""
     mig_dir = directory or MIGRATIONS_DIR
@@ -136,11 +141,15 @@ def apply_all_migrations(engine: Engine, directory: Path | None = None) -> list[
             current_cs = compute_file_checksum(file_path)
             recorded_cs = applied[version]["checksum"]
             if current_cs != recorded_cs:
-                logger.warning(
-                    "Migration checksum mismatch for %s! Recorded: %s, Current: %s. "
-                    "Ensure historical migration files are never modified after application.",
-                    version, recorded_cs, current_cs,
+                msg = (
+                    f"Migration checksum mismatch for {version}! Recorded: {recorded_cs}, Current: {current_cs}. "
+                    "Historical migration files must never be modified after application. "
+                    "Apply changes via new forward migrations."
                 )
+                logger.error(msg)
+                settings = get_settings()
+                if settings.is_production:
+                    raise MigrationIntegrityError(msg)
 
     # Post-migration check: verify and enforce RLS and constraints if on PostgreSQL
     if engine.dialect.name == "postgresql":

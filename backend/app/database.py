@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
+
+logger = logging.getLogger("frs.database")
 
 
 class Base(DeclarativeBase):
@@ -97,6 +100,10 @@ def create_schema() -> None:
     _upgrade_capture_batch_dead_letter_constraint(engine)
     try:
         apply_all_migrations(engine)
-    except Exception:
-        # SQLite memory instances in unit tests use metadata create_all
-        pass
+    except Exception as exc:
+        if engine.dialect.name == "sqlite" and not settings.is_production:
+            # SQLite in non-production unit tests uses metadata create_all
+            logger.debug("SQLite dev/test migration bypass: %s", exc)
+        else:
+            logger.error("Production database migration failed: %s", exc)
+            raise

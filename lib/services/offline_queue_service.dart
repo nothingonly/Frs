@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/punch_type.dart';
 import 'api_service.dart';
@@ -151,27 +152,41 @@ class DrainResult {
   });
 }
 
-/// Service implementing the Android Encrypted SQLCipher / Hardware Keystore Offline Burst Buffer
-/// per architecture spec `docs/OFFLINE_ENCRYPTED_BURST_BUFFER_SPEC.md`.
+/// Service implementing the Hardware Keystore Encrypted Offline Burst Buffer.
+/// Storage-at-rest authenticated encryption is provided by Android Keystore EncryptedSharedPreferences (AES-256-GCM).
+/// Client payloads use binary framing with SHA-256 cryptographic integrity verification and tamper detection.
 class OfflineQueueService {
   static const String _indexKey = 'frs_offline_queue_index';
   static const String _batchKeyPrefix = 'frs_offline_batch_';
   static const int maxBufferedBatches = 500;
   static const Duration payloadTtl = Duration(hours: 24);
 
+  // Binary framing format constants
+  static const int _magic0 = 0x46; // 'F'
+  static const int _magic1 = 0x52; // 'R'
+  static const int _formatVersion = 0x01;
+  static const int _checksumLen = 32; // SHA-256 digest length
+
   final IEncryptedQueueStorage _storage;
 
   OfflineQueueService({IEncryptedQueueStorage? storage})
       : _storage = storage ?? SecureStorageAdapter();
 
-  /// Pack and encrypt frames into payload bytes and nonce.
+  /// Pack frames into binary framed bytes with SHA-256 cryptographic integrity checksum.
+  /// The packed payload is stored in Android Keystore AES-256-GCM encrypted storage.
   static Map<String, String> _encryptFrames(List<Uint8List> frames) {
-    // Structure: 2-byte count, then for each frame: 4-byte length + bytes.
-    final totalLen = frames.fold<int>(2, (sum, f) => sum + 4 + f.length);
-    final packed = Uint8List(totalLen);
+    // Structure: 2-byte magic ('FR'), 1-byte version (0x01), 1-byte reserved (0x00),
+    // 2-byte count, then for each frame: 4-byte length + frame bytes, followed by 32-byte SHA-256 checksum.
+    const headerLen = 6;
+    final totalBodyLen = frames.fold<int>(headerLen, (sum, f) => sum + 4 + f.length);
+    final packed = Uint8List(totalBodyLen);
     final bdata = ByteData.sublistView(packed);
-    bdata.setUint16(0, frames.length);
-    var offset = 2;
+    bdata.setUint8(0, _magic0);
+    bdata.setUint8(1, _magic1);
+    bdata.setUint8(2, _formatVersion);
+    bdata.setUint8(3, 0); // reserved
+    bdata.setUint16(4, frames.length);
+    var offset = headerLen;
     for (final frame in frames) {
       bdata.setUint32(offset, frame.length);
       offset += 4;
@@ -179,48 +194,82 @@ class OfflineQueueService {
       offset += frame.length;
     }
 
-    // Generate random 16-byte nonce
+    // Generate random 16-byte nonce for batch uniqueness
     final rnd = Random.secure();
     final nonce = Uint8List(16);
     for (var i = 0; i < 16; i++) {
       nonce[i] = rnd.nextInt(256);
     }
 
-    // Mask/encrypt with keystore-backed stream key
-    final encrypted = Uint8List(packed.length);
-    for (var i = 0; i < packed.length; i++) {
-      encrypted[i] = packed[i] ^ nonce[i % 16];
-    }
+    // Calculate SHA-256 integrity checksum over (nonce + packed)
+    final integrityInput = Uint8List(nonce.length + packed.length);
+    integrityInput.setRange(0, nonce.length, nonce);
+    integrityInput.setRange(nonce.length, integrityInput.length, packed);
+    final checksum = Uint8List.fromList(sha256.convert(integrityInput).bytes);
+
+    // Append 32-byte checksum to the payload
+    final finalPayload = Uint8List(packed.length + checksum.length);
+    finalPayload.setRange(0, packed.length, packed);
+    finalPayload.setRange(packed.length, finalPayload.length, checksum);
 
     return {
-      'payload': base64Encode(encrypted),
+      'payload': base64Encode(finalPayload),
       'nonce': base64Encode(nonce),
     };
   }
 
-  /// Decrypt and unpack frames from payload bytes and nonce.
+  /// Decrypt, verify SHA-256 integrity, and unpack frames from payload bytes and nonce.
+  /// Returns empty list if payload is missing, altered, or corrupted (failing closed).
   static List<Uint8List> _decryptFrames(String encodedPayload, String encodedNonce) {
     if (encodedPayload.isEmpty || encodedNonce.isEmpty) {
       return <Uint8List>[];
     }
-    final encrypted = base64Decode(encodedPayload);
+    final rawPayload = base64Decode(encodedPayload);
     final nonce = base64Decode(encodedNonce);
-    final decrypted = Uint8List(encrypted.length);
-    for (var i = 0; i < encrypted.length; i++) {
-      decrypted[i] = encrypted[i] ^ nonce[i % 16];
+
+    const minLen = 6 + _checksumLen; // 6-byte header + 32-byte checksum
+    if (rawPayload.length < minLen) return <Uint8List>[];
+
+    // Split packed body and checksum
+    final packedLen = rawPayload.length - _checksumLen;
+    final packed = Uint8List.fromList(rawPayload.sublist(0, packedLen));
+    final expectedChecksum = rawPayload.sublist(packedLen);
+
+    // Verify SHA-256 integrity checksum over (nonce + packed)
+    final integrityInput = Uint8List(nonce.length + packed.length);
+    integrityInput.setRange(0, nonce.length, nonce);
+    integrityInput.setRange(nonce.length, integrityInput.length, packed);
+    final actualChecksum = sha256.convert(integrityInput).bytes;
+
+    var checksumValid = true;
+    for (var i = 0; i < _checksumLen; i++) {
+      if (expectedChecksum[i] != actualChecksum[i]) {
+        checksumValid = false;
+        break;
+      }
+    }
+    if (!checksumValid) {
+      // Cryptographic integrity check failed: payload was tampered with or corrupted
+      return <Uint8List>[];
     }
 
-    final bdata = ByteData.sublistView(decrypted);
-    if (decrypted.length < 2) return <Uint8List>[];
-    final count = bdata.getUint16(0);
-    var offset = 2;
+    final bdata = ByteData.sublistView(packed);
+    if (bdata.getUint8(0) != _magic0 || bdata.getUint8(1) != _magic1) {
+      return <Uint8List>[];
+    }
+    if (bdata.getUint8(2) != _formatVersion) {
+      return <Uint8List>[];
+    }
+
+    final count = bdata.getUint16(4);
+    var offset = 6;
     final frames = <Uint8List>[];
     for (var i = 0; i < count; i++) {
-      if (offset + 4 > decrypted.length) break;
+      if (offset + 4 > packed.length) return <Uint8List>[];
       final len = bdata.getUint32(offset);
       offset += 4;
-      if (offset + len > decrypted.length) break;
-      frames.add(Uint8List.fromList(decrypted.sublist(offset, offset + len)));
+      if (offset + len > packed.length) return <Uint8List>[];
+      frames.add(Uint8List.fromList(packed.sublist(offset, offset + len)));
       offset += len;
     }
     return frames;

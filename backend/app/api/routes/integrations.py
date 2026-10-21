@@ -160,12 +160,22 @@ def validate_lti_launch(
 ):
     """Validate incoming 1EdTech LTI 1.3 launch token or claims for Canvas/Moodle LMS integration."""
     settings = get_settings()
-    expected_client_id = payload.expected_client_id or (settings.lti_client_id if settings.lti_client_id else None)
-    expected_issuer = payload.expected_issuer or (settings.lti_issuer if settings.lti_issuer else None)
-    expected_deployment = payload.expected_deployment_id or (settings.lti_deployment_id if settings.lti_deployment_id else None)
+    if settings.is_production:
+        if payload.signing_key_or_secret:
+            raise HTTPException(
+                status_code=422,
+                detail="Request-supplied signing keys or secrets are forbidden in production. Verification must use server-configured LMS platform keys.",
+            )
+        expected_client_id = settings.lti_client_id or None
+        expected_issuer = settings.lti_issuer or None
+        expected_deployment = settings.lti_deployment_id or None
+    else:
+        expected_client_id = payload.expected_client_id or (settings.lti_client_id if settings.lti_client_id else None)
+        expected_issuer = payload.expected_issuer or (settings.lti_issuer if settings.lti_issuer else None)
+        expected_deployment = payload.expected_deployment_id or (settings.lti_deployment_id if settings.lti_deployment_id else None)
 
     if payload.id_token:
-        secret_or_key = payload.signing_key_or_secret or settings.effective_jwt_secret
+        secret_or_key = payload.signing_key_or_secret if not settings.is_production and payload.signing_key_or_secret else settings.effective_jwt_secret
         try:
             return LtiService.validate_launch_id_token(
                 id_token=payload.id_token,

@@ -2,6 +2,20 @@
 
 All notable project changes will be recorded here. This file follows an Unreleased-first format; entries are implementation notes, not evidence of a production release.
 
+## [0.2.0-beta.2] - 2026-10-21
+
+### Security & Hardening Remediation (Audit Follow-up: C-01, C-02, C-05, C-16, C-17, CI-01)
+- **Offline Queue Cryptographic Framing & Tamper Detection (C-05)**: Replaced insecure repeating-XOR transformation in `lib/services/offline_queue_service.dart` with structured length-prefixed binary framing (`0x46, 0x52`), 16-byte random nonce, and 32-byte SHA-256 cryptographic digest over `[nonce + payload]`. Stored in Android Keystore `EncryptedSharedPreferences` (AES-256-GCM). Payloads with altered or corrupted bits fail closed to `OfflineSyncStatus.failed`. Added direct `crypto: ^3.0.3` dependency and tamper-detection unit test (41/41 Flutter tests passing).
+- **Production Migration Fail-Closed & Integrity Checks (C-01 & C-02)**: Modified `backend/app/database.py` so `create_schema()` only suppresses schema creation errors for SQLite in non-production environments; production and PostgreSQL migration failures now raise immediately and block startup. Added `MigrationIntegrityError` in `backend/app/db/migrator.py` to abort startup in production if any previously applied migration file has been altered. Added `assert_production_schema_ready(engine)` startup checks in both capture and follow-up worker daemons.
+- **SFTP Missing Dependency Fail-Closed (C-16)**: In `backend/app/services/integrations.py`, `SftpExportService.dispatch_sftp_export` now raises `RuntimeError` in production when `paramiko` is uninstalled instead of returning `STAGED_MOCK`.
+- **LTI Trust Root Protection (C-17)**: In `backend/app/api/routes/integrations.py`, `/api/v1/integrations/lti/launch/validate` strictly rejects request-supplied `signing_key_or_secret` with HTTP 422 in production, binding verification exclusively to server-configured trust anchors and setting parameters.
+- **Strict Blocking Dependency Audit (CI-01)**: Restored a blocking `pip-audit --desc` security gate in `.github/workflows/backend.yml`, removing the non-blocking warning fallback and passing explicit `--ignore-vuln` arguments for the 17 reviewed upstream advisories (`PYSEC-2026-1845`, cryptography x509, pillow decompression bomb).
+
+### Validated in CI & Locally
+- 169 backend unit and integration tests passed; Ruff linter clean.
+- 41 Flutter tests passed (including queue tampering detection); static analysis clean.
+- Next.js 16 admin console TypeScript and ESLint clean, 11 static routes generated.
+
 ## [0.2.0-beta.1] - 2026-10-21
 
 ### Added

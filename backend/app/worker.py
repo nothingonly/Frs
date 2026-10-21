@@ -105,6 +105,8 @@ def create_worker(poll_interval: float = 0.5) -> FRSWorkerDaemon:
     settings = get_settings()
     settings.validate_startup_security()
     create_schema()
+    from app.db.migrator import assert_production_schema_ready
+    assert_production_schema_ready(engine)
 
     vision = VisionEngine(settings)
     pipeline = AttendancePipeline(settings, vision)
