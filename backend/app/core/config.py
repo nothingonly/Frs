@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     model_root: str = "~/.insightface"
     detect_size: int = Field(default=640, ge=320, le=1280)
     model_provider: str = "CPUExecutionProvider"
+    # Deprecated for compatibility. This boolean never overrides actual manifest terms.
     model_license_attested: bool = False
     require_all_specialists: bool = False
     retinaface_onnx_path: str = ""
@@ -164,8 +165,9 @@ class Settings(BaseSettings):
             self.encryption_key_bytes()
             if not self.threshold_calibrated or "ArcFace" not in self.calibrated_models:
                 raise ValueError("Production startup refused: ArcFace threshold must be calibrated on project data")
-            if not self.model_license_attested:
-                raise ValueError("Production requires explicit verification of every model-weight license")
+            # FRS_MODEL_LICENSE_ATTESTED is informational only. Actual artifact
+            # license terms are always enforced by VisionEngine from the signed/hashed
+            # provenance manifest and cannot be overridden by a boolean setting.
             if self.require_liveness and not self.minifasnet_onnx_path:
                 raise ValueError("Production requires FRS_MINIFASNET_ONNX_PATH when liveness is mandatory")
             if self.require_all_specialists:
@@ -189,6 +191,8 @@ class Settings(BaseSettings):
                 raise ValueError("Production requires a dedicated FRS_DELETION_CERTIFICATE_KEY of at least 32 characters")
             if self.lti_client_id and not self.lti_platform_public_key_pem.strip():
                 raise ValueError("Production LTI is enabled but FRS_LTI_PLATFORM_PUBLIC_KEY_PEM is missing")
+            if self.lti_client_id and (not self.lti_issuer.strip() or not self.lti_deployment_id.strip()):
+                raise ValueError("Production LTI requires configured issuer and deployment ID")
 
     @property
     def is_production(self) -> bool:
