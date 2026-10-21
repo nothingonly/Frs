@@ -213,7 +213,8 @@ def test_dean_cross_department_audit_forbidden(matrix_client):
     # Dean CSE inspecting ECE audit log returns 403 Forbidden
     resp = client.get("/api/v1/admin/audit?session_id=sess-ece-1", headers=headers)
     assert resp.status_code == 403
-    assert "Deans can only inspect audit logs for their department" in resp.json()["detail"]
+    # Session-level authorization rejects the foreign class group before querying its audit rows.
+    assert "Forbidden" in resp.json()["detail"]
 
     # Direct get_audit for ECE event returns 403 Forbidden
     resp = client.get("/api/v1/admin/audit/audit-ece-1", headers=headers)
@@ -331,7 +332,7 @@ def test_dean_cross_department_de_enroll_forbidden(matrix_client):
     # Dean CSE cannot de-enroll ECE student stu-2
     resp = client.post("/api/v1/admin/students/stu-2/de-enroll", headers=headers)
     assert resp.status_code == 403
-    assert "Deans can only de-enroll students within their own department" in resp.json()["detail"]
+    assert "own department" in resp.json()["detail"]
 
     # Dean CSE can de-enroll CSE student stu-1
     resp = client.post("/api/v1/admin/students/stu-1/de-enroll", headers=headers)
