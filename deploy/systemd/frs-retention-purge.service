@@ -1,0 +1,19 @@
+[Unit]
+Description=FRS Biometric Retention Purge Service
+Documentation=https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=frs
+Group=frs
+WorkingDirectory=/opt/frs/backend
+EnvironmentFile=/etc/frs/backend.env
+ExecStart=/opt/frs/backend/.venv/bin/python -m app.retention_worker --once --retention-days 30
+StandardOutput=journal
+StandardError=journal
+TimeoutSec=300
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/frs/data /tmp

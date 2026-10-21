@@ -1,0 +1,6 @@
+# Copy this file to key.properties locally; do not commit the populated file.
+# Generate a dedicated upload/release keystore and protect it outside the repository.
+storePassword=REPLACE_WITH_KEYSTORE_PASSWORD
+keyPassword=REPLACE_WITH_PRIVATE_KEY_PASSWORD
+keyAlias=REPLACE_WITH_KEY_ALIAS
+storeFile=/absolute/path/to/upload-keystore.jks

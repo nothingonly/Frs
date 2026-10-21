@@ -1,0 +1,17 @@
+{
+  "sha256": "REPLACE_WITH_THE_ACTUAL_64_CHARACTER_SHA256_OF_THIS_EXACT_ONNX_FILE",
+  "license_name": "REPLACE_WITH_VERIFIED_MODEL_LICENSE",
+  "permitted_use": "REPLACE_WITH_ACTUAL_PERMITTED_USE_AND_DEPLOYMENT_SCOPE",
+  "source_url": "REPLACE_WITH_IMMUTABLE_MODEL_SOURCE_OR_ARTIFACT_PROVENANCE_URL",
+  "preprocessing_id": "REPLACE_WITH_VERSIONED_PREPROCESSING_CONTRACT",
+  "output_type": "REPLACE_WITH_embedding_logits_OR_quality_score",
+  "layout": "NCHW",
+  "height": 112,
+  "width": 112,
+  "color_order": "RGB",
+  "mean": 127.5,
+  "std": 128.0,
+  "output_name": "REPLACE_WITH_REAL_ONNX_OUTPUT_NODE_NAME",
+  "score_activation": "REPLACE_WITH_none_OR_sigmoid_IF_FIQA",
+  "live_class_index": 1
+}

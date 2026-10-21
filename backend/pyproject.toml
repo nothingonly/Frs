@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75", "wheel", "Cython<3.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frs-backend"
+version = "0.1.0.dev0"
+description = "Modular face-recognition attendance backend following FRS V4/V5"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "pydantic-settings>=2.7,<3",
+  "sqlalchemy>=2.0,<3",
+  "psycopg[binary]>=3.2,<4",
+  "python-multipart>=0.0.20,<1",
+  "numpy>=1.26,<2.2",
+  "opencv-python-headless>=4.10,<5",
+  "pillow>=11,<13",
+  "cryptography>=44,<47",
+  "onnxruntime>=1.20,<2",
+  "cloudinary>=1.41,<2",
+]
+
+[project.optional-dependencies]
+insightface = ["insightface==0.7.3"]
+dev = ["pytest>=8.3,<9", "httpx>=0.28,<1", "ruff>=0.9,<1"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

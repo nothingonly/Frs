@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily FRS Biometric Retention Purge Timer
+Documentation=https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

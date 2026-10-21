@@ -1,0 +1,23 @@
+{
+  "manifest_version": 1,
+  "models": {
+    "SCRFD": {
+      "file": "det_10g.onnx",
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+      "source_url": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+      "publisher": "DeepInsight / InsightFace",
+      "training_dataset": "WIDER FACE",
+      "license_name": "Non-commercial Research License (InsightFace)",
+      "permitted_use": "Academic research and evaluation only"
+    },
+    "ArcFace": {
+      "file": "w600k_r50.onnx",
+      "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+      "source_url": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+      "publisher": "DeepInsight / InsightFace",
+      "training_dataset": "WebFace600K",
+      "license_name": "Non-commercial Research License (InsightFace / WebFace600K)",
+      "permitted_use": "Academic research and evaluation only"
+    }
+  }
+}

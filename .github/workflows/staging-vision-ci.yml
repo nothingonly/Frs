@@ -1,0 +1,64 @@
+name: FRS Staging Real-Vision Inference CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_weights:
+        description: "Force download authorized Buffalo_L weights from release bucket"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: ["staging/**", "release/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  real-vision-inference:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/pyproject.toml
+            backend/requirements.lock
+
+      - name: Install backend dependencies and ONNX runtime
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[dev]"
+
+      - name: Cache Buffalo_L ONNX model weights
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: backend/model-artifacts/insightface/models/buffalo_l
+          key: buffalo-l-onnx-${{ hashFiles('backend/app/vision/onnx_models.py') }}
+
+      - name: Provision model weights if not cached
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        env:
+          MODELS_DOWNLOAD_URL: ${{ secrets.AUTHORIZED_VISION_MODELS_URL }}
+        run: |
+          mkdir -p model-artifacts/insightface/models/buffalo_l
+          if [ -n "$MODELS_DOWNLOAD_URL" ]; then
+            echo "Downloading authorized model weights from secure artifact storage..."
+            curl -fSL "$MODELS_DOWNLOAD_URL/det_10g.onnx" -o model-artifacts/insightface/models/buffalo_l/det_10g.onnx
+            curl -fSL "$MODELS_DOWNLOAD_URL/w600k_r50.onnx" -o model-artifacts/insightface/models/buffalo_l/w600k_r50.onnx
+          else
+            echo "::warning::AUTHORIZED_VISION_MODELS_URL secret not set. Skipping automated download; relying on local/runner cache."
+          fi
+
+      - name: Run real vision inference test suite
+        run: |
+          pytest tests/test_real_vision_inference.py -v -s

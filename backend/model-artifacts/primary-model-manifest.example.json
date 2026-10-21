@@ -1,0 +1,19 @@
+{
+  "manifest_version": 1,
+  "models": {
+    "SCRFD": {
+      "file": "det_10g.onnx",
+      "sha256": "REPLACE_WITH_ACTUAL_64_CHARACTER_SHA256",
+      "source_url": "REPLACE_WITH_IMMUTABLE_OFFICIAL_OR_APPROVED_ARTIFACT_SOURCE",
+      "license_name": "REPLACE_WITH_VERIFIED_LICENSE",
+      "permitted_use": "REPLACE_WITH_VERIFIED_PERMITTED_USE_FOR_THIS_DEPLOYMENT"
+    },
+    "ArcFace": {
+      "file": "w600k_r50.onnx",
+      "sha256": "REPLACE_WITH_ACTUAL_64_CHARACTER_SHA256",
+      "source_url": "REPLACE_WITH_IMMUTABLE_OFFICIAL_OR_APPROVED_ARTIFACT_SOURCE",
+      "license_name": "REPLACE_WITH_VERIFIED_LICENSE",
+      "permitted_use": "REPLACE_WITH_VERIFIED_PERMITTED_USE_FOR_THIS_DEPLOYMENT"
+    }
+  }
+}
