@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
+from contextlib import contextmanager
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from collections.abc import Iterator
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
@@ -56,9 +58,20 @@ def init_migration_table(engine: Engine) -> None:
         """))
 
 
-def get_applied_migrations(engine: Engine) -> dict[str, dict[str, Any]]:
-    """Return a dict of applied migrations: version -> {applied_at, checksum, description}."""
-    init_migration_table(engine)
+def get_applied_migrations(
+    engine: Engine,
+    *,
+    create_if_missing: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """Return applied migration records.
+
+    Verification callers may set create_if_missing=False to ensure a readiness check never
+    creates schema_migrations as a side effect.
+    """
+    if create_if_missing:
+        init_migration_table(engine)
+    elif not inspect(engine).has_table("schema_migrations"):
+        return {}
     with engine.connect() as conn:
         result = conn.execute(text("SELECT version, applied_at, checksum, description FROM schema_migrations ORDER BY version"))
         return {
@@ -130,19 +143,48 @@ def _sqlite_compat_transform(stmt: str) -> str | None:
     return stmt
 
 
-def apply_all_migrations(engine: Engine, directory: Path | None = None) -> list[str]:
-    """Apply all pending migrations in sequential order. Returns list of applied versions."""
-    init_migration_table(engine)
-    applied = get_applied_migrations(engine)
-    available = get_migration_files(directory)
+@contextmanager
+def _migration_advisory_lock(engine: Engine) -> Iterator[None]:
+    """Serialize concurrent PostgreSQL migration invocations with a session-level lock."""
+    if engine.dialect.name != "postgresql":
+        yield
+        return
 
+    with engine.connect() as lock_connection:
+        lock_connection.execute(text("SELECT pg_advisory_lock(143152, 20261021)"))
+        lock_connection.commit()
+        try:
+            yield
+        finally:
+            lock_connection.execute(text("SELECT pg_advisory_unlock(143152, 20261021)"))
+            lock_connection.commit()
+
+
+def apply_all_migrations(engine: Engine, directory: Path | None = None) -> list[str]:
+    """Apply pending migrations serially, refuse drift, then enforce deployed DB safeguards."""
     newly_applied: list[str] = []
-    for version, file_path in available:
-        if version not in applied:
-            apply_migration(engine, version, file_path)
-            newly_applied.append(version)
-        else:
+    with _migration_advisory_lock(engine):
+        init_migration_table(engine)
+        applied = get_applied_migrations(engine, create_if_missing=False)
+        available = get_migration_files(directory)
+        available_versions = {version for version, _ in available}
+
+        unknown = sorted(set(applied) - available_versions)
+        if unknown:
+            raise MigrationIntegrityError(
+                "Applied database migrations have no matching source files: "
+                + ", ".join(unknown)
+                + ". Restore the historical migration files before continuing."
+            )
+
+        for version, file_path in available:
             current_cs = compute_file_checksum(file_path)
+            if version not in applied:
+                apply_migration(engine, version, file_path)
+                newly_applied.append(version)
+                applied[version] = {"checksum": current_cs}
+                continue
+
             recorded_cs = applied[version]["checksum"]
             if current_cs != recorded_cs:
                 msg = (
@@ -151,25 +193,44 @@ def apply_all_migrations(engine: Engine, directory: Path | None = None) -> list[
                     "Apply changes via new forward migrations."
                 )
                 logger.error(msg)
-                settings = get_settings()
-                if settings.is_production:
-                    raise MigrationIntegrityError(msg)
+                raise MigrationIntegrityError(msg)
 
-    # Post-migration check: verify and enforce RLS and constraints if on PostgreSQL
-    if engine.dialect.name == "postgresql":
-        verify_and_enforce_rls(engine)
-        verify_and_enforce_constraints(engine)
+        # Only the explicit migration command may change database-level security DDL.
+        if engine.dialect.name == "postgresql":
+            verify_and_enforce_rls(engine)
+            verify_and_enforce_constraints(engine)
 
     return newly_applied
 
 
 def verify_all_migrations(engine: Engine, directory: Path | None = None) -> tuple[bool, list[str]]:
-    """Check if all available migrations have been applied. Returns (is_up_to_date, pending_versions)."""
-    applied = get_applied_migrations(engine)
+    """Verify pending migrations, historical checksums, and migration-registry integrity."""
     available = get_migration_files(directory)
+    available_by_version = {version: path for version, path in available}
 
-    pending = [version for version, _ in available if version not in applied]
-    return (len(pending) == 0, pending)
+    if not inspect(engine).has_table("schema_migrations"):
+        pending = [version for version, _ in available]
+        if not pending:
+            pending = ["schema_migrations_missing"]
+        return False, pending
+
+    applied = get_applied_migrations(engine, create_if_missing=False)
+    problems = [
+        version for version, _ in available
+        if version not in applied
+    ]
+
+    for version, file_path in available:
+        if version in applied:
+            recorded_cs = applied[version]["checksum"]
+            current_cs = compute_file_checksum(file_path)
+            if current_cs != recorded_cs:
+                problems.append(f"{version} (checksum mismatch)")
+
+    for version in sorted(set(applied) - set(available_by_version)):
+        problems.append(f"{version} (migration file missing from repository)")
+
+    return (len(problems) == 0, problems)
 
 
 def verify_and_enforce_rls(engine: Engine) -> list[str]:
