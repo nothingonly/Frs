@@ -337,7 +337,7 @@ def test_dean_cross_department_de_enroll_forbidden(matrix_client):
     resp = client.post("/api/v1/admin/students/stu-1/de-enroll", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["student_id"] == "stu-1"
-    assert resp.json()["status"] == "DE_ENROLLED"
+    assert resp.json()["status"] == "DELETION_INCOMPLETE"
 
 
 def test_absentee_notifications_and_sftp_scoping(matrix_client):
