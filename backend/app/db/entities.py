@@ -84,6 +84,16 @@ class AuditEvent(Base):
     # Store controlled references and non-biometric evidence, never raw images or embeddings.
 
 
+class LtiNonceUse(Base):
+    """Persistent one-time nonce consumption prevents reuse of a validated LTI launch token."""
+
+    __tablename__ = "lti_nonce_uses"
+
+    nonce: Mapped[str] = mapped_column(String(255), primary_key=True)
+    token_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    consumed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class ModelRegistryEntry(Base):
     __tablename__ = "model_registry"
     __table_args__ = (UniqueConstraint("model_id", "model_version", name="uq_model_registry_version"),)
