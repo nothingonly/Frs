@@ -2,17 +2,18 @@ name: Publish FRS alpha prerelease
 
 # The first committed version of this workflow intentionally triggers the alpha release.
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/publish-alpha-release.yml
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g. v0.2.0-beta.1)"
+        required: true
+        default: "v0.2.0-beta.1"
 
 permissions:
   contents: write
 
 concurrency:
-  group: frs-alpha-release-v0.1.0-alpha.1
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -86,7 +87,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FRS_RELEASE_TOKEN || github.token }}
         run: |
-          gh repo edit nothingonly/Frs \
+          gh repo edit "${{ github.repository }}" \
             --description "Face Recognition Attendance System (FRS) — Flutter Android kiosk and FastAPI backend for secure, multi-frame biometric attendance verification and identification." \
             --add-topic face-recognition \
             --add-topic attendance-system \
@@ -99,21 +100,33 @@ jobs:
             --add-topic android-kiosk \
             --add-topic onnx
 
-      - name: Create alpha prerelease if not already published
+      - name: Create prerelease if not already published
         env:
           GH_TOKEN: ${{ secrets.FRS_RELEASE_TOKEN || github.token }}
-          VERSION: v0.1.0-alpha.1
+          VERSION: ${{ github.event.inputs.version || 'v0.2.0-beta.1' }}
         run: |
           set -euo pipefail
           if gh release view "$VERSION" >/dev/null 2>&1; then
             echo "Release $VERSION already exists; leaving the published release unchanged."
             exit 0
           fi
-          # Use the default branch ref, not an old triggering SHA. If main advances
-          # while an Android build runs, an old SHA can trip GitHub's workflow-file
-          # permission guard when the release/tag is created.
-          gh release create "$VERSION" artifacts/app-debug.apk \
-            --title "FRS v0.1.0 Alpha 1" \
-            --notes-file releases/v0.1.0-alpha.1.md \
-            --prerelease \
-            --target main
+          NOTES_FILE=""
+          if [ -f "releases/${VERSION}.md" ]; then
+            NOTES_FILE="releases/${VERSION}.md"
+          elif [ -f "RELEASE_NOTES.md" ]; then
+            NOTES_FILE="RELEASE_NOTES.md"
+          fi
+          
+          if [ -n "$NOTES_FILE" ]; then
+            gh release create "$VERSION" artifacts/app-debug.apk \
+              --title "FRS Release $VERSION" \
+              --notes-file "$NOTES_FILE" \
+              --prerelease \
+              --target main
+          else
+            gh release create "$VERSION" artifacts/app-debug.apk \
+              --title "FRS Release $VERSION" \
+              --notes "Automated build release for FRS $VERSION" \
+              --prerelease \
+              --target main
+          fi

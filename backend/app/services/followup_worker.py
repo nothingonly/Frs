@@ -98,13 +98,13 @@ class AttendanceFollowupDaemon:
             password=settings.smtp_password,
             use_tls=settings.smtp_use_tls,
             sender_email=settings.smtp_sender_email,
-            mock_fallback=True,
+            mock_fallback=not settings.is_production,
         )
         sms_provider = SmsNotificationProvider(
             api_url=settings.sms_gateway_url,
             auth_token=settings.sms_auth_token,
             sender_id=settings.sms_sender_id,
-            mock_fallback=True,
+            mock_fallback=not settings.is_production,
         )
         notifier = NotificationManager(email_provider=email_provider, sms_provider=sms_provider)
         dispatch_summary = notifier.dispatch_batch(absentees, channel=self.channel)
@@ -119,6 +119,10 @@ class AttendanceFollowupDaemon:
                     sftp_host=settings.sftp_host,
                     sftp_port=settings.sftp_port,
                     sftp_username=settings.sftp_username,
+                    sftp_password=settings.sftp_password,
+                    sftp_key_path=settings.sftp_key_path,
+                    sftp_host_key_fingerprint=settings.sftp_host_key_fingerprint,
+                    sftp_known_hosts_file=settings.sftp_known_hosts_file,
                     remote_path=settings.sftp_remote_path,
                 )
                 sftp_status = sftp_res.get("status", "SUCCESS")
@@ -153,12 +157,13 @@ class AttendanceFollowupDaemon:
         db.add(audit)
         db.commit()
 
+        sent_count = dispatch_summary.get("sent_count", 0)
         get_metrics().inc_counter("frs_attendance_reconciliations_total")
-        get_metrics().inc_counter("frs_absentee_notifications_sent_total", value=float(absent_count))
+        get_metrics().inc_counter("frs_absentee_notifications_sent_total", value=float(sent_count))
 
         logger.info(
-            "Session '%s' reconciled: %d present, %d absent, %d alerts sent, sftp=%s",
-            session_id, present_count, absent_count, absent_count, sftp_status,
+            "Session '%s' reconciled: %d present, %d absent, %d real alerts sent (mocked=%d), sftp=%s",
+            session_id, present_count, absent_count, sent_count, dispatch_summary.get("mocked_count", 0), sftp_status,
         )
         return evidence
 

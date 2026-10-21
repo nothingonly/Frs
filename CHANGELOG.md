@@ -14,8 +14,18 @@ All notable project changes will be recorded here. This file follows an Unreleas
 - Prometheus `/metrics` endpoint with request latency histograms and Grafana operational dashboard.
 - Comprehensive production readiness checklist and sign-off framework across Gates 0 through 5 (`docs/CAMPUS_ACCEPTANCE_CHECKLIST.md`).
 
+### Security & Forensic Audit Remediation (FRS-01 to FRS-10)
+- **CI Dependency Lock (FRS-01)**: Resolved editable requirement conflict in `backend/requirements.lock` allowing pip `--require-hashes` to install dependencies in backend CI without failure.
+- **Truthful De-Enrollment Verification (FRS-02 & FRS-08)**: Updated `de_enroll_student_biometrics` to verify object-level cloud deletion outcomes (`CONFIRMED_DELETED`, `FAILED_OR_NOT_FOUND`, `STORAGE_NOT_CONFIGURED`) and issue qualified certificates (`FULL_DELETION_VERIFIED` vs `DELETION_INCOMPLETE`). Enforced server-configured retention purge policy in production.
+- **LTI 1.3 Cryptographic Token Verification (FRS-03)**: Implemented `validate_launch_id_token` in `LtiService` to cryptographically verify OIDC/JWT ID tokens (signature, issuer, audience, expiration, nonce, deployment ID) and reject plain claim dictionaries in production.
+- **SFTP Host Key Pinning (FRS-04)**: Added remote host key fingerprint verification in `SftpExportService.dispatch_sftp_export`, failing closed before data transmission if fingerprints mismatch or keys are unpinned in production.
+- **Admin Web CSP Hardening (FRS-05)**: Removed `'unsafe-eval'` from Content Security Policy `script-src` in `admin-web/next.config.ts`.
+- **Notification Mock Protection & Delivery Integrity (FRS-06 & FRS-07)**: Disallowed mock fallback in production for SMTP and SMS providers, reporting granular delivery counts (`sent_count`, `mocked_count`, `failed_count`), and preventing premature reconciliation on delivery failures.
+- **Release Workflow Isolation (FRS-09)**: Parameterized release versions, dynamically scoped release actions to `${{ github.repository }}`, and removed cross-repository metadata modifications.
+- **Pre-Release Gating (FRS-10)**: Re-enforced strict gating on real biometric calibration and model licensing before live deployment.
+
 ### Validated in CI & Locally
-- 161 backend tests passed with Ruff linting clean.
+- 169 backend tests passed with Ruff linting clean.
 - 40 Flutter tests passed with static analysis clean.
 - Next.js 16 admin console TypeScript and ESLint clean, 11 static routes generated.
 

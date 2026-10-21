@@ -879,10 +879,15 @@ def trigger_retention_purge(
     db: Annotated[Session, Depends(get_db)],
     retention_days: int | None = Query(default=None, ge=1, le=365),
 ):
-    """Trigger data retention purge for expired raw capture frames."""
     if actor.role != ROLE_SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Only Super Administrators can trigger data retention purges.")
-    days = retention_days or get_settings().retention_purge_days
+    settings = get_settings()
+    if settings.is_production and retention_days is not None and retention_days != settings.retention_purge_days:
+        raise HTTPException(
+            status_code=400,
+            detail="In production environments, retention purge policy is strictly enforced by server configuration and cannot be overridden by callers.",
+        )
+    days = settings.retention_purge_days if settings.is_production else (retention_days or settings.retention_purge_days)
     return run_retention_purge(db, retention_days=days, operator_id=actor.email or actor.sub)
 
 

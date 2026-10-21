@@ -39,11 +39,17 @@ class AbsenteeAlertRequest(BaseModel):
 class SftpExportRequest(BaseModel):
     session_id: str
     remote_path: str | None = None
+    sftp_host_key_fingerprint: str | None = None
 
 
 class LtiLaunchValidationRequest(BaseModel):
-    claims: dict[str, Any]
+    id_token: str | None = None
+    claims: dict[str, Any] | None = None
     expected_client_id: str | None = None
+    expected_deployment_id: str | None = None
+    expected_issuer: str | None = None
+    signing_key_or_secret: str | None = None
+    nonce: str | None = None
 
 
 class LtiAgsPassbackRequest(BaseModel):
@@ -92,13 +98,13 @@ def dispatch_session_absentee_alerts(
         password=settings.smtp_password,
         use_tls=settings.smtp_use_tls,
         sender_email=settings.smtp_sender_email,
-        mock_fallback=True,
+        mock_fallback=not settings.is_production,
     )
     sms_provider = SmsNotificationProvider(
         api_url=settings.sms_gateway_url,
         auth_token=settings.sms_auth_token,
         sender_id=settings.sms_sender_id,
-        mock_fallback=True,
+        mock_fallback=not settings.is_production,
     )
     manager = NotificationManager(email_provider=email_provider, sms_provider=sms_provider)
     dispatch_summary = manager.dispatch_batch(absentees, channel=payload.channel)
@@ -115,7 +121,7 @@ def trigger_sftp_attendance_export(
     actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """Generate standardized SIS attendance CSV and stage/dispatch it via SFTP."""
+    """Generate standardized SIS attendance CSV and stage/dispatch it via SFTP with host key verification."""
     sess = db.get(AttendanceSession, payload.session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail=f"Attendance session '{payload.session_id}' not found.")
@@ -134,8 +140,14 @@ def trigger_sftp_attendance_export(
             sftp_host=settings.sftp_host,
             sftp_port=settings.sftp_port,
             sftp_username=settings.sftp_username,
+            sftp_password=settings.sftp_password,
+            sftp_key_path=settings.sftp_key_path,
+            sftp_host_key_fingerprint=payload.sftp_host_key_fingerprint or settings.sftp_host_key_fingerprint,
+            sftp_known_hosts_file=settings.sftp_known_hosts_file,
             remote_path=remote_path,
         )
+        if result.get("status") == "REJECTED_HOST_KEY_MISMATCH":
+            raise HTTPException(status_code=422, detail=result.get("error", "SFTP host key verification rejected."))
         return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -146,14 +158,38 @@ def validate_lti_launch(
     payload: LtiLaunchValidationRequest,
     _actor: Annotated[TokenClaims, Depends(scoped_admin)],
 ):
-    """Validate incoming 1EdTech LTI 1.3 launch claims for Canvas/Moodle LMS integration."""
+    """Validate incoming 1EdTech LTI 1.3 launch token or claims for Canvas/Moodle LMS integration."""
     settings = get_settings()
     expected_client_id = payload.expected_client_id or (settings.lti_client_id if settings.lti_client_id else None)
-    try:
-        validated = LtiService.validate_launch_claims(payload.claims, expected_client_id=expected_client_id)
-        return validated
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    expected_issuer = payload.expected_issuer or (settings.lti_issuer if settings.lti_issuer else None)
+    expected_deployment = payload.expected_deployment_id or (settings.lti_deployment_id if settings.lti_deployment_id else None)
+
+    if payload.id_token:
+        secret_or_key = payload.signing_key_or_secret or settings.effective_jwt_secret
+        try:
+            return LtiService.validate_launch_id_token(
+                id_token=payload.id_token,
+                signing_key_or_secret=secret_or_key,
+                expected_issuer=expected_issuer,
+                expected_client_id=expected_client_id,
+                expected_deployment_id=expected_deployment,
+                expected_nonce=payload.nonce,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    if payload.claims:
+        if settings.is_production:
+            raise HTTPException(
+                status_code=422,
+                detail="Production environment requires cryptographically signed id_token for LTI launch validation. Plain claim dictionaries are forbidden.",
+            )
+        try:
+            return LtiService.validate_launch_claims(payload.claims, expected_client_id=expected_client_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    raise HTTPException(status_code=422, detail="Either 'id_token' or 'claims' must be provided.")
 
 
 @router.post("/lti/ags/passback")

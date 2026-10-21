@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 
+from datetime import datetime, timezone
+import hashlib
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -190,4 +193,209 @@ def test_sms_live_http_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     assert res["channel"] == "sms"
     assert res["provider"] == "sms_gateway"
     assert "sms-999" in res["gateway_response"]
+
+
+def test_lti_signed_token_cryptographic_verification() -> None:
+    secret = "lti-hmac-shared-secret-key-32chars!"
+    token = LtiService.create_launch_token(
+        sub="student-uuid-888",
+        secret=secret,
+        client_id="canvas-client-123",
+        issuer="https://canvas.instructure.com",
+        deployment_id="dep-deployment-42",
+        nonce="secure-nonce-12345",
+    )
+
+    validated = LtiService.validate_launch_id_token(
+        id_token=token,
+        signing_key_or_secret=secret,
+        expected_issuer="https://canvas.instructure.com",
+        expected_client_id="canvas-client-123",
+        expected_deployment_id="dep-deployment-42",
+        expected_nonce="secure-nonce-12345",
+    )
+
+    assert validated["is_valid"] is True
+    assert validated["cryptographically_verified"] is True
+    assert validated["user_id"] == "student-uuid-888"
+    assert validated["deployment_id"] == "dep-deployment-42"
+    assert validated["course_id"] == "course-101"
+
+
+def test_lti_token_verification_failures() -> None:
+    secret = "lti-hmac-shared-secret-key-32chars!"
+    token = LtiService.create_launch_token(
+        sub="student-uuid-888",
+        secret=secret,
+        client_id="canvas-client-123",
+        issuer="https://canvas.instructure.com",
+        deployment_id="dep-42",
+        nonce="nonce-orig",
+    )
+
+    # 1. Forged signature
+    with pytest.raises(ValueError, match="Invalid LTI token HMAC signature"):
+        LtiService.validate_launch_id_token(
+            id_token=token,
+            signing_key_or_secret="wrong-secret-key-123456789012345",
+        )
+
+    # 2. Issuer mismatch
+    with pytest.raises(ValueError, match="issuer mismatch"):
+        LtiService.validate_launch_id_token(
+            id_token=token,
+            signing_key_or_secret=secret,
+            expected_issuer="https://moodle.campus.edu",
+        )
+
+    # 3. Audience mismatch
+    with pytest.raises(ValueError, match="audience does not match"):
+        LtiService.validate_launch_id_token(
+            id_token=token,
+            signing_key_or_secret=secret,
+            expected_client_id="wrong-client-id",
+        )
+
+    # 4. Nonce mismatch
+    with pytest.raises(ValueError, match="nonce mismatch"):
+        LtiService.validate_launch_id_token(
+            id_token=token,
+            signing_key_or_secret=secret,
+            expected_nonce="different-nonce",
+        )
+
+    # 5. Deployment ID mismatch
+    with pytest.raises(ValueError, match="deployment_id mismatch"):
+        LtiService.validate_launch_id_token(
+            id_token=token,
+            signing_key_or_secret=secret,
+            expected_deployment_id="wrong-deployment",
+        )
+
+    # 6. Expired token
+    expired_token = LtiService.create_launch_token(
+        sub="student-uuid-888",
+        secret=secret,
+        expires_delta_seconds=-300,
+    )
+    with pytest.raises(ValueError, match="expired"):
+        LtiService.validate_launch_id_token(
+            id_token=expired_token,
+            signing_key_or_secret=secret,
+            leeway_seconds=0,
+        )
+
+
+def test_lti_api_token_validation_endpoint() -> None:
+    app.dependency_overrides[admin_actor] = lambda: "administrator:super-admin"
+    client = TestClient(app)
+    secret = "lti-secret-for-api-tests-12345678"
+
+    token = LtiService.create_launch_token(
+        sub="user-api-99",
+        secret=secret,
+        client_id="api-client-1",
+        issuer="https://canvas.instructure.com",
+    )
+
+    # Valid signed token
+    resp = client.post(
+        "/api/v1/integrations/lti/launch/validate",
+        json={
+            "id_token": token,
+            "signing_key_or_secret": secret,
+            "expected_client_id": "api-client-1",
+            "expected_issuer": "https://canvas.instructure.com",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["is_valid"] is True
+    assert resp.json()["cryptographically_verified"] is True
+    assert resp.json()["user_id"] == "user-api-99"
+
+    # Forged token rejected
+    bad_resp = client.post(
+        "/api/v1/integrations/lti/launch/validate",
+        json={
+            "id_token": token,
+            "signing_key_or_secret": "forged-secret-key-1234567890123",
+            "expected_client_id": "api-client-1",
+        },
+    )
+    assert bad_resp.status_code == 422
+    assert "Invalid LTI token" in bad_resp.json()["detail"]
+
+
+def test_sftp_host_key_fingerprint_mismatch_blocks_export(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = db_session
+    sess = AttendanceSession(
+        session_id="sess-sftp-test",
+        class_group_id="cg-1",
+        subject_name="Security 101",
+        status="CLOSED",
+        starts_at=datetime.now(timezone.utc),
+        created_by="admin-user",
+    )
+    session.add(sess)
+    session.commit()
+
+    import sys
+    from unittest.mock import MagicMock
+
+    mock_paramiko = MagicMock()
+    mock_transport = MagicMock()
+    mock_key = MagicMock()
+    mock_key.asbytes.return_value = b"remote-ssh-server-key-material"
+    actual_fp = hashlib.sha256(b"remote-ssh-server-key-material").hexdigest()
+    mock_transport.get_remote_server_key.return_value = mock_key
+
+    mock_sftp_client = MagicMock()
+    mock_paramiko.Transport.return_value = mock_transport
+    mock_paramiko.SFTPClient.from_transport.return_value = mock_sftp_client
+
+    monkeypatch.setitem(sys.modules, "paramiko", mock_paramiko)
+
+    # Calling with mismatched expected fingerprint
+    res = SftpExportService.dispatch_sftp_export(
+        db=session,
+        session_id="sess-sftp-test",
+        sftp_host="sftp.campus.edu",
+        sftp_username="campus_admin",
+        sftp_password="pass",
+        sftp_host_key_fingerprint="0000000000000000000000000000000000000000000000000000000000000000",
+    )
+
+    assert res["status"] == "REJECTED_HOST_KEY_MISMATCH"
+    assert "fingerprint mismatch" in res["error"]
+    assert not mock_sftp_client.putfo.called
+    assert mock_transport.close.called
+
+    # Calling with matching fingerprint succeeds
+    res_ok = SftpExportService.dispatch_sftp_export(
+        db=session,
+        session_id="sess-sftp-test",
+        sftp_host="sftp.campus.edu",
+        sftp_username="campus_admin",
+        sftp_password="pass",
+        sftp_host_key_fingerprint=actual_fp,
+    )
+    assert res_ok["status"] == "DISPATCHED"
+    assert res_ok["server_host_key_fingerprint"] == actual_fp
+    assert mock_sftp_client.putfo.called
+
+
+def test_notification_provider_mock_disallowed_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.config import Settings
+    prod_settings = Settings(
+        env="production",
+        smtp_host="",
+        sms_gateway_url="",
+    )
+    monkeypatch.setattr("app.services.integrations.get_settings", lambda: prod_settings)
+
+    email_provider = SmtpEmailProvider()
+    msg = NotificationMessage(recipient="student@campus.edu", subject="Sub", body="Text")
+    res = email_provider.send(msg)
+    assert res["status"] == "FAILED"
+    assert "mock delivery is forbidden in production" in res["error"]
 

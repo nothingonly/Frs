@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     sftp_host: str = Field(default="", validation_alias=AliasChoices("FRS_SFTP_HOST", "SFTP_HOST"))
     sftp_port: int = Field(default=22, validation_alias=AliasChoices("FRS_SFTP_PORT", "SFTP_PORT"))
     sftp_username: str = Field(default="", validation_alias=AliasChoices("FRS_SFTP_USERNAME", "SFTP_USERNAME"))
+    sftp_password: str = Field(default="", validation_alias=AliasChoices("FRS_SFTP_PASSWORD", "SFTP_PASSWORD"))
+    sftp_key_path: str = Field(default="", validation_alias=AliasChoices("FRS_SFTP_KEY_PATH", "SFTP_KEY_PATH"))
+    sftp_host_key_fingerprint: str = Field(default="", validation_alias=AliasChoices("FRS_SFTP_HOST_KEY_FINGERPRINT", "SFTP_HOST_KEY_FINGERPRINT"))
+    sftp_known_hosts_file: str = Field(default="", validation_alias=AliasChoices("FRS_SFTP_KNOWN_HOSTS_FILE", "SFTP_KNOWN_HOSTS_FILE"))
     sftp_remote_path: str = Field(default="/uploads/attendance", validation_alias=AliasChoices("FRS_SFTP_REMOTE_PATH", "SFTP_REMOTE_PATH"))
 
     # Canvas / Moodle LTI 1.3
@@ -157,6 +161,12 @@ class Settings(BaseSettings):
                     if not self.is_model_calibrated(model_id):
                         raise ValueError(f"Production requires a calibrated threshold for {model_id}")
                     self.threshold_for(model_id)
+            if self.sftp_host and self.sftp_host != "mock" and not (self.sftp_host_key_fingerprint or self.sftp_known_hosts_file):
+                raise ValueError("Production startup refused: SFTP export requires sftp_host_key_fingerprint or sftp_known_hosts_file to pin server identity")
+
+    @property
+    def is_production(self) -> bool:
+        return self.env.lower() == "production"
 
     @property
     def device_keys(self) -> tuple[str, ...]:

@@ -112,9 +112,92 @@ def test_de_enroll_student_with_signed_certificate_and_media_purge(db_session: S
     assert len(signed_cert["signature"]) == 64
 
     # Verify signature calculation matches expected HMAC
-    raw_str = f"s-de1:p-de1:{result['timestamp']}:1:dean-smith"
+    raw_str = f"s-de1:p-de1:{result['timestamp']}:1:dean-smith:FULL_DELETION_VERIFIED"
     expected_sig = hmac.new(b"super-secret-institution-signing-key", raw_str.encode("utf-8"), hashlib.sha256).hexdigest()
     assert signed_cert["signature"] == expected_sig
+    assert signed_cert["qualification"] == "FULL_DELETION_VERIFIED"
+
+
+def test_de_enroll_storage_delete_false_fails_closed(db_session: Session) -> None:
+    person = Person(person_id="p-de2", employee_id="EMP-DE2", full_name="Dan Fail", is_active=True)
+    student = Student(student_id="s-de2", student_number="STU-DE2", full_name="Dan Fail", person_id="p-de2", is_active=True)
+    emb = EmbeddingRecord(
+        embedding_id="emb-de2",
+        person_id="p-de2",
+        enrollment_version=1,
+        recognizer_id="ArcFace",
+        model_version="v1.0",
+        preprocessing_id="insightface_112",
+        embedding_dim=512,
+        ciphertext=b"enc",
+        nonce=b"nonce",
+        sample_sha256="f" * 64,
+        quality_json="{}",
+        accepted=True,
+    )
+    db_session.add_all([person, student, emb])
+    db_session.commit()
+
+    mock_storage = MagicMock()
+    mock_storage.is_configured = True
+    mock_storage.delete_media.return_value = False  # Cloud provider could not delete or 404
+
+    result = de_enroll_student_biometrics(
+        db=db_session,
+        student_id="s-de2",
+        operator_id="dean-smith",
+        storage_service=mock_storage,
+    )
+
+    # Must fail closed: media_purged must NEVER be true, status must be DELETION_INCOMPLETE
+    assert result["media_purged"] is False
+    assert result["status"] == "DELETION_INCOMPLETE"
+    assert result["signed_certificate"]["qualification"] == "DELETION_INCOMPLETE"
+    assert result["media_deletion_details"]["students/s-de2"] == "FAILED_OR_NOT_FOUND"
+
+
+def test_de_enroll_storage_unconfigured_fails_closed(db_session: Session) -> None:
+    person = Person(person_id="p-de3", employee_id="EMP-DE3", full_name="Eve Unconf", is_active=True)
+    student = Student(student_id="s-de3", student_number="STU-DE3", full_name="Eve Unconf", person_id="p-de3", is_active=True)
+    db_session.add_all([person, student])
+    db_session.commit()
+
+    mock_storage = MagicMock()
+    mock_storage.is_configured = False
+
+    result = de_enroll_student_biometrics(
+        db=db_session,
+        student_id="s-de3",
+        operator_id="dean-smith",
+        storage_service=mock_storage,
+    )
+
+    assert result["media_purged"] is False
+    assert result["status"] == "DELETION_INCOMPLETE"
+    assert "STORAGE_NOT_CONFIGURED" in result["media_deletion_details"]["students/s-de3"]
+
+
+def test_de_enroll_storage_partial_success_fails_closed(db_session: Session) -> None:
+    person = Person(person_id="p-de4", employee_id="EMP-DE4", full_name="Frank Partial", is_active=True)
+    student = Student(student_id="s-de4", student_number="STU-DE4", full_name="Frank Partial", person_id="p-de4", is_active=True)
+    db_session.add_all([person, student])
+    db_session.commit()
+
+    mock_storage = MagicMock()
+    mock_storage.is_configured = True
+    # First call succeeds, second call fails
+    mock_storage.delete_media.side_effect = [True, False]
+
+    result = de_enroll_student_biometrics(
+        db=db_session,
+        student_id="s-de4",
+        operator_id="dean-smith",
+        storage_service=mock_storage,
+    )
+
+    assert result["media_purged"] is False
+    assert result["status"] == "DELETION_INCOMPLETE"
+    assert result["signed_certificate"]["qualification"] == "DELETION_INCOMPLETE"
 
 
 def test_admin_retention_purge_api() -> None:

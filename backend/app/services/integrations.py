@@ -17,6 +17,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.auth import _b64url_decode, _b64url_encode
+from app.core.config import get_settings
 from app.db.entities import (
     AttendanceEvent,
     AttendanceSession,
@@ -260,7 +262,7 @@ class SmtpEmailProvider(BaseNotificationProvider):
         use_tls: bool = True,
         sender_email: str = "noreply@campus.edu",
         timeout: float = 10.0,
-        mock_fallback: bool = True,
+        mock_fallback: bool | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -269,11 +271,26 @@ class SmtpEmailProvider(BaseNotificationProvider):
         self.use_tls = use_tls
         self.sender_email = sender_email
         self.timeout = timeout
-        self.mock_fallback = mock_fallback
+        settings = get_settings()
+        if mock_fallback is None:
+            self.mock_fallback = not settings.is_production
+        else:
+            self.mock_fallback = False if settings.is_production else mock_fallback
 
     def send(self, message: NotificationMessage) -> dict[str, Any]:
         now_ts = int(time.time())
+        settings = get_settings()
         if not self.host or self.host == "mock" or (not self.username and self.mock_fallback):
+            if settings.is_production:
+                logger.error("SMTP provider is unconfigured in production environment; mock delivery is forbidden.")
+                return {
+                    "status": "FAILED",
+                    "error": "SMTP provider is unconfigured; mock delivery is forbidden in production.",
+                    "recipient": message.recipient,
+                    "channel": "email",
+                    "timestamp": now_ts,
+                    "provider": "smtp",
+                }
             logger.info("SMTP host not configured or mock selected; operating in mock mode for %s", message.recipient)
             return {
                 "status": "SENT_MOCK",
@@ -311,7 +328,7 @@ class SmtpEmailProvider(BaseNotificationProvider):
                 logger.warning("SMTP send attempt %d failed for %s: %s", attempt, message.recipient, exc)
                 time.sleep(0.1 * attempt)
 
-        if self.mock_fallback:
+        if self.mock_fallback and not settings.is_production:
             return {
                 "status": "FAILED_FALLBACK_MOCK",
                 "recipient": message.recipient,
@@ -320,7 +337,14 @@ class SmtpEmailProvider(BaseNotificationProvider):
                 "timestamp": now_ts,
                 "provider": "smtp",
             }
-        raise RuntimeError(f"SMTP send failed after 3 attempts: {last_error}")
+        return {
+            "status": "FAILED",
+            "recipient": message.recipient,
+            "channel": "email",
+            "error": last_error,
+            "timestamp": now_ts,
+            "provider": "smtp",
+        }
 
 
 class SmsNotificationProvider(BaseNotificationProvider):
@@ -330,17 +354,32 @@ class SmsNotificationProvider(BaseNotificationProvider):
         auth_token: str = "",
         sender_id: str = "FRS",
         timeout: float = 10.0,
-        mock_fallback: bool = True,
+        mock_fallback: bool | None = None,
     ) -> None:
         self.api_url = api_url
         self.auth_token = auth_token
         self.sender_id = sender_id
         self.timeout = timeout
-        self.mock_fallback = mock_fallback
+        settings = get_settings()
+        if mock_fallback is None:
+            self.mock_fallback = not settings.is_production
+        else:
+            self.mock_fallback = False if settings.is_production else mock_fallback
 
     def send(self, message: NotificationMessage) -> dict[str, Any]:
         now_ts = int(time.time())
+        settings = get_settings()
         if not self.api_url or self.api_url == "mock" or (not self.auth_token and self.mock_fallback):
+            if settings.is_production:
+                logger.error("SMS gateway is unconfigured in production environment; mock delivery is forbidden.")
+                return {
+                    "status": "FAILED",
+                    "error": "SMS gateway is unconfigured; mock delivery is forbidden in production.",
+                    "recipient": message.recipient,
+                    "channel": "sms",
+                    "timestamp": now_ts,
+                    "provider": "sms_gateway",
+                }
             logger.info("SMS gateway not configured or mock selected; operating in mock mode for %s", message.recipient)
             return {
                 "status": "SENT_MOCK",
@@ -388,7 +427,7 @@ class SmsNotificationProvider(BaseNotificationProvider):
                 logger.warning("SMS gateway attempt %d failed for %s: %s", attempt, message.recipient, exc)
                 time.sleep(0.1 * attempt)
 
-        if self.mock_fallback:
+        if self.mock_fallback and not settings.is_production:
             return {
                 "status": "FAILED_FALLBACK_MOCK",
                 "recipient": message.recipient,
@@ -397,7 +436,14 @@ class SmsNotificationProvider(BaseNotificationProvider):
                 "timestamp": now_ts,
                 "provider": "sms_gateway",
             }
-        raise RuntimeError(f"SMS send failed after 3 attempts: {last_error}")
+        return {
+            "status": "FAILED",
+            "recipient": message.recipient,
+            "channel": "sms",
+            "error": last_error,
+            "timestamp": now_ts,
+            "provider": "sms_gateway",
+        }
 
 
 class NotificationManager:
@@ -433,6 +479,9 @@ class NotificationManager:
 
     def dispatch_batch(self, absentees: list[dict[str, str]], channel: str = "email") -> dict[str, Any]:
         results = []
+        sent_count = 0
+        mocked_count = 0
+        failed_count = 0
         for a in absentees:
             res = self.send_absentee_alert(
                 student_name=a.get("full_name", "Student"),
@@ -442,11 +491,28 @@ class NotificationManager:
                 contact_address=a.get("email") if channel == "email" else a.get("phone"),
             )
             results.append(res)
+            st = res.get("status")
+            if st == "SENT":
+                sent_count += 1
+            elif st in ("SENT_MOCK", "FAILED_FALLBACK_MOCK"):
+                mocked_count += 1
+            else:
+                failed_count += 1
+
         return {
             "total_alerts": len(results),
+            "sent_count": sent_count,
+            "mocked_count": mocked_count,
+            "failed_count": failed_count,
+            "is_mock": bool(mocked_count > 0 and sent_count == 0),
             "channel": channel,
             "alerts": results,
         }
+
+
+class SftpSecurityError(RuntimeError):
+    """Raised when remote SFTP server identity cannot be verified or host key fails check."""
+    pass
 
 
 class SftpExportService:
@@ -476,10 +542,15 @@ class SftpExportService:
         sftp_username: str = "",
         sftp_password: str = "",
         sftp_key_path: str = "",
+        sftp_host_key_fingerprint: str = "",
+        sftp_known_hosts_file: str = "",
         remote_path: str = "/uploads/attendance",
     ) -> dict[str, Any]:
         package = cls.prepare_export_package(db, session_id)
-        is_live = bool(sftp_host and sftp_host != "mock" and sftp_username)
+        settings = get_settings()
+        host = sftp_host or settings.sftp_host
+        user = sftp_username or settings.sftp_username
+        is_live = bool(host and host != "mock" and user)
         if not is_live:
             return {
                 "status": "STAGED_MOCK",
@@ -488,28 +559,62 @@ class SftpExportService:
                 "remote_path": f"{remote_path.rstrip('/')}/{package['filename']}",
                 "byte_count": package["byte_count"],
                 "sha256_checksum": package["sha256_checksum"],
-                "sftp_host": sftp_host or "mock-sftp-host",
+                "sftp_host": host or "mock-sftp-host",
                 "dispatched_at": int(time.time()),
             }
 
         dest_file = f"{remote_path.rstrip('/')}/{package['filename']}"
         now_ts = int(time.time())
+        transport = None
+        sftp = None
 
-        # Attempt live SFTP connection via paramiko if installed
+        # Attempt live SFTP connection via paramiko with strict host key verification
         try:
             import paramiko  # type: ignore
-            transport = paramiko.Transport((sftp_host, sftp_port))
-            if sftp_key_path:
-                key = paramiko.RSAKey.from_private_key_file(sftp_key_path)
-                transport.connect(username=sftp_username, pkey=key)
+
+            transport = paramiko.Transport((host, sftp_port))
+            transport.start_client(timeout=10.0)
+
+            remote_key = transport.get_remote_server_key()
+            if remote_key is None:
+                raise SftpSecurityError(f"SFTP remote server {host} presented no host key.")
+
+            server_fingerprint = hashlib.sha256(remote_key.asbytes()).hexdigest()
+            expected_fp = sftp_host_key_fingerprint or settings.sftp_host_key_fingerprint
+            known_hosts_path = sftp_known_hosts_file or settings.sftp_known_hosts_file
+
+            if expected_fp:
+                clean_exp = expected_fp.lower().replace(":", "").replace("sha256=", "").strip()
+                clean_act = server_fingerprint.lower().replace(":", "").replace("sha256=", "").strip()
+                if clean_exp != clean_act:
+                    raise SftpSecurityError(
+                        f"SFTP host key fingerprint mismatch for {host}! "
+                        f"Expected {expected_fp}, remote presented {server_fingerprint}. Transfer aborted."
+                    )
+            elif known_hosts_path:
+                host_keys = paramiko.util.load_host_keys(known_hosts_path)
+                if host not in host_keys:
+                    raise SftpSecurityError(f"SFTP host {host} not in known_hosts file {known_hosts_path}. Transfer aborted.")
+                if remote_key != host_keys[host].get(remote_key.get_name()):
+                    raise SftpSecurityError(f"SFTP host key for {host} does not match known_hosts entry! Transfer aborted.")
+            elif settings.is_production:
+                raise SftpSecurityError("Production requires SFTP host key pinning via sftp_host_key_fingerprint or sftp_known_hosts_file.")
+
+            # Authenticate client credentials
+            key_path = sftp_key_path or settings.sftp_key_path
+            password = sftp_password or settings.sftp_password
+            if key_path:
+                key = paramiko.RSAKey.from_private_key_file(key_path)
+                transport.auth_publickey(username=user, key=key)
             else:
-                transport.connect(username=sftp_username, password=sftp_password)
+                transport.auth_password(username=user, password=password)
+
+            if not transport.is_authenticated():
+                raise PermissionError(f"SFTP authentication failed for user {user} on {host}")
 
             sftp = paramiko.SFTPClient.from_transport(transport)
             with io.BytesIO(package["csv_content"].encode("utf-8")) as fl:
                 sftp.putfo(fl, dest_file)
-            sftp.close()
-            transport.close()
 
             return {
                 "status": "DISPATCHED",
@@ -518,7 +623,8 @@ class SftpExportService:
                 "remote_path": dest_file,
                 "byte_count": package["byte_count"],
                 "sha256_checksum": package["sha256_checksum"],
-                "sftp_host": sftp_host,
+                "sftp_host": host,
+                "server_host_key_fingerprint": server_fingerprint,
                 "dispatched_at": now_ts,
             }
         except ImportError:
@@ -530,9 +636,19 @@ class SftpExportService:
                 "remote_path": dest_file,
                 "byte_count": package["byte_count"],
                 "sha256_checksum": package["sha256_checksum"],
-                "sftp_host": sftp_host,
+                "sftp_host": host,
                 "dispatched_at": now_ts,
                 "note": "paramiko_not_installed",
+            }
+        except SftpSecurityError as sec_err:
+            logger.error("SFTP host key verification rejected for %s: %s", host, sec_err)
+            return {
+                "status": "REJECTED_HOST_KEY_MISMATCH",
+                "session_id": session_id,
+                "filename": package["filename"],
+                "error": str(sec_err),
+                "sftp_host": host,
+                "dispatched_at": now_ts,
             }
         except Exception as exc:
             logger.error("SFTP export failed for session %s: %s", session_id, exc)
@@ -540,10 +656,21 @@ class SftpExportService:
                 "status": "FAILED",
                 "session_id": session_id,
                 "filename": package["filename"],
-                "error": str(exc),
-                "sftp_host": sftp_host,
+                "error": "SFTP transfer failed. Check endpoint, credentials, or network.",
+                "sftp_host": host,
                 "dispatched_at": now_ts,
             }
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
 
 
 class LtiService:
@@ -553,8 +680,161 @@ class LtiService:
     LTI_VERSION = "1.3.0"
 
     @classmethod
+    def validate_launch_id_token(
+        cls,
+        id_token: str,
+        signing_key_or_secret: str | bytes | None = None,
+        expected_issuer: str | None = None,
+        expected_client_id: str | None = None,
+        expected_deployment_id: str | None = None,
+        expected_nonce: str | None = None,
+        leeway_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Cryptographically verify and parse a 1EdTech LTI 1.3 / OIDC signed ID token (JWT)."""
+        if not id_token or not isinstance(id_token, str):
+            raise ValueError("Missing or invalid LTI ID token.")
+
+        parts = id_token.strip().split(".")
+        if len(parts) != 3:
+            raise ValueError("Malformed LTI ID token: expected 3 dot-separated JWT segments.")
+
+        try:
+            header = json.loads(_b64url_decode(parts[0]).decode("utf-8"))
+            payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+            signature = _b64url_decode(parts[2])
+        except Exception as exc:
+            raise ValueError(f"Failed to decode LTI token segments: {exc}") from exc
+
+        alg = header.get("alg", "HS256")
+        signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
+
+        # Signature verification
+        key = signing_key_or_secret or (get_settings().effective_jwt_secret if get_settings() else "")
+        if not key:
+            raise ValueError("LTI token verification refused: no trusted key or secret configured.")
+
+        if alg == "HS256":
+            key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+            expected_sig = hmac.new(key_bytes, signing_input, hashlib.sha256).digest()
+            if not hmac.compare_digest(expected_sig, signature):
+                raise ValueError("Invalid LTI token HMAC signature.")
+        elif alg == "RS256":
+            try:
+                from cryptography.hazmat.primitives import hashes
+                from cryptography.hazmat.primitives.asymmetric import padding
+                from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+                pem_key = key.encode("utf-8") if isinstance(key, str) else key
+                pub_key = load_pem_public_key(pem_key)
+                pub_key.verify(signature, signing_input, padding.PKCS1v15(), hashes.SHA256())
+            except Exception as exc:
+                raise ValueError(f"Invalid LTI token RSA signature: {exc}") from exc
+        else:
+            raise ValueError(f"Unsupported LTI signing algorithm: {alg}")
+
+        # Temporal bounds verification
+        now = int(time.time())
+        exp = payload.get("exp")
+        if exp is None:
+            raise ValueError("LTI token missing mandatory expiration ('exp') claim.")
+        if exp + leeway_seconds < now:
+            raise ValueError(f"LTI token has expired (exp={exp}, now={now}).")
+
+        iat = payload.get("iat")
+        if iat is not None and (iat - leeway_seconds) > now:
+            raise ValueError("LTI token was issued in the future.")
+
+        # Protocol claims verification
+        if expected_issuer:
+            iss = payload.get("iss")
+            if iss != expected_issuer:
+                raise ValueError(f"LTI token issuer mismatch: expected '{expected_issuer}', got '{iss}'.")
+
+        aud = payload.get("aud")
+        if expected_client_id:
+            audiences = [aud] if isinstance(aud, str) else (aud or [])
+            if expected_client_id not in audiences:
+                raise ValueError(f"LTI token audience does not match expected client_id: '{expected_client_id}'.")
+
+        sub = payload.get("sub")
+        if not sub:
+            raise ValueError("LTI token missing mandatory subject ('sub') claim.")
+
+        if expected_nonce:
+            token_nonce = payload.get("nonce")
+            if token_nonce != expected_nonce:
+                raise ValueError("LTI token nonce mismatch; possible replay attempt.")
+
+        deployment_id = payload.get("https://purl.imsglobal.org/spec/lti/claim/deployment_id")
+        if expected_deployment_id and deployment_id != expected_deployment_id:
+            raise ValueError(f"LTI token deployment_id mismatch: expected '{expected_deployment_id}', got '{deployment_id}'.")
+
+        if payload.get("https://purl.imsglobal.org/spec/lti/claim/message_type") != cls.LTI_MESSAGE_TYPE_LAUNCH:
+            raise ValueError("Invalid LTI message_type; expected LtiResourceLinkRequest.")
+
+        if payload.get("https://purl.imsglobal.org/spec/lti/claim/version") != cls.LTI_VERSION:
+            raise ValueError(f"Unsupported LTI version; expected {cls.LTI_VERSION}.")
+
+        context = payload.get("https://purl.imsglobal.org/spec/lti/claim/context", {})
+        resource_link = payload.get("https://purl.imsglobal.org/spec/lti/claim/resource_link", {})
+        roles = payload.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
+
+        return {
+            "is_valid": True,
+            "cryptographically_verified": True,
+            "user_id": sub,
+            "issuer": payload.get("iss"),
+            "audience": aud,
+            "deployment_id": deployment_id,
+            "roles": roles,
+            "course_id": context.get("id"),
+            "course_title": context.get("title"),
+            "resource_link_id": resource_link.get("id"),
+            "verified_at": now,
+        }
+
+    @classmethod
+    def create_launch_token(
+        cls,
+        sub: str,
+        secret: str,
+        client_id: str = "canvas-client-123",
+        issuer: str = "https://canvas.instructure.com",
+        deployment_id: str = "dep-1",
+        nonce: str = "nonce-xyz",
+        expires_delta_seconds: int = 3600,
+        extra_claims: dict[str, Any] | None = None,
+    ) -> str:
+        """Create a signed HS256 LTI 1.3 launch token for testing and simulation."""
+        now = int(time.time())
+        header = {"alg": "HS256", "typ": "JWT"}
+        payload = {
+            "iss": issuer,
+            "aud": client_id,
+            "sub": sub,
+            "exp": now + expires_delta_seconds,
+            "iat": now,
+            "nonce": nonce,
+            "https://purl.imsglobal.org/spec/lti/claim/message_type": cls.LTI_MESSAGE_TYPE_LAUNCH,
+            "https://purl.imsglobal.org/spec/lti/claim/version": cls.LTI_VERSION,
+            "https://purl.imsglobal.org/spec/lti/claim/deployment_id": deployment_id,
+            "https://purl.imsglobal.org/spec/lti/claim/context": {"id": "course-101", "title": "Intro to AI"},
+            "https://purl.imsglobal.org/spec/lti/claim/resource_link": {"id": "link-1"},
+            "https://purl.imsglobal.org/spec/lti/claim/roles": [
+                "http://purl.imsglobal.org/vocab/lis/v2/membership#Learner"
+            ],
+        }
+        if extra_claims:
+            payload.update(extra_claims)
+        hdr_b64 = _b64url_encode(json.dumps(header).encode("utf-8"))
+        payload_b64 = _b64url_encode(json.dumps(payload).encode("utf-8"))
+        signing_input = f"{hdr_b64}.{payload_b64}".encode("ascii")
+        sig = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
+        return f"{hdr_b64}.{payload_b64}.{_b64url_encode(sig)}"
+
+    @classmethod
     def validate_launch_claims(cls, claims: dict[str, Any], expected_client_id: str | None = None) -> dict[str, Any]:
-        """Validate 1EdTech LTI 1.3 core launch claims."""
+        """Validate 1EdTech LTI 1.3 claim dictionary structure (non-cryptographic shape check)."""
         if claims.get("https://purl.imsglobal.org/spec/lti/claim/message_type") != cls.LTI_MESSAGE_TYPE_LAUNCH:
             raise ValueError("Invalid LTI message_type; expected LtiResourceLinkRequest.")
         if claims.get("https://purl.imsglobal.org/spec/lti/claim/version") != cls.LTI_VERSION:
@@ -576,6 +856,8 @@ class LtiService:
 
         return {
             "is_valid": True,
+            "cryptographically_verified": False,
+            "warning": "UNVERIFIED_CLAIM_DICTIONARY_ONLY",
             "user_id": sub,
             "roles": roles,
             "course_id": context.get("id"),

@@ -125,20 +125,48 @@ def de_enroll_student_biometrics(
 
         person.is_active = False
 
+    target_ids = [f"students/{student_id}"]
+    if student.person_id:
+        target_ids.append(f"faces/{student.person_id}")
+
+    media_outcomes: dict[str, str] = {}
     media_purged = False
-    if storage_service is not None and getattr(storage_service, "is_configured", False):
-        try:
-            target_ids = [f"students/{student_id}"]
-            if student.person_id:
-                target_ids.append(f"faces/{student.person_id}")
-            for mid in target_ids:
-                storage_service.delete_media(mid)
+    storage_configured = bool(storage_service is not None and getattr(storage_service, "is_configured", False))
+
+    if storage_service is not None and not storage_configured:
+        for mid in target_ids:
+            media_outcomes[mid] = "STORAGE_NOT_CONFIGURED"
+        status_state = "DELETION_INCOMPLETE"
+        qualification = "STORAGE_UNCONFIGURED_DELETION_INCOMPLETE"
+    elif storage_configured:
+        for mid in target_ids:
+            try:
+                res = storage_service.delete_media(mid)
+                if res is True:
+                    media_outcomes[mid] = "CONFIRMED_DELETED"
+                else:
+                    media_outcomes[mid] = "FAILED_OR_NOT_FOUND"
+            except Exception as exc:
+                logger.warning("Error deleting media %s for student %s: %s", mid, student_id, exc)
+                media_outcomes[mid] = f"ERROR: {exc}"
+
+        all_confirmed = bool(target_ids and all(s == "CONFIRMED_DELETED" for s in media_outcomes.values()))
+        if all_confirmed:
             media_purged = True
-        except Exception:
-            logger.warning("Could not delete cloud media for student %s during de-enrollment", student_id)
+            status_state = "DE_ENROLLED"
+            qualification = "FULL_DELETION_VERIFIED"
+        else:
+            media_purged = False
+            status_state = "DELETION_INCOMPLETE"
+            qualification = "DELETION_INCOMPLETE"
+    else:
+        for mid in target_ids:
+            media_outcomes[mid] = "NO_STORAGE_SERVICE_PROVIDED"
+        status_state = "DE_ENROLLED"
+        qualification = "DATABASE_ONLY_UNVERIFIED_MEDIA"
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    raw_cert_string = f"{student_id}:{student.person_id}:{now_iso}:{deleted_embeddings_count}:{operator_id}"
+    raw_cert_string = f"{student_id}:{student.person_id}:{now_iso}:{deleted_embeddings_count}:{operator_id}:{qualification}"
     cert_hash = hashlib.sha256(raw_cert_string.encode("utf-8")).hexdigest()
 
     secret = signing_key or get_settings().effective_jwt_secret
@@ -152,8 +180,8 @@ def de_enroll_student_biometrics(
         actor_type="ADMINISTRATOR",
         actor_id=operator_id,
         action="BIOMETRIC_DE_ENROLLMENT",
-        decision_state="EXECUTED",
-        reason_codes_json=json.dumps(["DE_ENROLLMENT_REQUESTED"]),
+        decision_state="EXECUTED" if status_state == "DE_ENROLLED" else "PARTIALLY_EXECUTED",
+        reason_codes_json=json.dumps(["DE_ENROLLMENT_REQUESTED", qualification]),
         evidence_json=json.dumps({
             "student_id": student_id,
             "person_id": student.person_id,
@@ -161,6 +189,8 @@ def de_enroll_student_biometrics(
             "deletion_certificate": cert_hash,
             "signature": cert_signature,
             "media_purged": media_purged,
+            "qualification": qualification,
+            "media_deletion_details": media_outcomes,
             "timestamp": now_iso,
         }),
     )
@@ -168,12 +198,12 @@ def de_enroll_student_biometrics(
     db.commit()
 
     logger.info(
-        "Student %s biometrics de-enrolled by %s (deleted %d embeddings, cert=%s, media_purged=%s)",
-        student_id, operator_id, deleted_embeddings_count, cert_hash, media_purged,
+        "Student %s biometrics de-enrolled by %s (deleted %d embeddings, status=%s, cert=%s, media_purged=%s, qual=%s)",
+        student_id, operator_id, deleted_embeddings_count, status_state, cert_hash, media_purged, qualification,
     )
 
     return {
-        "status": "DE_ENROLLED",
+        "status": status_state,
         "student_id": student_id,
         "person_id": student.person_id,
         "deleted_embeddings_count": deleted_embeddings_count,
@@ -185,8 +215,10 @@ def de_enroll_student_biometrics(
             "signature": cert_signature,
             "algorithm": "HMAC-SHA256",
             "issuer": "FRS-Biometric-Privacy-Lifecycle",
+            "qualification": qualification,
             "signed_at": now_iso,
         },
         "media_purged": media_purged,
+        "media_deletion_details": media_outcomes,
         "timestamp": now_iso,
     }

@@ -23,7 +23,7 @@ Unlike naive face recognition setups that accept single webcam snapshots or trus
 
 > [!WARNING]
 > **Project Status: Alpha / Technical Evaluation Only — Not Approved for Unsupervised Live Attendance.**
-> Automated test suites (135 passed / 6 skipped on hosted CI due to unbundled binary weights; 141/141 passed locally in provisioned environments with Buffalo_L models, 29/29 Flutter tests, clean Next.js 16 build across 11 static routes) verify functional and integration contracts. However, real-world deployment requires site-specific threshold calibration, legal notice/consent execution, and commercial licensing clearance for model weights (Buffalo_L is released under DeepInsight's non-commercial research license).
+> Automated test suites (169 passed / 6 skipped on hosted CI due to unbundled binary weights; 175 total backend tests, 40/40 Flutter tests, clean Next.js 16 build across 11 static routes with hardened CSP) verify functional, cryptographic, and integration contracts. Forensic security audit remediations (FRS-01 through FRS-10) enforce truthful biometric deletion certificates, cryptographic LTI 1.3 OIDC token verification, pinned SFTP host keys, production mock-fallback prevention, and server-locked retention purge policies. However, real-world deployment requires site-specific threshold calibration, legal notice/consent execution, and commercial licensing clearance for model weights (Buffalo_L is released under DeepInsight's non-commercial research license).
 
 ---
 
