@@ -227,7 +227,7 @@ def test_vision_engine_rejects_placeholder_publisher(tmp_path: Path) -> None:
         VisionEngine(settings)
 
 
-def test_vision_engine_rejects_noncommercial_weights_in_production_without_attestation(tmp_path: Path) -> None:
+def test_vision_engine_rejects_restrictive_weights_even_with_attestation(tmp_path: Path) -> None:
     pack_dir = tmp_path / "models" / "buffalo_l"
     pack_dir.mkdir(parents=True)
     scrfd_bytes = b"dummy-scrfd-weights"
@@ -261,9 +261,9 @@ def test_vision_engine_rejects_noncommercial_weights_in_production_without_attes
     settings = Settings(
         _env_file=None,
         env="production",
-        model_license_attested=False,
+        model_license_attested=True,
         model_root=str(tmp_path),
         model_pack="buffalo_l",
     )
-    with pytest.raises(VisionError, match="Production startup blocked:.*weights have non-commercial terms"):
+    with pytest.raises(VisionError, match="Production startup blocked:.*restrictive terms.*cannot override this check"):
         VisionEngine(settings)
