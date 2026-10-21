@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -19,7 +22,7 @@ from app.api.dependencies import (
 )
 from app.core.config import get_settings
 from app.database import get_db
-from app.db.entities import AttendanceSession, ClassGroup, LtiNonceUse
+from app.db.entities import AttendanceSession, ClassGroup, LtiLaunchNonce, LtiNonceUse
 from app.services.integrations import (
     AbsenteeAlertService,
     LtiService,
@@ -155,6 +158,42 @@ def trigger_sftp_attendance_export(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.post("/lti/launch/nonce", status_code=201)
+def issue_lti_launch_nonce(
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Issue a short-lived server nonce to include in an LMS OIDC authorization request."""
+    settings = get_settings()
+    if settings.is_production and not (
+        settings.lti_client_id.strip()
+        and settings.lti_issuer.strip()
+        and settings.lti_deployment_id.strip()
+        and settings.lti_platform_public_key_pem.strip()
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Production LTI issuer, client ID, deployment ID and trusted public key must be configured.",
+        )
+
+    now = datetime.now(timezone.utc)
+    nonce = secrets.token_urlsafe(32)
+    challenge = LtiLaunchNonce(
+        nonce=nonce,
+        issued_by=actor.email or actor.sub,
+        issued_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    db.add(challenge)
+    db.commit()
+    return {
+        "nonce": nonce,
+        "issued_at": now.isoformat(),
+        "expires_at": challenge.expires_at.isoformat(),
+        "expires_in_seconds": 300,
+    }
+
+
 @router.post("/lti/launch/validate")
 def validate_lti_launch(
     payload: LtiLaunchValidationRequest,
@@ -183,6 +222,20 @@ def validate_lti_launch(
                 raise HTTPException(status_code=503, detail="Trusted LMS platform verification key is not configured.")
             if not payload.nonce:
                 raise HTTPException(status_code=422, detail="Production LTI launch requires a server-initiated nonce.")
+            nonce_challenge = db.execute(
+                select(LtiLaunchNonce)
+                .where(
+                    LtiLaunchNonce.nonce == payload.nonce,
+                    LtiLaunchNonce.consumed_at.is_(None),
+                    LtiLaunchNonce.expires_at > datetime.now(timezone.utc),
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if nonce_challenge is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="LTI nonce was not issued by this server, has expired, or was already consumed.",
+                )
             if not expected_client_id or not expected_issuer or not expected_deployment:
                 raise HTTPException(status_code=503, detail="Production LTI issuer, client ID, and deployment ID must be configured.")
             secret_or_key = settings.lti_platform_public_key_pem
@@ -204,6 +257,8 @@ def validate_lti_launch(
             nonce = verified.get("nonce")
             if not isinstance(nonce, str) or not nonce:
                 raise HTTPException(status_code=422, detail="Verified LTI ID token does not contain a nonce.")
+            # Consume the server-issued challenge and record token replay evidence atomically.
+            nonce_challenge.consumed_at = datetime.now(timezone.utc)
             db.add(LtiNonceUse(
                 nonce=nonce,
                 token_sha256=hashlib.sha256(payload.id_token.encode("utf-8")).hexdigest(),
