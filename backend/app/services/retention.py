@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -184,18 +183,46 @@ def de_enroll_student_biometrics(
     cert_hash = hashlib.sha256(canonical_payload).hexdigest()
 
     settings = get_settings()
-    secret = signing_key or settings.deletion_certificate_key
+    # Production signatures must always come from the private key provisioned at startup.
+    # Internal callers cannot override the institutional signing identity.
+    secret = settings.deletion_certificate_key if settings.is_production else (
+        signing_key or settings.deletion_certificate_key
+    )
     if not secret and not settings.is_production:
-        # Stable, dedicated development-only material keeps local test certificates verifiable.
-        # Production startup separately requires an institution-managed key.
+        # Stable development-only seed; never accepted as a production private key.
         secret = "frs-development-only-deletion-certificate-key-not-for-production"
     if not secret:
         raise RuntimeError("A dedicated biometric deletion-certificate signing key must be configured.")
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        PublicFormat,
+        load_pem_private_key,
+    )
+
     secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
-    cert_signature = hmac.new(secret_bytes, canonical_payload, hashlib.sha256).hexdigest()
+    if settings.is_production:
+        try:
+            private_key = load_pem_private_key(secret_bytes, password=None)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Production deletion-certificate key is not a valid PEM private key.") from exc
+        if not isinstance(private_key, Ed25519PrivateKey):
+            raise RuntimeError("Production deletion-certificate key must be Ed25519.")
+    else:
+        # Deterministic development keys preserve repeatable local tests while using the
+        # same public-key signature format as production. This seed is never production-safe.
+        private_key = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(secret_bytes).digest())
+
+    public_key_pem = private_key.public_key().public_bytes(
+        Encoding.PEM,
+        PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+    public_key_sha256 = hashlib.sha256(public_key_pem.encode("ascii")).hexdigest()
+    cert_signature = private_key.sign(canonical_payload).hex()
     certificate_assurance = (
-        "SHARED_SECRET_HMAC_AUTHENTICATION_ONLY; NOT_AN_ASYMMETRIC_SIGNATURE; "
-        "DOES_NOT_INDEPENDENTLY_PROVE_REMOTE_MEDIA_ERASURE"
+        "ED25519_SIGNATURE_OVER_CANONICAL_PAYLOAD; VERIFY_WITH_AN_INSTITUTION-TRUSTED_PUBLIC_KEY; "
+        "SIGNATURE_DOES_NOT_INDEPENDENTLY_PROVE_REMOTE_MEDIA_ERASURE"
     )
 
     audit_entry = AuditEvent(
@@ -213,8 +240,10 @@ def de_enroll_student_biometrics(
             "deleted_embeddings": deleted_embeddings_count,
             "deletion_certificate": cert_hash,
             "signature": cert_signature,
-            "signature_algorithm": "HMAC-SHA256",
+            "signature_algorithm": "Ed25519",
+            "signature_public_key_sha256": public_key_sha256,
             "certificate_assurance": certificate_assurance,
+            "signature_public_key_pem": public_key_pem,
             "certificate_payload": certificate_payload,
             "media_purged": media_purged,
             "qualification": qualification,
@@ -244,9 +273,10 @@ def de_enroll_student_biometrics(
             "digest": cert_hash,
             "payload": certificate_payload,
             "signature": cert_signature,
-            "authentication_tag": cert_signature,
-            "algorithm": "HMAC-SHA256",
+            "algorithm": "Ed25519",
             "assurance": certificate_assurance,
+            "public_key_pem": public_key_pem,
+            "public_key_sha256": public_key_sha256,
             "issuer": "FRS-Biometric-Privacy-Lifecycle",
             "qualification": qualification,
             "signed_at": now_iso,
