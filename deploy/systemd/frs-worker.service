@@ -1,0 +1,26 @@
+[Unit]
+Description=FRS Asynchronous Capture Batch Worker Daemon
+Documentation=https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=frs
+Group=frs
+WorkingDirectory=/opt/frs/backend
+EnvironmentFile=/etc/frs/backend.env
+ExecStart=/opt/frs/backend/.venv/bin/python -m app.worker
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=30s
+KillMode=mixed
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/frs/data /tmp
+
+[Install]
+WantedBy=multi-user.target

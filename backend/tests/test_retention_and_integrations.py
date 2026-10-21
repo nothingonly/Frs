@@ -70,16 +70,39 @@ def test_purge_expired_capture_payloads() -> None:
         updated_at=now,
         payload_expires_at=now + timedelta(days=1),
     )
-    session.add_all([old_job, fresh_job])
+    # 3. Recent job (< 30 days old) but payload_expires_at has expired (> 24 hours ago)
+    expired_payload_job = CaptureBatchJob(
+        batch_id="batch-expired-payload",
+        attendance_session_id="session-1",
+        class_group_id="cg-1",
+        device_actor_id="actor-1",
+        client_device_id="kiosk-1",
+        idempotency_key="idemp-expired-payload",
+        request_sha256="c" * 64,
+        frame_count=3,
+        punch_type="CHECK_IN",
+        status="DEAD_LETTER",
+        encrypted_payload=b"encrypted_burst_bytes",
+        payload_nonce=b"123456789012",
+        created_at=now - timedelta(hours=36),
+        updated_at=now - timedelta(hours=36),
+        payload_expires_at=now - timedelta(hours=12),
+    )
+    session.add_all([old_job, fresh_job, expired_payload_job])
     session.commit()
 
     purged = purge_expired_capture_payloads(session, retention_days=30)
-    assert purged == 1
+    assert purged == 2
 
     reloaded_old = session.get(CaptureBatchJob, "batch-old")
     assert reloaded_old.encrypted_payload is None
     assert reloaded_old.payload_nonce is None
     assert "retention_purged" in reloaded_old.error_json
+
+    reloaded_expired_payload = session.get(CaptureBatchJob, "batch-expired-payload")
+    assert reloaded_expired_payload.encrypted_payload is None
+    assert reloaded_expired_payload.payload_nonce is None
+    assert "retention_purged" in reloaded_expired_payload.error_json
 
     reloaded_fresh = session.get(CaptureBatchJob, "batch-fresh")
     assert reloaded_fresh.encrypted_payload is not None

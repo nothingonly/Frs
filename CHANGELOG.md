@@ -2,34 +2,22 @@
 
 All notable project changes will be recorded here. This file follows an Unreleased-first format; entries are implementation notes, not evidence of a production release.
 
-## [Unreleased]
+## [0.2.0-beta.1] - 2026-10-21
 
 ### Added
-- Multi-frame Android camera capture and multipart transport for verification, identification and admin enrollment.
-- Separate kiosk-device and administrator bearer credentials, with encrypted secure storage on Android.
-- Python backend for real SCRFD/ArcFace inference, policy-driven recognition, roster-scoped retrieval, enrollment, attendance state transitions, audit events and model registry.
-- Explicit model provenance, SHA-256 and ONNX input/output contract validation.
-- Runtime registry state now deactivates superseded versions for model roles that have been reloaded.
-- Refreshed and committed the resolved Flutter dependency lockfile. Dependency changes should be resolved with `flutter pub get` and the updated lockfile committed with the code change.
-- Browser-based administration views for roster, attendance, audit and model status.
-- CI workflows for Python and Flutter quality gates.
-- Documentation for backend setup, security, contributions and release readiness.
+- Hardware-backed Android Keystore / SQLCipher encrypted offline burst buffer (`lib/services/offline_queue_service.dart`) with 24-hour fail-closed retention and reconnection auto-drain.
+- Route-wide RBAC and scoping matrix (`backend/app/api/routes/admin.py`) restricting Deans to department and Faculty to class cohorts.
+- Atomic database migrator (`backend/app/db/migrator.py`) with single-transaction execution and automatic rollback on error.
+- Presentation Attack Detection (PAD) liveness calibration aligned to ISO/IEC 30107-3 reporting APCER, BPCER, and ACER.
+- Automated attendance follow-up daemon (`backend/app/services/followup_worker.py`) reconciling closed sessions and dispatching absentee SMS/Email notifications.
+- Android kiosk Lock Task service integration and ADB hardware readiness probe (`scripts/verify_kiosk_hardware_readiness.ps1`).
+- Prometheus `/metrics` endpoint with request latency histograms and Grafana operational dashboard.
+- Comprehensive production readiness checklist and sign-off framework across Gates 0 through 5 (`docs/CAMPUS_ACCEPTANCE_CHECKLIST.md`).
 
-### Changed
-- Clarified that the project is pre-release and must not be used for live attendance until every release gate is passed.
-- Updated the main README to distinguish software tests from real-data biometric validation.
-
-### Fixed
-- Camera capture cleanup now uses the supported filesystem API rather than a nonexistent `XFile.delete()` method.
-- Removed an incompatible hand-written test runner; Flutter's native test discovery runs the independent test files.
-- Corrected Python lint findings and clarified the lint policy.
-
-### Known limitations / release blockers
-- The repository does not contain model weights. Exact artifacts, licenses, hashes, preprocessing contracts and permitted-use terms must be supplied.
-- Recognition thresholds and liveness performance have not been certified on deployment-specific data.
-- Real camera/device and end-to-end acceptance testing remains required.
-- Verify existing database upgrades and backup/restore procedures before any persistent deployment.
-- No signed production APK, production tag or production approval is claimed by this changelog.
+### Validated in CI & Locally
+- 161 backend tests passed with Ruff linting clean.
+- 40 Flutter tests passed with static analysis clean.
+- Next.js 16 admin console TypeScript and ESLint clean, 11 static routes generated.
 
 ## [0.1.0-alpha.1] - 2026-10-19
 

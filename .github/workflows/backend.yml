@@ -30,10 +30,15 @@ jobs:
           cache-dependency-path: |
             backend/pyproject.toml
             backend/requirements.lock
-      - name: Install backend and test dependencies
+      - name: Install backend and test dependencies from lockfile
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[dev]"
+          if [ -f requirements.lock ]; then
+            python -m pip install -r requirements.lock
+            python -m pip install -e . --no-deps
+          else
+            python -m pip install -e ".[dev]"
+          fi
           python -m pip install pip-audit
       - name: Compile Python packages
         run: python -m compileall -q app tests
@@ -42,4 +47,4 @@ jobs:
       - name: Run backend unit tests
         run: pytest
       - name: Audit backend dependencies
-        run: pip-audit --desc || echo "::warning::pip-audit identified dependency advisories to review"
+        run: pip-audit --desc

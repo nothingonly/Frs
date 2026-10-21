@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../config/app_config.dart';
 import '../../services/api_service.dart';
+import '../../services/lock_task_service.dart';
 import '../theme/app_theme.dart';
 
 /// Configuration dialog allowing administrators to update the backend URL and test connection.
@@ -8,12 +9,14 @@ class SettingsDialog extends StatefulWidget {
   final AppConfig config;
   final ValueChanged<AppConfig> onConfigSaved;
   final FrsApiService apiService;
+  final LockTaskService? lockTaskService;
 
   const SettingsDialog({
     super.key,
     required this.config,
     required this.onConfigSaved,
     required this.apiService,
+    this.lockTaskService,
   });
 
   @override
@@ -24,19 +27,36 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late final TextEditingController _urlController;
   late final TextEditingController _deviceIdController;
   late final TextEditingController _deviceApiKeyController;
+  late final LockTaskService _lockTaskService;
   late bool _allowInsecureDevelopmentHttp;
   String? _saveError;
   bool _testingConnection = false;
   String? _testResult;
   bool _testSuccess = false;
+  bool? _isDeviceOwner;
+  bool? _isLockTaskPermitted;
+  String? _lockTaskMessage;
 
   @override
   void initState() {
     super.initState();
+    _lockTaskService = widget.lockTaskService ?? const LockTaskService();
     _allowInsecureDevelopmentHttp = widget.config.allowInsecureDevelopmentHttp;
     _urlController = TextEditingController(text: widget.config.apiBaseUrl);
     _deviceIdController = TextEditingController(text: widget.config.clientDeviceId);
     _deviceApiKeyController = TextEditingController(text: widget.config.apiKeySecret);
+    _checkLockTaskStatus();
+  }
+
+  Future<void> _checkLockTaskStatus() async {
+    final owner = await _lockTaskService.isDeviceOwner();
+    final permitted = await _lockTaskService.isLockTaskPermitted();
+    if (mounted) {
+      setState(() {
+        _isDeviceOwner = owner;
+        _isLockTaskPermitted = permitted;
+      });
+    }
   }
 
   @override
@@ -230,6 +250,93 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   ),
                 ),
               ],
+              const SizedBox(height: 16),
+              const Divider(),
+              const SizedBox(height: 8),
+              const Text('Hardware Lock & Device Owner (Kiosk Mode)', style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Device Owner: ${_isDeviceOwner == null ? "Checking..." : (_isDeviceOwner! ? "ACTIVE (Provisioned)" : "NOT PROVISIONED")}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: (_isDeviceOwner ?? false) ? AppTheme.successGreen : Colors.orange.shade800,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Lock Task Permitted: ${_isLockTaskPermitted == null ? "Checking..." : (_isLockTaskPermitted! ? "YES" : "NO")}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: (_isLockTaskPermitted ?? false) ? AppTheme.successGreen : Colors.grey.shade700,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: () async {
+                            final success = await _lockTaskService.enableKioskMode();
+                            if (mounted) {
+                              setState(() {
+                                _lockTaskMessage = success
+                                    ? 'Kiosk Lock Task mode started.'
+                                    : 'Failed to start Lock Task. Check Device Owner permissions.';
+                              });
+                              _checkLockTaskStatus();
+                            }
+                          },
+                          icon: const Icon(Icons.lock_rounded, size: 16),
+                          label: const Text('Start Lock Task'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppTheme.primaryDark,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            textStyle: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton.icon(
+                          onPressed: () async {
+                            final success = await _lockTaskService.stopLockTask();
+                            if (mounted) {
+                              setState(() {
+                                _lockTaskMessage = success
+                                    ? 'Lock Task stopped.'
+                                    : 'Failed to stop Lock Task.';
+                              });
+                              _checkLockTaskStatus();
+                            }
+                          },
+                          icon: const Icon(Icons.lock_open_rounded, size: 16),
+                          label: const Text('Stop Lock Task'),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            textStyle: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_lockTaskMessage != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        _lockTaskMessage!,
+                        style: const TextStyle(fontSize: 11, fontStyle: FontStyle.italic),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ],
           ),
         ),

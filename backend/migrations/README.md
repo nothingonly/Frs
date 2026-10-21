@@ -5,6 +5,7 @@ Run these scripts in order against a fresh PostgreSQL database, including a fres
 1. `0001_base_schema.sql` creates the existing FRS biometric base tables: people, encrypted embeddings, attendance events, audit events and model registry.
 2. `0002_college_domain.sql` creates departments, class groups, students, class enrollments and attendance sessions, then adds the optional attendance-session link to legacy attendance events.
 3. `0003_capture_batches.sql` creates the encrypted attendance capture queue and enables RLS without adding public policies.
+4. `0004_dead_letter_status.sql` updates the `capture_batch_jobs` status check constraint to include `DEAD_LETTER` for forward compatibility on existing PostgreSQL deployments.
 
 These scripts are idempotent for the current schema shape and intentionally insert no sample records. For a database already created by an earlier FRS version, back up first and apply the scripts in a staging copy before production.
 

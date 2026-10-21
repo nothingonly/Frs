@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
@@ -20,12 +21,22 @@ class FrsApiService {
     http.Client? client,
   }) : _client = client ?? http.Client();
 
+  /// Generates a trace-unique correlation ID for end-to-end request tracking.
+  String generateCorrelationId([String prefix = 'kiosk']) {
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final randomHex = math.Random().nextInt(0xFFFFFF).toRadixString(16).padLeft(6, '0');
+    return '$prefix-$timestamp-$randomHex';
+  }
+
   /// Checks server liveness and vision model loading state via GET /health.
-  Future<HealthStatus> checkHealth() async {
+  Future<HealthStatus> checkHealth({String? correlationId}) async {
     config.validateTransport();
     final uri = Uri.parse('${config.apiBaseUrl}/health');
     try {
-      final response = await _client.get(uri);
+      final response = await _client.get(
+        uri,
+        headers: {'X-Correlation-ID': correlationId ?? generateCorrelationId('kiosk-health')},
+      );
       if (response.statusCode == 200) {
         final data = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
         return HealthStatus.fromJson(data);
@@ -44,6 +55,7 @@ class FrsApiService {
     required List<Uint8List> imageFrames,
     required PunchType punchType,
     String? clientDeviceId,
+    String? correlationId,
   }) async {
     config.validateTransport();
     _requireDeviceCredential();
@@ -51,6 +63,7 @@ class FrsApiService {
     final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/verify');
     final request = http.MultipartRequest('POST', uri);
     request.headers['Authorization'] = 'Bearer ${config.apiKeySecret}';
+    request.headers['X-Correlation-ID'] = correlationId ?? generateCorrelationId('kiosk-verify');
     request.fields['employee_id'] = employeeId.trim();
     request.fields['punch_type'] = punchType.value;
     request.fields['client_device_id'] = clientDeviceId ?? config.clientDeviceId;
@@ -71,6 +84,7 @@ class FrsApiService {
     required List<Uint8List> imageFrames,
     required PunchType punchType,
     String? clientDeviceId,
+    String? correlationId,
   }) async {
     config.validateTransport();
     _requireDeviceCredential();
@@ -78,6 +92,7 @@ class FrsApiService {
     final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/identify');
     final request = http.MultipartRequest('POST', uri);
     request.headers['Authorization'] = 'Bearer ${config.apiKeySecret}';
+    request.headers['X-Correlation-ID'] = correlationId ?? generateCorrelationId('kiosk-identify');
     request.fields['punch_type'] = punchType.value;
     request.fields['client_device_id'] = clientDeviceId ?? config.clientDeviceId;
     _addImageBurst(request, imageFrames, 'kiosk_identify');
@@ -93,13 +108,14 @@ class FrsApiService {
   }
 
   /// Lists persisted OPEN sessions for this authenticated kiosk/device credential.
-  Future<List<AttendanceSessionOption>> listOpenAttendanceSessions() async {
+  Future<List<AttendanceSessionOption>> listOpenAttendanceSessions({String? correlationId}) async {
     config.validateTransport();
     _requireDeviceCredential();
     final uri = Uri.parse('${config.apiBaseUrl}/api/v1/attendance/sessions/open');
     try {
       final response = await _client.get(uri, headers: {
         'Authorization': 'Bearer ${config.apiKeySecret}',
+        'X-Correlation-ID': correlationId ?? generateCorrelationId('kiosk-sessions'),
       }).timeout(const Duration(seconds: 15));
       final body = _parseJsonBody(response.bodyBytes);
       if (response.statusCode == 200) {
@@ -126,6 +142,7 @@ class FrsApiService {
     required List<Uint8List> imageFrames,
     required PunchType punchType,
     String? clientDeviceId,
+    String? correlationId,
   }) async {
     config.validateTransport();
     _requireDeviceCredential();
@@ -138,6 +155,7 @@ class FrsApiService {
     );
     final request = http.MultipartRequest('POST', uri);
     request.headers['Authorization'] = 'Bearer ${config.apiKeySecret}';
+    request.headers['X-Correlation-ID'] = correlationId ?? generateCorrelationId('kiosk-batch');
     request.fields['idempotency_key'] = idempotencyKey.trim();
     request.fields['punch_type'] = punchType.value;
     request.fields['client_device_id'] = clientDeviceId ?? config.clientDeviceId;
@@ -153,7 +171,7 @@ class FrsApiService {
   }
 
   /// Reads the server-persisted state for a previously enqueued capture batch.
-  Future<CaptureBatchJob> getCaptureBatch(String batchId) async {
+  Future<CaptureBatchJob> getCaptureBatch(String batchId, {String? correlationId}) async {
     config.validateTransport();
     _requireDeviceCredential();
     final uri = Uri.parse(
@@ -162,6 +180,7 @@ class FrsApiService {
     try {
       final response = await _client.get(uri, headers: {
         'Authorization': 'Bearer ${config.apiKeySecret}',
+        'X-Correlation-ID': correlationId ?? generateCorrelationId('kiosk-batch-poll'),
       }).timeout(const Duration(seconds: 15));
       final body = _parseJsonBody(response.bodyBytes);
       if (response.statusCode == 200) return CaptureBatchJob.fromJson(body);
@@ -172,6 +191,7 @@ class FrsApiService {
       throw NetworkException('Unable to read capture-batch status: $error');
     }
   }
+
   /// Administrator enrollment. The admin credential is supplied explicitly by the
   /// protected admin gate and is never re-used as the ordinary kiosk device key.
   Future<Map<String, dynamic>> adminEnroll({
@@ -180,6 +200,7 @@ class FrsApiService {
     String? department,
     required List<Uint8List> imageFrames,
     required String adminApiKey,
+    String? correlationId,
   }) async {
     config.validateTransport();
     if (adminApiKey.trim().isEmpty) {
@@ -189,6 +210,7 @@ class FrsApiService {
     final uri = Uri.parse('${config.apiBaseUrl}/api/v1/biometrics/enroll/admin');
     final request = http.MultipartRequest('POST', uri);
     request.headers['Authorization'] = 'Bearer ${adminApiKey.trim()}';
+    request.headers['X-Correlation-ID'] = correlationId ?? generateCorrelationId('kiosk-enroll');
     request.fields['employee_id'] = employeeId.trim();
     request.fields['full_name'] = fullName.trim();
     if (department != null && department.trim().isNotEmpty) {

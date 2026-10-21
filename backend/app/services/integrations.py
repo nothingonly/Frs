@@ -133,6 +133,7 @@ class AbsenteeAlertService:
                     "student_id": s.student_id,
                     "student_number": s.student_number,
                     "full_name": s.full_name,
+                    "email": s.email or f"{s.student_number.lower()}@campus.edu",
                     "session_id": session_id,
                 })
         return absentees
@@ -189,6 +190,49 @@ class WebhookDispatcher:
             "headers": headers,
             "body": body_bytes.decode("utf-8"),
             "signature": signature,
+        }
+
+    @classmethod
+    def dispatch(
+        cls,
+        prepared_request: dict[str, Any],
+        timeout: float = 10.0,
+        max_retries: int = 3,
+    ) -> dict[str, Any]:
+        """Dispatch a prepared webhook request over HTTP with retry backoff."""
+        import urllib.request
+        import urllib.error
+
+        url = prepared_request["url"]
+        body_bytes = prepared_request["body"].encode("utf-8")
+        headers = prepared_request.get("headers", {})
+
+        req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
+        last_error = ""
+        now_ts = int(time.time())
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    status_code = resp.getcode()
+                    return {
+                        "status": "DELIVERED",
+                        "url": url,
+                        "status_code": status_code,
+                        "attempts": attempt,
+                        "timestamp": now_ts,
+                    }
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+                last_error = str(exc)
+                logger.warning("Webhook dispatch attempt %d failed for %s: %s", attempt, url, exc)
+                time.sleep(0.1 * attempt)
+
+        return {
+            "status": "FAILED",
+            "url": url,
+            "error": last_error,
+            "attempts": max_retries,
+            "timestamp": now_ts,
         }
 
 
@@ -305,13 +349,55 @@ class SmsNotificationProvider(BaseNotificationProvider):
                 "timestamp": now_ts,
                 "provider": "sms_mock",
             }
-        return {
-            "status": "SENT",
-            "recipient": message.recipient,
-            "channel": "sms",
-            "timestamp": now_ts,
-            "provider": "sms_gateway",
+
+        # Real HTTP dispatch to configured SMS gateway
+        import urllib.error
+        import urllib.request
+
+        payload = json.dumps({
+            "to": message.recipient,
+            "message": message.body,
+            "sender_id": self.sender_id,
+        }).encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "FRS-SMS-Dispatcher/1.0",
         }
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+
+        req = urllib.request.Request(self.api_url, data=payload, headers=headers, method="POST")
+        last_error = ""
+
+        for attempt in range(1, 4):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    resp_body = resp.read().decode("utf-8")
+                    return {
+                        "status": "SENT",
+                        "recipient": message.recipient,
+                        "channel": "sms",
+                        "timestamp": now_ts,
+                        "provider": "sms_gateway",
+                        "gateway_response": resp_body[:200],
+                        "attempts": attempt,
+                    }
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+                last_error = str(exc)
+                logger.warning("SMS gateway attempt %d failed for %s: %s", attempt, message.recipient, exc)
+                time.sleep(0.1 * attempt)
+
+        if self.mock_fallback:
+            return {
+                "status": "FAILED_FALLBACK_MOCK",
+                "recipient": message.recipient,
+                "channel": "sms",
+                "error": last_error,
+                "timestamp": now_ts,
+                "provider": "sms_gateway",
+            }
+        raise RuntimeError(f"SMS send failed after 3 attempts: {last_error}")
 
 
 class NotificationManager:
@@ -353,6 +439,7 @@ class NotificationManager:
                 student_number=a.get("student_number", ""),
                 session_id=a.get("session_id", ""),
                 channel=channel,
+                contact_address=a.get("email") if channel == "email" else a.get("phone"),
             )
             results.append(res)
         return {
@@ -387,21 +474,76 @@ class SftpExportService:
         sftp_host: str = "",
         sftp_port: int = 22,
         sftp_username: str = "",
+        sftp_password: str = "",
+        sftp_key_path: str = "",
         remote_path: str = "/uploads/attendance",
     ) -> dict[str, Any]:
         package = cls.prepare_export_package(db, session_id)
         is_live = bool(sftp_host and sftp_host != "mock" and sftp_username)
-        status = "DISPATCHED" if is_live else "STAGED_MOCK"
-        return {
-            "status": status,
-            "session_id": session_id,
-            "filename": package["filename"],
-            "remote_path": f"{remote_path.rstrip('/')}/{package['filename']}",
-            "byte_count": package["byte_count"],
-            "sha256_checksum": package["sha256_checksum"],
-            "sftp_host": sftp_host or "mock-sftp-host",
-            "dispatched_at": int(time.time()),
-        }
+        if not is_live:
+            return {
+                "status": "STAGED_MOCK",
+                "session_id": session_id,
+                "filename": package["filename"],
+                "remote_path": f"{remote_path.rstrip('/')}/{package['filename']}",
+                "byte_count": package["byte_count"],
+                "sha256_checksum": package["sha256_checksum"],
+                "sftp_host": sftp_host or "mock-sftp-host",
+                "dispatched_at": int(time.time()),
+            }
+
+        dest_file = f"{remote_path.rstrip('/')}/{package['filename']}"
+        now_ts = int(time.time())
+
+        # Attempt live SFTP connection via paramiko if installed
+        try:
+            import paramiko  # type: ignore
+            transport = paramiko.Transport((sftp_host, sftp_port))
+            if sftp_key_path:
+                key = paramiko.RSAKey.from_private_key_file(sftp_key_path)
+                transport.connect(username=sftp_username, pkey=key)
+            else:
+                transport.connect(username=sftp_username, password=sftp_password)
+
+            sftp = paramiko.SFTPClient.from_transport(transport)
+            with io.BytesIO(package["csv_content"].encode("utf-8")) as fl:
+                sftp.putfo(fl, dest_file)
+            sftp.close()
+            transport.close()
+
+            return {
+                "status": "DISPATCHED",
+                "session_id": session_id,
+                "filename": package["filename"],
+                "remote_path": dest_file,
+                "byte_count": package["byte_count"],
+                "sha256_checksum": package["sha256_checksum"],
+                "sftp_host": sftp_host,
+                "dispatched_at": now_ts,
+            }
+        except ImportError:
+            logger.warning("paramiko not installed; staged SFTP package without live transfer.")
+            return {
+                "status": "STAGED_MOCK",
+                "session_id": session_id,
+                "filename": package["filename"],
+                "remote_path": dest_file,
+                "byte_count": package["byte_count"],
+                "sha256_checksum": package["sha256_checksum"],
+                "sftp_host": sftp_host,
+                "dispatched_at": now_ts,
+                "note": "paramiko_not_installed",
+            }
+        except Exception as exc:
+            logger.error("SFTP export failed for session %s: %s", session_id, exc)
+            return {
+                "status": "FAILED",
+                "session_id": session_id,
+                "filename": package["filename"],
+                "error": str(exc),
+                "sftp_host": sftp_host,
+                "dispatched_at": now_ts,
+            }
 
 
 class LtiService:

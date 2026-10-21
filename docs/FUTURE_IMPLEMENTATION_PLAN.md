@@ -17,31 +17,33 @@ The Face Recognition Attendance System (FRS) has established an end-to-end, inte
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ FRS V4/V5 Implementation Progress Gauge                                     │
+│ FRS V4/V5 Implementation Progress Gauge (Post-Sprint Audit)                 │
 ├────────────────────────────────┬─────────┬──────────────────────────────────┤
 │ Scope Dimension                │ Status  │ Engineering Assessment           │
 ├────────────────────────────────┼─────────┼──────────────────────────────────┤
-│ Core Alpha Application         │ ~75%    │ Complete attendance flows;       │
-│                                │         │ physical tablet pilot pending.   │
-│ Expanded V4/V5 Platform        │ ~50%    │ Worker/DLQ/Integrations built;   │
-│                                │         │ specialist ablations unclosed.   │
-│ Production Readiness           │ BLOCKED │ Commercial licensing clearance,  │
-│                                │         │ hardware PAD, and campus UAT.    │
+│ Core Application               │ 85–88%  │ Complete attendance workflows,   │
+│                                │         │ route-wide RBAC, DB migrator,    │
+│                                │         │ encrypted offline buffer.        │
+│ Expanded V4/V5 Platform        │ 65–70%  │ Worker/DLQ/Integrations built,   │
+│                                │         │ PAD calibration, Prometheus,     │
+│                                │         │ automated follow-up daemon.      │
+│ Production Readiness           │ PENDING │ Real-device kiosk validation,    │
+│                                │         │ campus UAT, model licensing.     │
 └────────────────────────────────┴─────────┴──────────────────────────────────┘
 ```
 
 > [!IMPORTANT]
 > **Application Codebase vs. Biometric System:**
-> The repository is advanced as an application codebase (clean builds, strict typing, 135 passing backend tests, 29 passing Flutter tests, AES-GCM encryption, responsive UI). However, passing unit tests on synthetic images and green CI runs on hosted runners do **not** constitute empirical biometric evidence on physical campus hardware.
+> The repository is advanced as an application codebase (clean builds, strict typing, 161 passing backend tests, 40 passing Flutter tests, hardware Keystore AES-GCM offline burst buffer, responsive UI). However, passing unit tests on synthetic images and green CI runs on hosted runners do **not** constitute empirical biometric evidence on physical campus hardware. Real campus deployment requires completion of all six Gates (0 to 5) outlined in `docs/CAMPUS_ACCEPTANCE_CHECKLIST.md`.
 
 ### 1.2 GitHub Status & CI Nuances
 
-- **Merged History:** All implementation pull requests (#1 through #5) and subsequent sprint commits are merged on `main`.
+- **Merged History:** All implementation pull requests (#1 through #5) and subsequent sprint commits are integrated on `main`.
 - **Remote & Local CI Run Breakdown:**
   - `admin-web-quality`: **PASS** (TypeScript, ESLint, Next.js 16 build with 11 prerendered static routes).
-  - `flutter`: **PASS** (Dart static analysis clean with 0 warnings, 29/29 tests passed, Android debug APK built).
+  - `flutter`: **PASS** (Dart static analysis clean with 0 warnings, 40/40 tests passed, Android debug APK built).
   - `GitGuardian Security Checks`: **PASS** (Zero secrets detected across all commits).
-  - `backend-quality`: **135 PASSED / 6 SKIPPED** (Real-vision inference tests require local/staging provisioned ONNX model weights; dedicated staging workflow added in `.github/workflows/staging-vision-ci.yml`).
+  - `backend-quality`: **161 PASSED / 6 SKIPPED** (Real-vision inference tests require local/staging provisioned ONNX model weights; dedicated staging workflow added in `.github/workflows/staging-vision-ci.yml`).
 - **Critical CI Caveat:** The 6 skipped backend tests are `tests/test_real_vision_inference.py`. The GitHub Actions hosted runner explicitly skips them because the 200MB Buffalo_L binary weights (`det_10g.onnx`, `w600k_r50.onnx`) are deliberately excluded from Git. Consequently, **green CI does not mean real ONNX model inference ran on GitHub's hosted runner**. Real ONNX execution is verified in local and staging environments where weights are provisioned.
 - **Micro-Benchmark Context:** The 3.35x retrieval speedup achieved via burst-level gallery memoization and vectorized NumPy SIMD dot products was evaluated on an in-memory SQLite database seeded with synthetic vectors. While it proves algorithmic query and memory efficiency, it does not represent physical campus network or camera sensor latency.
 

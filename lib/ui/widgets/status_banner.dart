@@ -109,9 +109,13 @@ class StatusBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: AppTheme.successBg,
+        color: state.isOfflineQueued ? const Color(0xFFEFF6FF) : AppTheme.successBg,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppTheme.successGreen.withOpacity(0.4)),
+        border: Border.all(
+          color: state.isOfflineQueued
+              ? const Color(0xFF60A5FA)
+              : AppTheme.successGreen.withOpacity(0.4),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -119,15 +123,21 @@ class StatusBanner extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.check_circle_rounded, color: AppTheme.successGreen, size: 28),
+              Icon(
+                state.isOfflineQueued ? Icons.cloud_off_rounded : Icons.check_circle_rounded,
+                color: state.isOfflineQueued ? AppTheme.primaryBlue : AppTheme.successGreen,
+                size: 28,
+              ),
               const SizedBox(width: 12),
-              const Expanded(
+              Expanded(
                 child: Text(
-                  'Attendance Recorded Successfully',
+                  state.isOfflineQueued
+                      ? 'Attendance Buffered Offline (Encrypted)'
+                      : 'Attendance Recorded Successfully',
                   style: TextStyle(
                     fontSize: 17,
                     fontWeight: FontWeight.w700,
-                    color: AppTheme.successGreen,
+                    color: state.isOfflineQueued ? AppTheme.primaryBlue : AppTheme.successGreen,
                   ),
                 ),
               ),
@@ -139,7 +149,14 @@ class StatusBanner extends StatelessWidget {
             ],
           ),
           const Divider(height: 24),
-          if (state.lastIdentificationResult != null) ...[
+          if (state.isOfflineQueued) ...[
+            _buildDetailRow('Storage Security', 'Hardware Keystore / Encrypted Buffer'),
+            _buildDetailRow('Buffer Status', 'Saved locally; auto-syncs when online'),
+            _buildDetailRow('Punch Type', state.punchType.label),
+            _buildDetailRow('Fail-Closed TTL', '24 Hours (Purged if unsynced)'),
+            if (state.matchedEmployeeId != null)
+              _buildDetailRow('Batch Reference', state.matchedEmployeeId!),
+          ] else if (state.lastIdentificationResult != null) ...[
             _buildDetailRow('Employee Name', state.lastIdentificationResult!.fullName),
             _buildDetailRow('Employee ID', state.lastIdentificationResult!.employeeId),
             if (state.lastIdentificationResult!.department != null)

@@ -5,6 +5,7 @@ import '../../config/app_config.dart';
 import '../../models/punch_type.dart';
 import '../../models/attendance_session.dart';
 import '../../services/api_service.dart';
+import '../../services/offline_queue_service.dart';
 import '../../state/kiosk_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/camera_viewport.dart';
@@ -30,6 +31,7 @@ class KioskScreen extends StatefulWidget {
 class _KioskScreenState extends State<KioskScreen> {
   late AppConfig _config;
   late FrsApiService _apiService;
+  late final OfflineQueueService _offlineQueueService;
   late final KioskState _state;
   bool _kioskCameraActive = true;
   List<AttendanceSessionOption> _attendanceSessions = <AttendanceSessionOption>[];
@@ -43,7 +45,8 @@ class _KioskScreenState extends State<KioskScreen> {
     super.initState();
     _config = widget.initialConfig;
     _apiService = FrsApiService(config: _config);
-    _state = KioskState();
+    _offlineQueueService = OfflineQueueService();
+    _state = KioskState(offlineQueueService: _offlineQueueService);
     _state.addListener(_onStateChanged);
     unawaited(_refreshOpenSessions());
   }
@@ -70,6 +73,7 @@ class _KioskScreenState extends State<KioskScreen> {
   Future<void> _refreshOpenSessions() async {
     if (mounted) setState(() { _sessionsLoading = true; _sessionLoadError = null; });
     try {
+      await _state.syncOfflineQueue(_apiService);
       final sessions = await _apiService.listOpenAttendanceSessions();
       if (!mounted) return;
       setState(() {
@@ -85,11 +89,39 @@ class _KioskScreenState extends State<KioskScreen> {
           _selectedAttendanceSessionId = _attendanceSessions.isEmpty ? null : _attendanceSessions.first.sessionId;
         }
       });
+      await _state.refreshOfflineQueueCount();
     } catch (error) {
       if (mounted) setState(() => _sessionLoadError = error.toString());
     } finally {
       if (mounted) setState(() => _sessionsLoading = false);
     }
+  }
+
+  Widget _buildOfflineQueueBadge() {
+    if (_state.offlineQueueCount <= 0) return const SizedBox.shrink();
+    return Tooltip(
+      message: 'Pending attendance batches buffered in encrypted offline queue',
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E3A8A).withOpacity(0.3),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF60A5FA)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.cloud_off_rounded, size: 14, color: Color(0xFF93C5FD)),
+            const SizedBox(width: 4),
+            Text(
+              'Offline: ${_state.offlineQueueCount}',
+              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFDBEAFE)),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildConnectionBadge() {
@@ -300,6 +332,7 @@ class _KioskScreenState extends State<KioskScreen> {
           ],
         ),
         actions: [
+          _buildOfflineQueueBadge(),
           _buildConnectionBadge(),
           const SizedBox(width: 6),
           Container(

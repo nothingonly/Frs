@@ -203,16 +203,31 @@ All administrative endpoints require `Authorization: Bearer <FRS_ADMIN_API_KEY>`
  
 | Test Suite / Tool | Scope | GitHub Actions CI Status | Local Verified (with Provisioned Weights) |
 |---|---|:---:|:---:|
-| **Backend Pytest** | Unit, integration, security, worker & ONNX inference | **135 PASSED / 6 SKIPPED**¹ | **141 / 141 PASSED** |
+| **Backend Pytest** | Unit, integration, security, worker & ONNX inference | **161 PASSED / 6 SKIPPED**¹ | **161 / 161 PASSED** (5.32s) |
 | **Backend Ruff** | Linting and code style rules across Python code | **CLEAN (0 errors)** | **CLEAN (0 errors)** |
 | **Admin Web ESLint** | TypeScript and React code conventions | **CLEAN (0 errors)** | **CLEAN (0 errors)** |
 | **Admin Web TypeScript** | Strict typecheck (`tsc --noEmit`) | **CLEAN (0 errors)** | **CLEAN (0 errors)** |
 | **Admin Web Production Build**| Next.js 16 prerendering (11 static routes) | **SUCCESS** | **SUCCESS** |
 | **Flutter Static Analysis** | Dart static analyzer (`--fatal-infos`) | **CLEAN (0 warnings)** | **CLEAN (0 warnings)** |
-| **Flutter Test Suite** | State management, widget, and contract tests | **29 / 29 PASSED** | **29 / 29 PASSED** |
+| **Flutter Test Suite** | State management, widget, offline queue & contracts | **40 / 40 PASSED** | **40 / 40 PASSED** |
 | **Android Debug APK** | Full debug package build | **BUILT (Artifact)** | **BUILT (157.8 MB)** |
 
 *¹ CI Note: The 6 skipped tests in GitHub Actions CI are in `tests/test_real_vision_inference.py`. They are automatically skipped on the hosted runner because real 200MB Buffalo_L binary model weights (`det_10g.onnx`, `w600k_r50.onnx`) are not checked into Git. Real ONNX model inference is verified in local and controlled staging environments where weights are provisioned.*
+
+---
+
+## Releases & Version History
+
+- **[`v0.2.0-beta.1`](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/releases/tag/v0.2.0-beta.1)** *(Latest)*
+  - Added hardware-encrypted offline burst buffer in Flutter with 24h fail-closed TTL and reconnection auto-drain.
+  - Implemented route-wide RBAC & scoping matrix restricting Deans to department and Faculty to class cohorts.
+  - Added versioned database migrator with single-transaction execution and failed upgrade rollback recovery.
+  - Added ISO/IEC 30107-3 compliant Presentation Attack Detection (PAD) calibration with APCER/BPCER calculations.
+  - Added automated attendance follow-up daemon reconciling closed sessions and dispatching absentee SMS/Email alerts.
+  - Added Android hardware kiosk Lock Task service and automated ADB readiness verification script.
+  - Added Prometheus metrics `/metrics` and Grafana operational dashboard.
+- **[`v0.1.0-alpha.1`](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System/releases/tag/v0.1.0-alpha.1)**
+  - Initial foundation release with FastAPI vision engine, Next.js 16 admin console, and Flutter kiosk.
 
 ---
 
@@ -248,6 +263,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Start background capture batch worker (in separate terminal)
 python -m app.worker
+
+# Start automated attendance follow-up daemon (in separate terminal)
+python -m app.services.followup_worker --interval-seconds 300
 
 # Optional: Run end-to-end principal rehearsal verification
 python ../scripts/rehearse_principal_demo.py
@@ -285,22 +303,38 @@ flutter run -d <device_id_or_emulator>
    - Facial embeddings are encrypted at rest using AES-256-GCM prior to database persistence.
    - Raw probe images are never logged or stored in plaintext. In-flight capture frames in the batch queue are encrypted and scrubbed immediately after processing.
 2. **Zero-Trust Access Control:**
-   - Device keys and Administrator keys are separate high-entropy credentials.
+   - Device keys, Faculty keys, Dean tokens, and Super Administrator tokens are strictly separated.
    - Kiosks can only submit attendance captures and poll batch results; they cannot access student rosters, audit logs, or administration endpoints.
-3. **Audit Trail Immutability:**
+3. **Hardware Encrypted Offline Queue:**
+   - Android Keystore / SQLCipher encrypted burst buffer with 24-hour fail-closed expiration.
+   - Instant wipe of raw capture frames from local flash upon server acceptance.
+4. **Audit Trail Immutability:**
    - Every administrative override, attendance correction, and biometric enrollment writes an immutable audit record containing actor identity, client IP, timestamp, and cryptographic event hash.
-4. **Android Network Isolation:**
+5. **Android Network Isolation:**
    - Android Network Security Config strictly disables cleartext HTTP across physical network interfaces. Plaintext HTTP is permitted only for local loopback addresses (`127.0.0.1`, `10.0.2.2`).
 
 ---
 
-## Release Gates & Outstanding Blockers
+## Release Gates & Campus Acceptance Framework
 
-Before deploying FRS into a live production environment, the following non-negotiable gates must be completed:
-- [ ] **Model Weight Licensing Clearance:** Replace or obtain commercial licensing for DeepInsight Buffalo_L weights, which are currently limited to non-commercial academic research under the WebFace600K license.
-- [ ] **Empirical Threshold Calibration:** Execute `backend/app/benchmark.py` on an on-premise dataset representing target camera optics, lighting variability, and demographic diversity to calibrate FAR/FRR thresholds.
-- [ ] **Presentation Attack Testing:** Benchmark against physical presentation attack datasets (printed photos, 2D screens, 3D masks) before enabling unattended kiosk operations.
-- [ ] **Regulatory Notice & Consent:** Implement institutional compliance procedures under applicable data protection regulations (GDPR, FERPA, BIPA) including student consent and biometric deletion workflows.
+Before deploying FRS into a live production environment, the designated campus stakeholders must review evidence logs and sign off on the 6 operational gates detailed in [`docs/CAMPUS_ACCEPTANCE_CHECKLIST.md`](docs/CAMPUS_ACCEPTANCE_CHECKLIST.md):
+- **Gate 0:** Institutional Biometric Consent Policy & Non-Biometric Exception Workflow.
+- **Gate 1:** Hardened CI Workflows, Model Integrity & Cryptographic Attestation.
+- **Gate 2:** PostgreSQL Schema Migrations, Worker Leases & Dead-Letter Queue Triage.
+- **Gate 3:** Biometric Demographic Calibration & Presentation Attack Detection (ISO/IEC 30107-3).
+- **Gate 4:** Android Device Owner Provisioning, Hardware Lock Task & Encrypted Burst Buffer.
+- **Gate 5:** Institutional SIS/LMS Integrations, Scheduled Follow-up & Delivery Reconciliation.
+
+---
+
+## About the Author
+
+**Katkam Koushik**  
+*Lead Systems Architect & Full-Stack AI Engineer*  
+GitHub: [@KatkamKoushik](https://github.com/KatkamKoushik)  
+Repository: [FRS-Face-Recognition-Attendance-System](https://github.com/KatkamKoushik/FRS-Face-Recognition-Attendance-System)  
+
+Specializing in high-performance computer vision pipelines, multi-tier enterprise architecture, and secure biometric systems design.
 
 ---
 

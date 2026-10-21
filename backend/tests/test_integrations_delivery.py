@@ -139,3 +139,55 @@ def test_integrations_api_endpoints() -> None:
     )
     assert ags_resp.status_code == 200
     assert ags_resp.json()["scoreGiven"] == 1.0
+
+
+def test_webhook_dispatcher_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.integrations import WebhookDispatcher
+
+    class MockResponse:
+        def __init__(self, code: int = 200) -> None:
+            self.code = code
+        def getcode(self) -> int:
+            return self.code
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+        def __enter__(self) -> "MockResponse":
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+            pass
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=10.0: MockResponse(200))
+
+    prep = WebhookDispatcher.prepare_webhook_request(
+        event_type="attendance.session_closed",
+        data={"session_id": "sess-123"},
+        secret="test-secret",
+        target_url="https://campus.edu/api/webhook",
+    )
+    res = WebhookDispatcher.dispatch(prep)
+    assert res["status"] == "DELIVERED"
+    assert res["status_code"] == 200
+    assert res["url"] == "https://campus.edu/api/webhook"
+
+
+def test_sms_live_http_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    class MockSmsResponse:
+        def read(self) -> bytes:
+            return b'{"status": "delivered", "message_id": "sms-999"}'
+        def __enter__(self) -> "MockSmsResponse":
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+            pass
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=10.0: MockSmsResponse())
+
+    provider = SmsNotificationProvider(api_url="https://sms-gateway.campus.local/v1/send", auth_token="sms-token-xyz")
+    msg = NotificationMessage(recipient="+19876543210", subject="Alert", body="Test message", channel="sms")
+    res = provider.send(msg)
+    assert res["status"] == "SENT"
+    assert res["channel"] == "sms"
+    assert res["provider"] == "sms_gateway"
+    assert "sms-999" in res["gateway_response"]
+

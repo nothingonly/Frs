@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS capture_batch_jobs (
     frame_count INTEGER NOT NULL,
     punch_type VARCHAR(20) NOT NULL CHECK (punch_type IN ('CHECK_IN', 'CHECK_OUT')),
     status VARCHAR(20) NOT NULL DEFAULT 'QUEUED'
-      CHECK (status IN ('QUEUED', 'PROCESSING', 'SUCCEEDED', 'REJECTED', 'FAILED')),
+      CHECK (status IN ('QUEUED', 'PROCESSING', 'SUCCEEDED', 'REJECTED', 'FAILED', 'DEAD_LETTER')),
     encrypted_payload BYTEA,
     payload_nonce BYTEA,
     payload_expires_at TIMESTAMPTZ NOT NULL,

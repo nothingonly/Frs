@@ -167,6 +167,7 @@ def test_production_license_attestation_enforced() -> None:
     settings = Settings(
         _env_file=None,
         env="production",
+        database_url="postgresql://frs:password@localhost:5432/frs",
         device_api_keys="device-key-must-be-at-least-32-characters-long",
         admin_api_key="admin-key-must-be-at-least-32-characters-long",
         data_encryption_key=base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"),
@@ -183,3 +184,20 @@ def test_production_license_attestation_enforced() -> None:
     # Once attested with commercial compliance acknowledged, validation proceeds
     settings.model_license_attested = True
     settings.validate_startup_security()
+
+
+def test_production_rejects_sqlite_database() -> None:
+    """Production startup must strictly reject SQLite databases."""
+    settings = Settings(
+        _env_file=None,
+        env="production",
+        database_url="sqlite:///./frs.db",
+        device_api_keys="device-key-must-be-at-least-32-characters-long",
+        admin_api_key="admin-key-must-be-at-least-32-characters-long",
+        data_encryption_key=base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"),
+        threshold_calibrated=True,
+        calibrated_models_csv="ArcFace",
+        model_license_attested=True,
+    )
+    with pytest.raises(ValueError, match="SQLite is not permitted in production"):
+        settings.validate_startup_security()

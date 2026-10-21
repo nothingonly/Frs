@@ -7,6 +7,7 @@ import '../models/attendance_result.dart';
 import '../models/capture_batch.dart';
 import '../models/punch_type.dart';
 import '../services/api_service.dart';
+import '../services/offline_queue_service.dart';
 
 /// The distinct UI lifecycle states for the kiosk app.
 enum KioskStatus {
@@ -29,12 +30,17 @@ enum KioskStatus {
 /// Core state holder and automatic 1:N submission coordinator for the FRS Kiosk.
 class KioskState {
   final List<void Function()> _listeners = [];
+  final OfflineQueueService? offlineQueueService;
+
+  KioskState({this.offlineQueueService});
 
   KioskStatus _status = KioskStatus.idle;
   String _employeeId = '';
   PunchType _punchType = PunchType.checkIn;
   List<Uint8List> _capturedImages = <Uint8List>[];
   bool _isSubmitting = false;
+  bool _isOfflineQueued = false;
+  int _offlineQueueCount = 0;
   String? _pendingSessionId;
   String? _pendingBatchId;
   String? _pendingIdempotencyKey;
@@ -80,6 +86,25 @@ class KioskState {
   double? get requiredThreshold => _requiredThreshold;
   int? get cooldownRemainingSeconds => _cooldownRemainingSeconds;
   DateTime? get cooldownLastPunchTime => _cooldownLastPunchTime;
+  bool get isOfflineQueued => _isOfflineQueued;
+  int get offlineQueueCount => _offlineQueueCount;
+
+  Future<void> refreshOfflineQueueCount() async {
+    if (offlineQueueService != null) {
+      _offlineQueueCount = await offlineQueueService!.getPendingCount();
+      notifyListeners();
+    }
+  }
+
+  Future<DrainResult?> syncOfflineQueue(FrsApiService apiService) async {
+    if (offlineQueueService != null) {
+      final res = await offlineQueueService!.drainQueue(apiService);
+      _offlineQueueCount = await offlineQueueService!.getPendingCount();
+      notifyListeners();
+      return res;
+    }
+    return null;
+  }
 
   /// For automatic 1:N identification: submission requires only a captured photo.
   bool get canSubmit => !_isSubmitting && hasUsableBurst;
@@ -301,8 +326,36 @@ class KioskState {
       }
       throw ServerException('Capture batch ${job.batchId} is still ${job.status}. Tap the same session again to resume status checking.');
     } on NetworkException catch (error) {
-      _status = KioskStatus.networkError;
-      _errorMessage = error.message;
+      if (offlineQueueService != null) {
+        try {
+          final offlineBatch = await offlineQueueService!.enqueueBatch(
+            sessionId: attendanceSessionId,
+            classGroupId: 'default',
+            punchType: _punchType,
+            frames: _capturedImages,
+            idempotencyKey: _pendingIdempotencyKey ?? _newCaptureIdempotencyKey(),
+          );
+          _isOfflineQueued = true;
+          _status = KioskStatus.accepted;
+          _matchedEmployeeName = 'Buffered Offline (${_capturedImages.length} frames)';
+          _matchedEmployeeId = 'OFFLINE-${offlineBatch.batchId}';
+          _errorMessage = null;
+          _pendingSessionId = null;
+          _pendingBatchId = null;
+          _pendingIdempotencyKey = null;
+          _capturedImages = <Uint8List>[];
+          _offlineQueueCount = await offlineQueueService!.getPendingCount();
+          _startAutoResetTimer(durationSeconds: 5);
+          unawaited(offlineQueueService!.drainQueue(apiService));
+          return;
+        } catch (queueErr) {
+          _status = KioskStatus.networkError;
+          _errorMessage = '${error.message} (Offline buffer failed: $queueErr)';
+        }
+      } else {
+        _status = KioskStatus.networkError;
+        _errorMessage = error.message;
+      }
     } on BiometricQualityException catch (error) {
       _status = KioskStatus.qualityError;
       _errorMessage = error.message;
@@ -519,6 +572,7 @@ class KioskState {
     _punchType = PunchType.checkIn;
     _capturedImages = <Uint8List>[];
     _isSubmitting = false;
+    _isOfflineQueued = false;
     _lastSuccessResult = null;
     _lastIdentificationResult = null;
     _matchedEmployeeName = null;

@@ -19,4 +19,10 @@ class KioskDeviceAdminReceiver : DeviceAdminReceiver() {
         super.onDisabled(context, intent)
         Toast.makeText(context, "FRS Kiosk Device Owner Disabled", Toast.LENGTH_SHORT).show()
     }
+
+    companion object {
+        fun getComponentName(context: Context): android.content.ComponentName {
+            return android.content.ComponentName(context.applicationContext, KioskDeviceAdminReceiver::class.java)
+        }
+    }
 }

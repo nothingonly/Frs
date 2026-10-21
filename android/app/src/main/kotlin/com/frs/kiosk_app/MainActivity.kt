@@ -11,6 +11,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+            val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, LOCK_TASK_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startLockTask" -> {
@@ -30,8 +31,22 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "isDeviceOwner" -> {
-                    val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
                     result.success(dpm.isDeviceOwnerApp(packageName))
+                }
+                "isLockTaskPermitted" -> {
+                    result.success(dpm.isLockTaskPermitted(packageName))
+                }
+                "enableKioskMode" -> {
+                    try {
+                        val adminComponent = KioskDeviceAdminReceiver.getComponentName(this)
+                        if (dpm.isDeviceOwnerApp(packageName)) {
+                            dpm.setLockTaskPackages(adminComponent, arrayOf(packageName))
+                        }
+                        startLockTask()
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("KIOSK_ENABLE_ERROR", e.localizedMessage, null)
+                    }
                 }
                 else -> result.notImplemented()
             }

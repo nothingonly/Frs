@@ -37,6 +37,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="app-frame">
+      <a href="#main-content" className="skip-link">Skip to main content</a>
       <aside className="sidebar">
         <Link className="brand" href="/" aria-label="FRS Admin overview">
           <span className="brand-mark">F</span>
@@ -79,7 +80,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
-      <main className="main-column">
+      <main className="main-column" id="main-content">
         <header className="topbar">
           <div><div className="eyebrow">FACE RECOGNITION SYSTEM</div><h1>{current.label}</h1></div>
           <div className="topbar-meta"><span className={isConnected ? "pill pill-success" : "pill pill-muted"}><span className="status-dot" />{isConnected ? "API authenticated" : "Read-only health"}</span><span className="version-label">FRS PLATFORM · INTEGRATED</span></div>

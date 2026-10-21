@@ -97,6 +97,7 @@ def test_migration_sql_files_exist_and_match_entity_schema() -> None:
         "0001_base_schema.sql",
         "0002_college_domain.sql",
         "0003_capture_batches.sql",
+        "0004_dead_letter_status.sql",
     ]
     for filename in expected_files:
         path = migration_dir / filename
@@ -320,6 +321,43 @@ def test_schema_constraints_and_foreign_keys_enforced() -> None:
             student = session.get(Student, "s-1")
             assert student is not None
             assert student.person_id is None
+
+            # 12. CaptureBatchJob DEAD_LETTER status is permitted
+            job_dlq = CaptureBatchJob(
+                batch_id="batch-dlq-1",
+                attendance_session_id="sess-1",
+                class_group_id="cg-1",
+                device_actor_id="device:001",
+                client_device_id="kiosk-1",
+                idempotency_key="idemp-key-dlq",
+                request_sha256="c" * 64,
+                frame_count=3,
+                punch_type="CHECK_IN",
+                status="DEAD_LETTER",
+                payload_expires_at=now + timedelta(hours=24),
+            )
+            session.add(job_dlq)
+            session.commit()
+            assert job_dlq.status == "DEAD_LETTER"
+
+            # Invalid status is rejected by check constraint
+            job_invalid = CaptureBatchJob(
+                batch_id="batch-invalid-status",
+                attendance_session_id="sess-1",
+                class_group_id="cg-1",
+                device_actor_id="device:001",
+                client_device_id="kiosk-1",
+                idempotency_key="idemp-key-inv",
+                request_sha256="d" * 64,
+                frame_count=3,
+                punch_type="CHECK_IN",
+                status="INVALID_STATUS",
+                payload_expires_at=now + timedelta(hours=24),
+            )
+            session.add(job_invalid)
+            with pytest.raises(IntegrityError):
+                session.commit()
+            session.rollback()
     finally:
         engine.dispose()
 

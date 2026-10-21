@@ -40,25 +40,34 @@ jobs:
 
       - name: Cache Buffalo_L ONNX model weights
         id: cache-models
+        if: ${{ github.event.inputs.download_weights != 'true' }}
         uses: actions/cache@v4
         with:
           path: backend/model-artifacts/insightface/models/buffalo_l
-          key: buffalo-l-onnx-${{ hashFiles('backend/app/vision/onnx_models.py') }}
+          key: buffalo-l-onnx-${{ hashFiles('backend/app/vision/onnx_models.py', 'backend/model-artifacts/primary-model-manifest.json') }}
 
-      - name: Provision model weights if not cached
-        if: steps.cache-models.outputs.cache-hit != 'true'
+      - name: Provision model weights and verify integrity
+        if: steps.cache-models.outputs.cache-hit != 'true' || github.event.inputs.download_weights == 'true'
         env:
           MODELS_DOWNLOAD_URL: ${{ secrets.AUTHORIZED_VISION_MODELS_URL }}
         run: |
           mkdir -p model-artifacts/insightface/models/buffalo_l
-          if [ -n "$MODELS_DOWNLOAD_URL" ]; then
-            echo "Downloading authorized model weights from secure artifact storage..."
-            curl -fSL "$MODELS_DOWNLOAD_URL/det_10g.onnx" -o model-artifacts/insightface/models/buffalo_l/det_10g.onnx
-            curl -fSL "$MODELS_DOWNLOAD_URL/w600k_r50.onnx" -o model-artifacts/insightface/models/buffalo_l/w600k_r50.onnx
-          else
-            echo "::warning::AUTHORIZED_VISION_MODELS_URL secret not set. Skipping automated download; relying on local/runner cache."
+          if [ -z "$MODELS_DOWNLOAD_URL" ]; then
+            echo "::error::AUTHORIZED_VISION_MODELS_URL secret is required to provision model weights for staging vision inference."
+            exit 1
           fi
+          echo "Downloading authorized model weights from secure artifact storage..."
+          curl -fSL "$MODELS_DOWNLOAD_URL/det_10g.onnx" -o model-artifacts/insightface/models/buffalo_l/det_10g.onnx
+          curl -fSL "$MODELS_DOWNLOAD_URL/w600k_r50.onnx" -o model-artifacts/insightface/models/buffalo_l/w600k_r50.onnx
+          echo "Verifying SHA-256 provenance hashes..."
+          echo "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91  model-artifacts/insightface/models/buffalo_l/det_10g.onnx" | sha256sum -c -
+          echo "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43  model-artifacts/insightface/models/buffalo_l/w600k_r50.onnx" | sha256sum -c -
+          cp model-artifacts/primary-model-manifest.json model-artifacts/insightface/models/buffalo_l/manifest.json
 
-      - name: Run real vision inference test suite
+      - name: Run real vision inference test suite (zero skips required)
+        env:
+          FRS_MODEL_ROOT: model-artifacts/insightface
+          FRS_MODEL_PACK: buffalo_l
         run: |
-          pytest tests/test_real_vision_inference.py -v -s
+          # Execute real inference test suite; fail if any test is skipped or fails
+          pytest tests/test_real_vision_inference.py -v -s -rA

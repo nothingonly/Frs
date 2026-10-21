@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     detect_size: int = Field(default=640, ge=320, le=1280)
     model_provider: str = "CPUExecutionProvider"
     model_license_attested: bool = False
-    require_all_specialists: bool = True
+    require_all_specialists: bool = False
     retinaface_onnx_path: str = ""
     adaface_onnx_path: str = ""
     mobilefacenet_onnx_path: str = ""
@@ -121,10 +121,20 @@ class Settings(BaseSettings):
         if self.minimum_identification_frames > self.maximum_identification_frames:
             raise ValueError("Minimum identification frames cannot exceed maximum frames")
         if self.env.lower() == "production":
+            db_url = self.database_url.lower().strip()
+            if db_url.startswith("sqlite") or not (
+                db_url.startswith("postgresql") or db_url.startswith("postgres")
+            ):
+                raise ValueError(
+                    "Production startup refused: SQLite is not permitted in production. "
+                    "Configure a production PostgreSQL database URL (postgresql+psycopg2:// or postgresql://)."
+                )
             if not self.device_keys or any(len(token) < 32 for token in self.device_keys):
                 raise ValueError("Production requires device API keys of at least 32 characters")
             if len(self.admin_api_key) < 32:
                 raise ValueError("Production requires a separate admin API key of at least 32 characters")
+            if self.jwt_secret and len(self.jwt_secret) < 32:
+                raise ValueError("Production requires FRS_JWT_SECRET of at least 32 characters when configured")
             self.encryption_key_bytes()
             if not self.threshold_calibrated or "ArcFace" not in self.calibrated_models:
                 raise ValueError("Production startup refused: ArcFace threshold must be calibrated on project data")

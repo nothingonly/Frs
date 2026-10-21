@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:kiosk_app/config/app_config.dart';
 import 'package:kiosk_app/models/punch_type.dart';
 import 'package:kiosk_app/services/api_service.dart';
+import 'package:kiosk_app/services/offline_queue_service.dart';
 import 'package:kiosk_app/state/kiosk_state.dart';
 
 class StateHttpClient extends http.BaseClient {
@@ -156,5 +157,60 @@ void main() {
       state.dispose();
       client.close();
     });
+
+    test('network failure during session attendance automatically buffers into encrypted queue', () async {
+      final fakeStorage = _MockEncryptedStorage();
+      final offlineService = OfflineQueueService(storage: fakeStorage);
+      final client = _ThrowingClient();
+      final service = FrsApiService(config: config, client: client);
+
+      final state = KioskState(offlineQueueService: offlineService)..setCapturedImages(frames);
+      expect(state.isOfflineQueued, isFalse);
+      expect(state.offlineQueueCount, 0);
+
+      await state.submitSessionAttendance(service, 'session_cs101_offline');
+
+      expect(state.status, KioskStatus.accepted);
+      expect(state.isOfflineQueued, isTrue);
+      expect(state.offlineQueueCount, 1);
+      expect(state.matchedEmployeeName, contains('Buffered Offline'));
+      expect(state.matchedEmployeeId, startsWith('OFFLINE-batch_'));
+      expect(state.errorMessage, isNull);
+
+      final pending = await offlineService.getPendingBatches();
+      expect(pending.length, 1);
+      expect(pending.first.sessionId, 'session_cs101_offline');
+      expect(pending.first.frameCount, 3);
+
+      state.reset();
+      expect(state.isOfflineQueued, isFalse);
+      expect(state.status, KioskStatus.idle);
+      state.dispose();
+      client.close();
+    });
   });
+}
+
+class _ThrowingClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    throw http.ClientException('Network down: Connection refused');
+  }
+}
+
+class _MockEncryptedStorage implements IEncryptedQueueStorage {
+  final Map<String, String> _map = {};
+
+  @override
+  Future<String?> read({required String key}) async => _map[key];
+
+  @override
+  Future<void> write({required String key, required String value}) async {
+    _map[key] = value;
+  }
+
+  @override
+  Future<void> delete({required String key}) async {
+    _map.remove(key);
+  }
 }

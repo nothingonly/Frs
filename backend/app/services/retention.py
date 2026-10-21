@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -17,21 +17,28 @@ logger = logging.getLogger("frs.retention")
 
 
 def purge_expired_capture_payloads(db: Session, retention_days: int = 30) -> int:
-    """Purge raw encrypted image payloads and nonces from capture jobs older than retention_days.
-    
+    """Purge raw encrypted image payloads and nonces from capture jobs that have expired.
+
+    Checks both:
+    1. payload_expires_at <= now (the 24-hour sensitive payload expiry horizon), and
+    2. created_at < cutoff (the overall retention days policy window).
+
     Preserves all attendance event records, audit entries, and job metadata while securely
     erasing sensitive biometric frame data after the policy window expires.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=retention_days)
     expired_jobs = db.execute(
         select(CaptureBatchJob).where(
-            CaptureBatchJob.created_at < cutoff,
+            or_(
+                CaptureBatchJob.payload_expires_at <= now,
+                CaptureBatchJob.created_at < cutoff,
+            ),
             CaptureBatchJob.encrypted_payload.is_not(None),
         )
     ).scalars().all()
 
     purged_count = 0
-    now = datetime.now(timezone.utc)
     for job in expired_jobs:
         job.encrypted_payload = None
         job.payload_nonce = None
@@ -44,7 +51,11 @@ def purge_expired_capture_payloads(db: Session, retention_days: int = 30) -> int
 
     if purged_count > 0:
         db.commit()
-        logger.info("Purged %d raw capture payloads older than %d days.", purged_count, retention_days)
+        logger.info(
+            "Purged %d raw capture payloads (expired before now or older than %d days).",
+            purged_count,
+            retention_days,
+        )
 
     return purged_count
 

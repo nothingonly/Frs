@@ -6,9 +6,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import admin_actor
+from app.api.dependencies import (
+    ROLE_DEAN,
+    ROLE_FACULTY,
+    TokenClaims,
+    check_class_access,
+    check_department_access,
+    scoped_actor,
+    scoped_admin,
+)
 from app.core.config import get_settings
 from app.database import get_db
+from app.db.entities import AttendanceSession, ClassGroup
 from app.services.integrations import (
     AbsenteeAlertService,
     LtiService,
@@ -46,10 +55,21 @@ class LtiAgsPassbackRequest(BaseModel):
 @router.post("/notifications/absentees")
 def dispatch_session_absentee_alerts(
     payload: AbsenteeAlertRequest,
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
     """Identify absentees for a session and dispatch email or SMS notifications with retries."""
+    sess = db.get(AttendanceSession, payload.session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"Attendance session '{payload.session_id}' not found.")
+
+    if actor.role == ROLE_FACULTY:
+        check_class_access(actor, sess.class_group_id)
+    elif actor.role == ROLE_DEAN:
+        cg = db.get(ClassGroup, sess.class_group_id)
+        if cg:
+            check_department_access(actor, cg.department_id)
+
     try:
         absentees = AbsenteeAlertService.find_absentees(db, payload.session_id)
     except ValueError as exc:
@@ -92,10 +112,19 @@ def dispatch_session_absentee_alerts(
 @router.post("/sftp/export")
 def trigger_sftp_attendance_export(
     payload: SftpExportRequest,
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
 ):
     """Generate standardized SIS attendance CSV and stage/dispatch it via SFTP."""
+    sess = db.get(AttendanceSession, payload.session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"Attendance session '{payload.session_id}' not found.")
+
+    if actor.role == ROLE_DEAN:
+        cg = db.get(ClassGroup, sess.class_group_id)
+        if cg:
+            check_department_access(actor, cg.department_id)
+
     settings = get_settings()
     remote_path = payload.remote_path or settings.sftp_remote_path
     try:
@@ -115,7 +144,7 @@ def trigger_sftp_attendance_export(
 @router.post("/lti/launch/validate")
 def validate_lti_launch(
     payload: LtiLaunchValidationRequest,
-    _actor: Annotated[str, Depends(admin_actor)],
+    _actor: Annotated[TokenClaims, Depends(scoped_admin)],
 ):
     """Validate incoming 1EdTech LTI 1.3 launch claims for Canvas/Moodle LMS integration."""
     settings = get_settings()
@@ -130,7 +159,7 @@ def validate_lti_launch(
 @router.post("/lti/ags/passback")
 def format_lti_ags_passback(
     payload: LtiAgsPassbackRequest,
-    _actor: Annotated[str, Depends(admin_actor)],
+    _actor: Annotated[TokenClaims, Depends(scoped_admin)],
 ):
     """Format and prepare an LTI 1.3 Assignment and Grade Services (AGS) lineitem outcome."""
     try:

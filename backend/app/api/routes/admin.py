@@ -11,7 +11,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import admin_actor
+from app.api.dependencies import (
+    ROLE_DEAN,
+    ROLE_FACULTY,
+    ROLE_SUPER_ADMIN,
+    TokenClaims,
+    check_class_access,
+    check_department_access,
+    scoped_actor,
+    scoped_admin,
+)
 from app.database import get_db
 from app.db.entities import (
     AttendanceEvent,
@@ -46,7 +55,7 @@ router = APIRouter(prefix="/api/v1/admin", tags=["administration"])
 
 @router.get("/people")
 def list_people(
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
     active_only: bool = True,
     limit: int = Query(default=100, ge=1, le=500),
@@ -55,6 +64,24 @@ def list_people(
     statement = select(Person)
     if active_only:
         statement = statement.where(Person.is_active.is_(True))
+    if actor.role == ROLE_DEAN and actor.department_id:
+        dept = db.get(Department, actor.department_id)
+        if dept:
+            statement = statement.where(Person.department == dept.code)
+    elif actor.role == ROLE_FACULTY:
+        if not actor.class_group_ids:
+            return {"items": [], "limit": limit, "offset": offset, "total": 0}
+        subq = (
+            select(Student.person_id)
+            .join(ClassEnrollment, ClassEnrollment.student_id == Student.student_id)
+            .where(
+                ClassEnrollment.class_group_id.in_(actor.class_group_ids),
+                ClassEnrollment.status == "ACTIVE",
+                Student.person_id.is_not(None),
+            )
+        )
+        statement = statement.where(Person.person_id.in_(subq))
+
     people = db.execute(statement.order_by(Person.employee_id).limit(limit).offset(offset)).scalars().all()
     return {
         "items": [{
@@ -75,19 +102,23 @@ def list_people(
 @router.post("/people/{employee_id}/deactivate")
 def deactivate_person(
     employee_id: str,
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
 ):
     person = db.execute(select(Person).where(Person.employee_id == employee_id).with_for_update()).scalar_one_or_none()
     if person is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
+    if actor.role == ROLE_DEAN and actor.department_id:
+        dept = db.get(Department, actor.department_id)
+        if dept and person.department != dept.code:
+            raise HTTPException(status_code=403, detail="Deans can only modify identities in their department.")
     if person.is_active:
         person.is_active = False
         person.updated_at = datetime.now(timezone.utc)
     event = AuditEvent(
         session_id=f"admin:{employee_id}",
         actor_type="administrator",
-        actor_id=actor,
+        actor_id=actor.email or actor.sub,
         action="person.deactivate",
         decision_state="REVOKED",
         reason_codes_json=json.dumps(["ADMINISTRATIVE_REVOCATION"]),
@@ -101,18 +132,22 @@ def deactivate_person(
 @router.post("/people/{employee_id}/reactivate")
 def reactivate_person(
     employee_id: str,
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
 ):
     person = db.execute(select(Person).where(Person.employee_id == employee_id).with_for_update()).scalar_one_or_none()
     if person is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
+    if actor.role == ROLE_DEAN and actor.department_id:
+        dept = db.get(Department, actor.department_id)
+        if dept and person.department != dept.code:
+            raise HTTPException(status_code=403, detail="Deans can only modify identities in their department.")
     person.is_active = True
     person.updated_at = datetime.now(timezone.utc)
     event = AuditEvent(
         session_id=f"admin:{employee_id}",
         actor_type="administrator",
-        actor_id=actor,
+        actor_id=actor.email or actor.sub,
         action="person.reactivate",
         decision_state="REACTIVATED",
         reason_codes_json=json.dumps(["ADMINISTRATIVE_REACTIVATION"]),
@@ -125,7 +160,7 @@ def reactivate_person(
 
 @router.get("/attendance")
 def list_attendance(
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
     employee_id: str | None = None,
     attendance_session_id: str | None = None,
@@ -136,7 +171,30 @@ def list_attendance(
     if employee_id:
         statement = statement.where(AttendanceEvent.employee_id == employee_id)
     if attendance_session_id:
+        sess = db.get(AttendanceSession, attendance_session_id)
+        if sess:
+            if actor.role == ROLE_FACULTY:
+                check_class_access(actor, sess.class_group_id)
+            elif actor.role == ROLE_DEAN:
+                cg = db.get(ClassGroup, sess.class_group_id)
+                if cg:
+                    check_department_access(actor, cg.department_id)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
+    else:
+        if actor.role == ROLE_FACULTY:
+            statement = statement.join(
+                AttendanceSession,
+                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
+            ).where(AttendanceSession.class_group_id.in_(actor.class_group_ids or ["__none__"]))
+        elif actor.role == ROLE_DEAN:
+            statement = statement.join(
+                AttendanceSession,
+                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
+            ).join(
+                ClassGroup,
+                AttendanceSession.class_group_id == ClassGroup.class_group_id,
+            ).where(ClassGroup.department_id == actor.department_id)
+
     rows = db.execute(statement.order_by(AttendanceEvent.timestamp.desc()).limit(limit).offset(offset)).scalars().all()
     return {
         "items": [{
@@ -158,7 +216,7 @@ def list_attendance(
 
 @router.get("/attendance/export")
 def export_attendance_csv(
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
     employee_id: str | None = None,
     attendance_session_id: str | None = None,
@@ -167,7 +225,30 @@ def export_attendance_csv(
     if employee_id:
         statement = statement.where(AttendanceEvent.employee_id == employee_id)
     if attendance_session_id:
+        sess = db.get(AttendanceSession, attendance_session_id)
+        if sess:
+            if actor.role == ROLE_FACULTY:
+                check_class_access(actor, sess.class_group_id)
+            elif actor.role == ROLE_DEAN:
+                cg = db.get(ClassGroup, sess.class_group_id)
+                if cg:
+                    check_department_access(actor, cg.department_id)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
+    else:
+        if actor.role == ROLE_FACULTY:
+            statement = statement.join(
+                AttendanceSession,
+                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
+            ).where(AttendanceSession.class_group_id.in_(actor.class_group_ids or ["__none__"]))
+        elif actor.role == ROLE_DEAN:
+            statement = statement.join(
+                AttendanceSession,
+                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
+            ).join(
+                ClassGroup,
+                AttendanceSession.class_group_id == ClassGroup.class_group_id,
+            ).where(ClassGroup.department_id == actor.department_id)
+
     rows = db.execute(statement.order_by(AttendanceEvent.timestamp.desc())).scalars().all()
 
     output = io.StringIO()
@@ -209,7 +290,7 @@ def export_attendance_csv(
 
 @router.get("/audit")
 def list_audit_events(
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
     session_id: str | None = None,
     action: str | None = None,
@@ -217,6 +298,28 @@ def list_audit_events(
     offset: int = Query(default=0, ge=0),
 ):
     statement = select(AuditEvent)
+    if actor.role == ROLE_DEAN and actor.department_id:
+        dept = db.get(Department, actor.department_id)
+        if session_id:
+            sess = db.get(AttendanceSession, session_id)
+            if sess:
+                cg = db.get(ClassGroup, sess.class_group_id)
+                if cg and cg.department_id != actor.department_id:
+                    raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
+            elif session_id.startswith("admin:"):
+                emp_id = session_id.split(":", 1)[1]
+                person = db.execute(select(Person).where(Person.employee_id == emp_id)).scalar_one_or_none()
+                if person and dept and person.department != dept.code:
+                    raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
+        else:
+            dept_sessions = select(AttendanceSession.session_id).join(
+                ClassGroup, AttendanceSession.class_group_id == ClassGroup.class_group_id
+            ).where(ClassGroup.department_id == actor.department_id)
+            actor_id_str = actor.email or actor.sub
+            statement = statement.where(
+                (AuditEvent.session_id.in_(dept_sessions)) | (AuditEvent.actor_id == actor_id_str)
+            )
+
     if session_id:
         statement = statement.where(AuditEvent.session_id == session_id)
     if action:
@@ -242,12 +345,24 @@ def list_audit_events(
 @router.get("/audit/{audit_id}")
 def get_audit(
     audit_id: str,
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
 ):
     event = db.get(AuditEvent, audit_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Audit event not found.")
+    if actor.role == ROLE_DEAN and actor.department_id:
+        dept = db.get(Department, actor.department_id)
+        sess = db.get(AttendanceSession, event.session_id) if event.session_id else None
+        if sess:
+            cg = db.get(ClassGroup, sess.class_group_id)
+            if cg and cg.department_id != actor.department_id:
+                raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
+        elif event.session_id and event.session_id.startswith("admin:"):
+            emp_id = event.session_id.split(":", 1)[1]
+            person = db.execute(select(Person).where(Person.employee_id == emp_id)).scalar_one_or_none()
+            if person and dept and person.department != dept.code:
+                raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
     return {
         "audit_id": event.audit_id,
         "session_id": event.session_id,
@@ -264,7 +379,7 @@ def get_audit(
 @router.get("/models")
 def list_models(
     request: Request,
-    _actor: Annotated[str, Depends(admin_actor)],
+    _actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
     rows = db.execute(select(ModelRegistryEntry).order_by(ModelRegistryEntry.model_id, ModelRegistryEntry.model_version)).scalars().all()
@@ -290,7 +405,7 @@ def list_models(
 
 @router.get("/attendance-batches")
 def list_capture_batches(
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
     attendance_session_id: str | None = None,
     status: str | None = None,
@@ -298,10 +413,26 @@ def list_capture_batches(
 ):
     statement = select(CaptureBatchJob)
     if attendance_session_id:
+        sess = db.get(AttendanceSession, attendance_session_id)
+        if sess:
+            if actor.role == ROLE_FACULTY:
+                check_class_access(actor, sess.class_group_id)
+            elif actor.role == ROLE_DEAN:
+                cg = db.get(ClassGroup, sess.class_group_id)
+                if cg:
+                    check_department_access(actor, cg.department_id)
         statement = statement.where(CaptureBatchJob.attendance_session_id == attendance_session_id)
+    else:
+        if actor.role == ROLE_FACULTY:
+            statement = statement.where(CaptureBatchJob.class_group_id.in_(actor.class_group_ids or ["__none__"]))
+        elif actor.role == ROLE_DEAN:
+            statement = statement.join(
+                ClassGroup, CaptureBatchJob.class_group_id == ClassGroup.class_group_id
+            ).where(ClassGroup.department_id == actor.department_id)
+
     if status:
         normalized_status = status.strip().upper()
-        if normalized_status not in {"QUEUED", "PROCESSING", "SUCCEEDED", "REJECTED", "FAILED"}:
+        if normalized_status not in {"QUEUED", "PROCESSING", "SUCCEEDED", "REJECTED", "FAILED", "DEAD_LETTER"}:
             raise HTTPException(status_code=422, detail="Unknown capture-batch status.")
         statement = statement.where(CaptureBatchJob.status == normalized_status)
     rows = db.execute(statement.order_by(CaptureBatchJob.created_at.desc()).limit(limit)).scalars().all()
@@ -311,7 +442,7 @@ def list_capture_batches(
 @router.post("/attendance-batches/{batch_id}/retry")
 def retry_capture_batch(
     batch_id: str,
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
     job = db.execute(select(CaptureBatchJob).where(
@@ -319,6 +450,12 @@ def retry_capture_batch(
     ).with_for_update()).scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="Capture batch not found.")
+    if actor.role == ROLE_FACULTY:
+        check_class_access(actor, job.class_group_id)
+    elif actor.role == ROLE_DEAN:
+        cg = db.get(ClassGroup, job.class_group_id)
+        if cg:
+            check_department_access(actor, cg.department_id)
     if job.status != "FAILED":
         raise HTTPException(status_code=409, detail="Only failed capture batches can be retried.")
     now = datetime.now(timezone.utc)
@@ -344,7 +481,7 @@ def retry_capture_batch(
 
 @router.get("/stats")
 def get_system_stats(
-    _actor: Annotated[str, Depends(admin_actor)],
+    _actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
     now = datetime.now(timezone.utc)
@@ -372,17 +509,22 @@ def get_system_stats(
 
 @router.get("/review-queue")
 def list_review_queue(
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
     limit: int = Query(default=50, ge=1, le=200),
 ):
     statement = (
         select(CaptureBatchJob)
         .where(CaptureBatchJob.status.in_(["REJECTED", "FAILED"]))
-        .order_by(CaptureBatchJob.created_at.desc())
-        .limit(limit)
     )
-    jobs = db.execute(statement).scalars().all()
+    if actor.role == ROLE_FACULTY:
+        statement = statement.where(CaptureBatchJob.class_group_id.in_(actor.class_group_ids or ["__none__"]))
+    elif actor.role == ROLE_DEAN:
+        statement = statement.join(
+            ClassGroup, CaptureBatchJob.class_group_id == ClassGroup.class_group_id
+        ).where(ClassGroup.department_id == actor.department_id)
+
+    jobs = db.execute(statement.order_by(CaptureBatchJob.created_at.desc()).limit(limit)).scalars().all()
     items = []
     for job in jobs:
         sess = db.get(AttendanceSession, job.attendance_session_id)
@@ -409,7 +551,7 @@ def list_review_queue(
 def resolve_review_item(
     batch_id: str,
     payload: ResolveReviewRequest,
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
     job = db.execute(select(CaptureBatchJob).where(
@@ -417,6 +559,13 @@ def resolve_review_item(
     ).with_for_update()).scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="Review item not found.")
+    if actor.role == ROLE_FACULTY:
+        check_class_access(actor, job.class_group_id)
+    elif actor.role == ROLE_DEAN:
+        cg = db.get(ClassGroup, job.class_group_id)
+        if cg:
+            check_department_access(actor, cg.department_id)
+
     if job.status not in ("REJECTED", "FAILED"):
         raise HTTPException(status_code=409, detail="Only rejected or failed capture jobs can be reviewed.")
 
@@ -424,6 +573,8 @@ def resolve_review_item(
     sess = db.get(AttendanceSession, job.attendance_session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="Associated attendance session not found.")
+
+    actor_id_str = actor.email or actor.sub
 
     if payload.action == "APPROVE_MANUAL":
         if not payload.student_id:
@@ -464,7 +615,7 @@ def resolve_review_item(
             "attendance_id": attendance_event.attendance_id,
             "student_id": student.student_id,
             "student_number": student.student_number,
-            "actor": actor,
+            "actor": actor_id_str,
             "notes": payload.notes,
         })
         decision_state = "MANUALLY_APPROVED"
@@ -477,7 +628,7 @@ def resolve_review_item(
     audit = AuditEvent(
         session_id=job.attendance_session_id,
         actor_type="administrator",
-        actor_id=actor,
+        actor_id=actor_id_str,
         action="review_queue.resolve",
         decision_state=decision_state,
         reason_codes_json=json.dumps([payload.reason_code]),
@@ -497,7 +648,7 @@ def resolve_review_item(
 def correct_attendance_record(
     attendance_id: str,
     payload: AttendanceCorrectionRequest,
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
     event = db.execute(
@@ -505,6 +656,24 @@ def correct_attendance_record(
     ).scalar_one_or_none()
     if event is None:
         raise HTTPException(status_code=404, detail="Attendance record not found.")
+
+    if event.attendance_session_id:
+        sess = db.get(AttendanceSession, event.attendance_session_id)
+        if sess:
+            if actor.role == ROLE_FACULTY:
+                check_class_access(actor, sess.class_group_id)
+            elif actor.role == ROLE_DEAN:
+                cg = db.get(ClassGroup, sess.class_group_id)
+                if cg:
+                    check_department_access(actor, cg.department_id)
+    else:
+        if actor.role == ROLE_FACULTY:
+            raise HTTPException(status_code=403, detail="Faculty can only correct session-scoped attendance records.")
+        elif actor.role == ROLE_DEAN:
+            dept = db.get(Department, actor.department_id) if actor.department_id else None
+            person = db.get(Person, event.person_id) if event.person_id else None
+            if dept and person and person.department != dept.code:
+                raise HTTPException(status_code=403, detail="Deans can only modify attendance records in their department.")
 
     previous_punch = event.punch_type
 
@@ -522,7 +691,7 @@ def correct_attendance_record(
     audit = AuditEvent(
         session_id=event.attendance_session_id or f"attendance:{attendance_id}",
         actor_type="administrator",
-        actor_id=actor,
+        actor_id=actor.email or actor.sub,
         action=action,
         decision_state=decision_state,
         reason_codes_json=json.dumps([payload.reason_code]),
@@ -542,7 +711,7 @@ def correct_attendance_record(
 @router.post("/attendance/manual-entry")
 def manual_attendance_entry(
     payload: ManualAttendanceRequest,
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
     student = db.get(Student, payload.student_id)
@@ -565,6 +734,13 @@ def manual_attendance_entry(
     if sess is None:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
 
+    if actor.role == ROLE_FACULTY:
+        check_class_access(actor, sess.class_group_id)
+    elif actor.role == ROLE_DEAN:
+        cg = db.get(ClassGroup, sess.class_group_id)
+        if cg:
+            check_department_access(actor, cg.department_id)
+
     enrollment = db.execute(
         select(ClassEnrollment)
         .where(ClassEnrollment.student_id == student.student_id)
@@ -575,6 +751,7 @@ def manual_attendance_entry(
         raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
 
     now = datetime.now(timezone.utc)
+    actor_id_str = actor.email or actor.sub
     attendance_event = AttendanceEvent(
         attendance_id=str(uuid.uuid4()),
         person_id=student.person_id,
@@ -583,7 +760,7 @@ def manual_attendance_entry(
         timestamp=now,
         similarity_score=1.0,
         threshold=1.0,
-        client_device_id=f"manual:{actor}",
+        client_device_id=f"manual:{actor_id_str}",
         pipeline_version="manual-administrative-entry",
         evidence_id=f"manual:{uuid.uuid4()}",
         attendance_session_id=sess.session_id,
@@ -593,7 +770,7 @@ def manual_attendance_entry(
     audit = AuditEvent(
         session_id=sess.session_id,
         actor_type="administrator",
-        actor_id=actor,
+        actor_id=actor_id_str,
         action="attendance.manual_entry",
         decision_state="MANUAL_ENTRY",
         reason_codes_json=json.dumps([payload.reason_code]),
@@ -613,7 +790,7 @@ def manual_attendance_entry(
 @router.get("/storage/status")
 def get_storage_status(
     request: Request,
-    _actor: Annotated[str, Depends(admin_actor)],
+    _actor: Annotated[TokenClaims, Depends(scoped_admin)],
 ):
     storage = getattr(request.app.state, "storage", None)
     configured = storage.is_configured if storage else False
@@ -629,7 +806,7 @@ def get_storage_status(
 def get_signed_storage_url(
     payload: SignedUrlRequest,
     request: Request,
-    _actor: Annotated[str, Depends(admin_actor)],
+    _actor: Annotated[TokenClaims, Depends(scoped_admin)],
 ):
     storage = getattr(request.app.state, "storage", None)
     if not storage or not storage.is_configured:
@@ -645,9 +822,11 @@ def get_signed_storage_url(
 def delete_storage_media(
     payload: DeleteMediaRequest,
     request: Request,
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
 ):
+    if actor.role != ROLE_SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Administrators can delete storage media.")
     storage = getattr(request.app.state, "storage", None)
     if not storage or not storage.is_configured:
         raise HTTPException(status_code=503, detail="Cloud storage is not configured.")
@@ -657,7 +836,7 @@ def delete_storage_media(
     audit = AuditEvent(
         session_id=f"storage:{payload.public_id}",
         actor_type="administrator",
-        actor_id=actor,
+        actor_id=actor.email or actor.sub,
         action="storage.delete_media",
         decision_state="DELETED",
         reason_codes_json=json.dumps([payload.reason_code]),
@@ -670,12 +849,13 @@ def delete_storage_media(
 
 @router.get("/batches/dead-letter")
 def get_dead_letter_batches(
-    _actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
     limit: int = Query(default=50, ge=1, le=100),
 ):
     """List poisoned or retry-exhausted capture batches for operator triage."""
-    items = list_dead_letter_batches(db, limit=limit)
+    dept_id = actor.department_id if actor.role == ROLE_DEAN else None
+    items = list_dead_letter_batches(db, limit=limit, department_id=dept_id)
     return {"items": items, "total": len(items)}
 
 
@@ -683,38 +863,64 @@ def get_dead_letter_batches(
 @router.post("/batches/{batch_id}/retry")
 def requeue_batch(
     batch_id: str,
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
 ):
     """Requeue an exhausted dead-letter batch back to the queue for reprocessing."""
-    return requeue_dead_letter_batch(db, batch_id, operator_id=actor)
+    allowed_dept = actor.department_id if actor.role == ROLE_DEAN else None
+    return requeue_dead_letter_batch(
+        db, batch_id, operator_id=actor.email or actor.sub, allowed_department_id=allowed_dept
+    )
 
 
 @router.post("/retention/purge")
 def trigger_retention_purge(
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
     retention_days: int | None = Query(default=None, ge=1, le=365),
 ):
     """Trigger data retention purge for expired raw capture frames."""
+    if actor.role != ROLE_SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Administrators can trigger data retention purges.")
     days = retention_days or get_settings().retention_purge_days
-    return run_retention_purge(db, retention_days=days, operator_id=actor)
+    return run_retention_purge(db, retention_days=days, operator_id=actor.email or actor.sub)
 
 
 @router.post("/students/{student_id}/de-enroll")
 def de_enroll_student(
     student_id: str,
     request: Request,
-    actor: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
 ):
     """Permanently de-enroll student biometrics, purge embeddings, and issue a cryptographic deletion certificate."""
+    student = db.get(Student, student_id)
+    if student is None:
+        raise HTTPException(status_code=404, detail=f"Student '{student_id}' does not exist.")
+    if actor.role == ROLE_DEAN:
+        dept = db.get(Department, actor.department_id) if actor.department_id else None
+        in_dept = False
+        if dept:
+            enrolled = db.execute(
+                select(ClassGroup)
+                .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
+                .where(ClassEnrollment.student_id == student_id, ClassGroup.department_id == actor.department_id)
+            ).scalars().first()
+            if enrolled:
+                in_dept = True
+            elif student.person_id:
+                person = db.get(Person, student.person_id)
+                if person and person.department == dept.code:
+                    in_dept = True
+        if not in_dept:
+            raise HTTPException(status_code=403, detail="Deans can only de-enroll students within their own department.")
+
     storage = getattr(request.app.state, "storage", None)
     try:
         return de_enroll_student_biometrics(
             db=db,
             student_id=student_id,
-            operator_id=actor,
+            operator_id=actor.email or actor.sub,
             storage_service=storage,
         )
     except ValueError as exc:

@@ -28,10 +28,22 @@ This runbook provides step-by-step procedures for deploying, migrating, backing 
    ```
 
 ### 2.2 Applying Database Migrations
-Migrations are managed in `backend/alembic` (or application schema initializers):
+Migrations are maintained as ordered, idempotent SQL scripts in `backend/migrations/`:
+- `0001_base_schema.sql` (core biometric tables, audit trail, model registry)
+- `0002_college_domain.sql` (departments, class groups, students, sessions)
+- `0003_capture_batches.sql` (encrypted capture batch queue and RLS)
+- `0004_dead_letter_status.sql` (DEAD_LETTER constraint forward-migration)
+
+Apply directly via psql:
 ```bash
-# In backend environment
-python -c "from app.database import create_schema, engine; create_schema()"
+for migration in backend/migrations/*.sql; do
+    echo "Applying $migration..."
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+done
+```
+Or initialize and verify compatibility via the application schema runner:
+```bash
+python -c "from app.database import create_schema; create_schema()"
 ```
 Verify all tables and constraints exist:
 ```bash

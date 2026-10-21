@@ -3,7 +3,8 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.core.metrics import get_metrics
-from app.database import create_schema
+from app.database import SessionLocal, create_schema
+from app.db.entities import CaptureBatchJob
 from app.main import app
 from app.worker import FRSWorkerDaemon
 
@@ -42,6 +43,9 @@ def test_liveness_and_readiness_probes() -> None:
 
 def test_worker_daemon_empty_queue_run_once() -> None:
     create_schema()
+    with SessionLocal() as db:
+        db.query(CaptureBatchJob).delete()
+        db.commit()
 
     class DummyPipeline:
         pass

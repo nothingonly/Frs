@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import device_actor
 from app.database import get_db
-from app.db.entities import AttendanceSession, CaptureBatchJob, ClassGroup, Department
+from app.db.entities import (
+    AttendanceEvent,
+    AttendanceSession,
+    AuditEvent,
+    CaptureBatchJob,
+    ClassEnrollment,
+    ClassGroup,
+    Department,
+    Student,
+)
 from app.security import encrypt_capture_payload
 from app.services.capture_batches import pack_capture_frames, serialize_capture_batch
 
@@ -255,3 +267,103 @@ def get_attendance_batch(
     attendance_session = db.get(AttendanceSession, job.attendance_session_id)
     payload["session_open"] = attendance_session is not None and attendance_session.status == "OPEN"
     return payload
+
+
+class AlternativeAttendancePayload(BaseModel):
+    student_number: str = Field(min_length=1, max_length=80)
+    punch_type: str = Field(pattern=r"^(CHECK_IN|CHECK_OUT)$")
+    alternative_method: str = Field(default="STUDENT_ID_PIN", min_length=2, max_length=60)
+    client_device_id: str = Field(default="kiosk-keypad", min_length=1, max_length=120)
+
+
+@router.post("/sessions/{attendance_session_id}/alternative", status_code=200)
+def record_alternative_attendance(
+    attendance_session_id: str,
+    payload: AlternativeAttendancePayload,
+    actor_id: Annotated[str, Depends(device_actor)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Enables approved non-biometric kiosk attendance (PIN, Student ID, Card/NFC) for opted-out or exempted students."""
+    attendance_session = db.get(AttendanceSession, attendance_session_id)
+    if attendance_session is None:
+        raise HTTPException(status_code=404, detail="Attendance session not found.")
+    if attendance_session.status != "OPEN":
+        raise HTTPException(status_code=409, detail="Attendance session is not open.")
+
+    student = db.execute(
+        select(Student).where(
+            Student.student_number == payload.student_number.strip(),
+            Student.is_active.is_(True),
+        )
+    ).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found or inactive.")
+
+    enrollment = db.execute(
+        select(ClassEnrollment).where(
+            ClassEnrollment.student_id == student.student_id,
+            ClassEnrollment.class_group_id == attendance_session.class_group_id,
+            ClassEnrollment.status == "ACTIVE",
+        )
+    ).scalar_one_or_none()
+    if enrollment is None:
+        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
+
+    now = datetime.now(timezone.utc)
+    cooldown_cutoff = now - timedelta(seconds=60)
+    recent_punch = db.execute(
+        select(AttendanceEvent).where(
+            AttendanceEvent.employee_id == student.student_number,
+            AttendanceEvent.attendance_session_id == attendance_session.session_id,
+            AttendanceEvent.timestamp >= cooldown_cutoff,
+        )
+    ).first()
+    if recent_punch is not None:
+        raise HTTPException(status_code=429, detail="Attendance punch cooldown active. Please wait before punching again.")
+
+    event = AttendanceEvent(
+        attendance_id=str(uuid.uuid4()),
+        person_id=student.person_id,
+        employee_id=student.student_number,
+        punch_type=payload.punch_type,
+        timestamp=now,
+        similarity_score=1.0,
+        threshold=0.0,
+        client_device_id=payload.client_device_id,
+        pipeline_version=f"kiosk-alternative:{payload.alternative_method.lower()}",
+        evidence_id=f"alt:{uuid.uuid4()}",
+        attendance_session_id=attendance_session.session_id,
+    )
+    db.add(event)
+
+    audit = AuditEvent(
+        session_id=attendance_session.session_id,
+        actor_type="device",
+        actor_id=actor_id,
+        action="attendance.kiosk_alternative",
+        decision_state="ACCEPTED",
+        reason_codes_json=json.dumps([payload.alternative_method]),
+        evidence_json=json.dumps({
+            "attendance_id": event.attendance_id,
+            "student_id": student.student_id,
+            "student_number": student.student_number,
+            "method": payload.alternative_method,
+            "punch_type": payload.punch_type,
+            "client_device_id": payload.client_device_id,
+        }),
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "status": "ACCEPTED",
+        "decision_state": "ACCEPTED",
+        "employee_id": student.student_number,
+        "full_name": student.full_name,
+        "similarity_score": 1.0,
+        "threshold": 0.0,
+        "punch_type": payload.punch_type,
+        "attendance_id": event.attendance_id,
+        "timestamp": now.isoformat(),
+        "method": payload.alternative_method,
+    }

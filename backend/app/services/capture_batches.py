@@ -200,19 +200,28 @@ def _finish_failure(
     db.commit()
 
 
-def list_dead_letter_batches(db: Session, limit: int = 50) -> list[dict]:
+def list_dead_letter_batches(db: Session, limit: int = 50, department_id: str | None = None) -> list[dict]:
     """Retrieve dead-letter capture batches for operator inspection and triage."""
     statement = (
         select(CaptureBatchJob)
         .where(CaptureBatchJob.status == "DEAD_LETTER")
-        .order_by(CaptureBatchJob.updated_at.desc())
-        .limit(min(max(1, limit), 100))
     )
+    if department_id:
+        statement = statement.join(
+            ClassGroup,
+            CaptureBatchJob.class_group_id == ClassGroup.class_group_id,
+        ).where(ClassGroup.department_id == department_id)
+    statement = statement.order_by(CaptureBatchJob.updated_at.desc()).limit(min(max(1, limit), 100))
     rows = db.execute(statement).scalars().all()
     return [serialize_capture_batch(job) for job in rows]
 
 
-def requeue_dead_letter_batch(db: Session, batch_id: str, operator_id: str | None = None) -> dict:
+def requeue_dead_letter_batch(
+    db: Session,
+    batch_id: str,
+    operator_id: str | None = None,
+    allowed_department_id: str | None = None,
+) -> dict:
     """Reset an exhausted dead-letter batch back to QUEUED for replay."""
     job = db.get(CaptureBatchJob, batch_id)
     if job is None:
@@ -222,6 +231,13 @@ def requeue_dead_letter_batch(db: Session, batch_id: str, operator_id: str | Non
             status_code=400,
             detail=f"Batch {batch_id} is in status '{job.status}', only DEAD_LETTER batches can be requeued.",
         )
+    if allowed_department_id:
+        group = db.get(ClassGroup, job.class_group_id)
+        if group and group.department_id != allowed_department_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Deans can only requeue dead-letter batches belonging to their department.",
+            )
     now = utcnow()
     if not job.encrypted_payload or not job.payload_nonce:
         raise HTTPException(
