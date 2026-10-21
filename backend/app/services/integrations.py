@@ -712,9 +712,16 @@ class LtiService:
         signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
 
         # Signature verification
-        key = signing_key_or_secret or (get_settings().effective_jwt_secret if get_settings() else "")
+        settings = get_settings()
+        key = signing_key_or_secret
+        if key is None and alg == "RS256" and settings:
+            key = settings.lti_platform_public_key_pem or None
+        if key is None and alg == "HS256" and settings and not settings.is_production:
+            key = settings.effective_jwt_secret or None
         if not key:
-            raise ValueError("LTI token verification refused: no trusted key or secret configured.")
+            raise ValueError("LTI token verification refused: no trusted platform key configured.")
+        if settings and settings.is_production and alg != "RS256":
+            raise ValueError("Production LTI 1.3 launches must use RS256 platform signatures.")
 
         if alg == "HS256":
             key_bytes = key.encode("utf-8") if isinstance(key, str) else key
