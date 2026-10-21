@@ -805,7 +805,7 @@ def correct_attendance_record(
 
     audit = AuditEvent(
         session_id=event.attendance_session_id or f"attendance:{attendance_id}",
-        actor_type="administrator",
+        actor_type=actor.role,
         actor_id=actor.email or actor.sub,
         action=action,
         decision_state=decision_state,
@@ -832,12 +832,20 @@ def manual_attendance_entry(
     student = db.get(Student, payload.student_id)
     if student is None or not student.is_active:
         raise HTTPException(status_code=404, detail="Student not found or inactive.")
-    if not student.person_id:
     sess = db.get(AttendanceSession, payload.attendance_session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
-
     _check_session_scope(db, actor, sess)
+
+    enrollment = db.execute(
+        select(ClassEnrollment)
+        .where(ClassEnrollment.student_id == student.student_id)
+        .where(ClassEnrollment.class_group_id == sess.class_group_id)
+        .where(ClassEnrollment.status == "ACTIVE")
+    ).scalar_one_or_none()
+    if enrollment is None:
+        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
+
     if not student.person_id:
         person = Person(
             person_id=str(uuid.uuid4()),
@@ -850,15 +858,6 @@ def manual_attendance_entry(
         db.flush()
         student.person_id = person.person_id
         db.add(student)
-
-    enrollment = db.execute(
-        select(ClassEnrollment)
-        .where(ClassEnrollment.student_id == student.student_id)
-        .where(ClassEnrollment.class_group_id == sess.class_group_id)
-        .where(ClassEnrollment.status == "ACTIVE")
-    ).scalar_one_or_none()
-    if enrollment is None:
-        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
 
     now = datetime.now(timezone.utc)
     actor_id_str = actor.email or actor.sub
