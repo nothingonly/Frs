@@ -244,3 +244,47 @@ def test_dean_manual_attendance_scoped_to_department(rbac_client):
         "justification": "Cross department attempt",
     }, headers=headers)
     assert resp.status_code in (403, 409)
+
+
+def test_dean_with_unknown_department_is_rejected(rbac_client):
+    client, _ = rbac_client
+    settings = get_settings()
+    token = create_access_token(
+        sub="dean-no-scope",
+        role=ROLE_DEAN,
+        secret=settings.effective_jwt_secret,
+        email="dean.unknown@campus.edu",
+        department_id="department-does-not-exist",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    assert client.get("/api/v1/admin/college/departments", headers=headers).status_code == 403
+    assert client.get("/api/v1/admin/attendance", headers=headers).status_code == 403
+
+
+def test_dean_cannot_reactivate_student_with_cross_department_enrollment(rbac_client):
+    client, sessions = rbac_client
+    with sessions() as db:
+        student = db.get(Student, "stu-2")
+        assert student is not None
+        student.is_active = False
+        db.add(ClassEnrollment(
+            student_id="stu-2",
+            class_group_id="cg-ece-a",
+            status="ACTIVE",
+        ))
+        db.commit()
+
+    settings = get_settings()
+    token = create_access_token(
+        sub="dean-cse",
+        role=ROLE_DEAN,
+        secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu",
+        department_id="dept-cse",
+    )
+    response = client.post(
+        "/api/v1/admin/college/students/stu-2/reactivate",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
