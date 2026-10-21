@@ -34,6 +34,7 @@ from app.db.entities import (
     ModelRegistryEntry,
     Person,
     Student,
+    SessionClassGroup,
 )
 from app.schemas.college import (
     AttendanceCorrectionRequest,
@@ -51,6 +52,124 @@ from app.services.capture_batches import (
 from app.services.retention import de_enroll_student_biometrics, run_retention_purge
 
 router = APIRouter(prefix="/api/v1/admin", tags=["administration"])
+
+
+def _session_scope_groups(db: Session, session: AttendanceSession) -> list[ClassGroup]:
+    linked_ids = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == session.session_id
+        )
+    ).scalars().all()
+    group_ids = list(dict.fromkeys([session.class_group_id, *linked_ids]))
+    groups = db.execute(
+        select(ClassGroup).where(ClassGroup.class_group_id.in_(group_ids))
+    ).scalars().all()
+    if {group.class_group_id for group in groups} != set(group_ids):
+        raise HTTPException(status_code=409, detail="Attendance session references a missing class group.")
+    return groups
+
+
+def _check_session_scope(db: Session, actor: TokenClaims, session: AttendanceSession) -> None:
+    """Enforce authorization over every class group attached to a single/mixed session."""
+    groups = _session_scope_groups(db, session)
+    for group in groups:
+        check_class_access(actor, group.class_group_id, group.department_id)
+
+
+def _scoped_session_ids(actor: TokenClaims):
+    """SQL subquery for sessions whose entire class-group scope belongs to the actor."""
+    if actor.role == ROLE_SUPER_ADMIN:
+        return select(AttendanceSession.session_id)
+    if actor.role == ROLE_DEAN:
+        foreign_group_link = (
+            select(SessionClassGroup.session_id)
+            .join(ClassGroup, ClassGroup.class_group_id == SessionClassGroup.class_group_id)
+            .where(
+                SessionClassGroup.session_id == AttendanceSession.session_id,
+                ClassGroup.department_id != actor.department_id,
+            )
+            .exists()
+        )
+        return (
+            select(AttendanceSession.session_id)
+            .join(ClassGroup, ClassGroup.class_group_id == AttendanceSession.class_group_id)
+            .where(
+                ClassGroup.department_id == actor.department_id,
+                ~foreign_group_link,
+            )
+        )
+    if actor.role == ROLE_FACULTY:
+        allowed = tuple(actor.class_group_ids)
+        if not allowed:
+            return select(AttendanceSession.session_id).where(False)
+        foreign_group_link = (
+            select(SessionClassGroup.session_id)
+            .where(
+                SessionClassGroup.session_id == AttendanceSession.session_id,
+                ~SessionClassGroup.class_group_id.in_(allowed),
+            )
+            .exists()
+        )
+        return select(AttendanceSession.session_id).where(
+            AttendanceSession.class_group_id.in_(allowed),
+            ~foreign_group_link,
+        )
+    return select(AttendanceSession.session_id).where(False)
+
+
+def _audit_object_scope(db: Session, actor: TokenClaims, object_id: str) -> None:
+    """Map non-session audit references to their owning department, fail closed when unknown."""
+    if actor.role == ROLE_SUPER_ADMIN:
+        return
+    if actor.role != ROLE_DEAN:
+        raise HTTPException(status_code=403, detail="Only Super Administrators and scoped Deans can inspect audit evidence.")
+
+    session = db.get(AttendanceSession, object_id)
+    if session is not None:
+        _check_session_scope(db, actor, session)
+        return
+
+    department = db.get(Department, actor.department_id) if actor.department_id else None
+    if department is None:
+        raise HTTPException(status_code=403, detail="Dean token must reference an existing department.")
+
+    if object_id.startswith("admin:"):
+        employee_id = object_id.split(":", 1)[1]
+        person = db.execute(select(Person).where(Person.employee_id == employee_id)).scalar_one_or_none()
+        if person is not None and person.department == department.code:
+            return
+        raise HTTPException(status_code=403, detail="Audit object is outside the Dean's department or unresolvable.")
+
+    group = db.get(ClassGroup, object_id)
+    if group is not None:
+        check_department_access(actor, group.department_id)
+        return
+    if object_id in {row.department_id for row in db.execute(select(Department)).scalars()}:
+        check_department_access(actor, object_id)
+        return
+
+    student = db.get(Student, object_id)
+    if student is not None:
+        departments = set(db.execute(
+            select(ClassGroup.department_id)
+            .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
+            .where(ClassEnrollment.student_id == student.student_id, ClassEnrollment.status == "ACTIVE")
+        ).scalars().all())
+        if departments == {actor.department_id}:
+            return
+        raise HTTPException(status_code=403, detail="Audit object is outside the Dean's department or unresolvable.")
+
+    enrollment = db.get(ClassEnrollment, object_id)
+    if enrollment is not None:
+        group = db.get(ClassGroup, enrollment.class_group_id)
+        if group is not None:
+            check_department_access(actor, group.department_id)
+            return
+
+    person = db.get(Person, object_id)
+    if person is not None and person.department == department.code:
+        return
+    raise HTTPException(status_code=403, detail="Audit object has no verifiable department scope.")
 
 
 @router.get("/people")
