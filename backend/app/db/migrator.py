@@ -233,45 +233,74 @@ def verify_all_migrations(engine: Engine, directory: Path | None = None) -> tupl
     return (len(problems) == 0, problems)
 
 
+def _protected_tables() -> tuple[str, ...]:
+    return (
+        "persons", "embedding_records", "attendance_events", "audit_events",
+        "model_registry", "departments", "class_groups", "students",
+        "class_enrollments", "attendance_sessions", "session_class_groups",
+        "session_group_captures", "session_provisional_attendance",
+        "capture_batch_jobs", "lti_nonce_uses", "lti_launch_nonces",
+    )
+
+
 def verify_and_enforce_rls(engine: Engine) -> list[str]:
-    """Ensure all public application tables have Row Level Security enabled on PostgreSQL."""
+    """Enable RLS on required application tables during the explicit migration step."""
     if engine.dialect.name != "postgresql":
         return []
 
-    tables_to_protect = [
-        "persons", "embedding_records", "attendance_events", "audit_events",
-        "model_registry", "departments", "class_groups", "students",
-        "class_enrollments", "attendance_sessions", "capture_batch_jobs",
-        "lti_nonce_uses",
-    ]
-
+    inspector = inspect(engine)
     enforced: list[str] = []
     with engine.connect() as conn:
-        inspector = inspect(engine)
-        for tbl in tables_to_protect:
-            if inspector.has_table(tbl):
-                query = text("""
-                    SELECT rowsecurity FROM pg_tables
-                    WHERE schemaname = 'public' AND tablename = :tbl
-                """)
-                row = conn.execute(query, {"tbl": tbl}).first()
-                if row and not row[0]:
-                    with engine.begin() as tx:
-                        tx.execute(text(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY"))
-                    enforced.append(tbl)
-                    logger.info("Enforced RLS on table: %s", tbl)
-
+        for table_name in _protected_tables():
+            if not inspector.has_table(table_name):
+                continue
+            row = conn.execute(
+                text(
+                    "SELECT rowsecurity FROM pg_tables "
+                    "WHERE schemaname = 'public' AND tablename = :table_name"
+                ),
+                {"table_name": table_name},
+            ).first()
+            if row and not row[0]:
+                with engine.begin() as tx:
+                    tx.execute(text(f"ALTER TABLE {table_name} ENABLE ROW LEVEL SECURITY"))
+                enforced.append(table_name)
+                logger.info("Enforced RLS on table: %s", table_name)
     return enforced
 
 
+def verify_required_rls(engine: Engine) -> list[str]:
+    """Read-only production check for every required application table's existence and RLS."""
+    if engine.dialect.name != "postgresql":
+        return ["database dialect is not PostgreSQL"]
+
+    inspector = inspect(engine)
+    issues: list[str] = []
+    with engine.connect() as conn:
+        for table_name in _protected_tables():
+            if not inspector.has_table(table_name):
+                issues.append(f"required table missing: {table_name}")
+                continue
+            row = conn.execute(
+                text(
+                    "SELECT rowsecurity FROM pg_tables "
+                    "WHERE schemaname = 'public' AND tablename = :table_name"
+                ),
+                {"table_name": table_name},
+            ).first()
+            if row is None or not row[0]:
+                issues.append(f"row-level security not enabled: {table_name}")
+    return issues
+
+
 def verify_and_enforce_constraints(engine: Engine) -> None:
-    """Verify required check constraints exist on PostgreSQL."""
+    """Install the required capture status constraint during explicit migration execution."""
     if engine.dialect.name != "postgresql":
         return
 
     inspector = inspect(engine)
     if not inspector.has_table("capture_batch_jobs"):
-        return
+        raise RuntimeError("Cannot enforce capture status constraint: capture_batch_jobs is missing.")
 
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE capture_batch_jobs DROP CONSTRAINT IF EXISTS ck_capture_batch_jobs_status"))
@@ -282,10 +311,28 @@ def verify_and_enforce_constraints(engine: Engine) -> None:
         """))
 
 
+def verify_required_constraints(engine: Engine) -> list[str]:
+    """Read-only startup check for required data integrity constraints."""
+    if engine.dialect.name != "postgresql":
+        return ["database dialect is not PostgreSQL"]
+
+    inspector = inspect(engine)
+    if not inspector.has_table("capture_batch_jobs"):
+        return ["required table missing: capture_batch_jobs"]
+
+    checks = inspector.get_check_constraints("capture_batch_jobs")
+    required_statuses = ("QUEUED", "PROCESSING", "SUCCEEDED", "REJECTED", "FAILED", "DEAD_LETTER")
+    for constraint in checks:
+        sqltext = (constraint.get("sqltext") or "").upper()
+        if all(status in sqltext for status in required_statuses):
+            return []
+    return ["capture_batch_jobs status constraint missing or does not allow DEAD_LETTER"]
+
+
 def assert_production_schema_ready(engine: Engine) -> None:
-    """Enforce on startup in production that all migrations are applied and RLS is active.
-    
-    Raises RuntimeError if any migration is unapplied or if SQLite is in use.
+    """Read-only readiness gate for a schema migrated by the explicit release step.
+
+    Startup never creates tables, repairs constraints, enables RLS, or applies SQL files.
     """
     settings = get_settings()
     if settings.env.lower() != "production":
@@ -294,16 +341,52 @@ def assert_production_schema_ready(engine: Engine) -> None:
     if engine.dialect.name != "postgresql":
         raise RuntimeError("Production database must be PostgreSQL (Supabase / AWS RDS).")
 
-    is_ready, pending = verify_all_migrations(engine)
+    is_ready, problems = verify_all_migrations(engine)
     if not is_ready:
         raise RuntimeError(
-            f"Production startup halted: Database schema is out of date. "
-            f"Pending migrations: {pending}. Run 'python -m app.db.migrator --apply' before starting."
+            "Production startup halted: database migration state is not ready. "
+            f"Pending or invalid migrations: {problems}. "
+            "Run 'python -m app.db.migrator --apply' as a controlled release step."
         )
 
-    verify_and_enforce_rls(engine)
-    verify_and_enforce_constraints(engine)
-    logger.info("Production database schema verified: all migrations applied, RLS active.")
+    rls_issues = verify_required_rls(engine)
+    if rls_issues:
+        raise RuntimeError(
+            "Production startup halted: database security controls failed verification: "
+            + "; ".join(rls_issues)
+        )
+
+    constraint_issues = verify_required_constraints(engine)
+    if constraint_issues:
+        raise RuntimeError(
+            "Production startup halted: database constraints failed verification: "
+            + "; ".join(constraint_issues)
+        )
+
+    with engine.connect() as conn:
+        trigger = conn.execute(text("""
+            SELECT t.tgenabled, pg_get_triggerdef(t.oid)
+            FROM pg_trigger AS t
+            JOIN pg_class AS c ON c.oid = t.tgrelid
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname = 'audit_events'
+              AND t.tgname = 'trg_audit_events_append_only'
+              AND NOT t.tgisinternal
+        """)).first()
+    if trigger is None or trigger[0] != "O":
+        raise RuntimeError(
+            "Production startup halted: append-only audit_events trigger is missing or disabled."
+        )
+    trigger_sql = (trigger[1] or "").upper()
+    if "UPDATE" not in trigger_sql or "DELETE" not in trigger_sql:
+        raise RuntimeError(
+            "Production startup halted: audit_events trigger does not block both UPDATE and DELETE."
+        )
+
+    logger.info(
+        "Production database verified read-only: migrations/checksums, RLS, constraints, and audit trigger are valid."
+    )
 
 
 def main() -> None:
