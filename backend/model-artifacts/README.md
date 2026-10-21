@@ -42,7 +42,7 @@ Compose mounts `backend/model-artifacts/` read-only at `/models` and configures 
 
 For `FRS_MODEL_PACK=buffalo_l`, the primary paths resolve to `<FRS_MODEL_ROOT>/models/buffalo_l/`. The filenames, checksums and manifest records must match the actual artifacts. Specialist paths in `.env` must resolve to the mounted `/models/...` paths. Keep actual model weights out of Git unless the project owner has explicitly reviewed the license and repository storage implications.
 
-The InsightFace Python source package and publicly distributed pretrained weights have different licensing terms. The widely distributed pretrained weights are restricted to non-commercial research absent separate permission. Obtain and document the appropriate rights for actual attendance deployment before setting FRS_MODEL_LICENSE_ATTESTED=true.
+The InsightFace Python source package and publicly distributed pretrained weights have different licensing terms. The widely distributed pretrained weights are restricted to non-commercial research absent separate permission. Obtain and document rights for the institution's intended attendance use before deploying. The `FRS_MODEL_LICENSE_ATTESTED` flag is informational only; setting it to true does not grant rights and cannot bypass the production manifest license check.
 
 ## Separate ONNX specialists
 
