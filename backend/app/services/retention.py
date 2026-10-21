@@ -195,21 +195,22 @@ def de_enroll_student_biometrics(
     if not secret:
         raise RuntimeError("A dedicated biometric deletion-certificate signing key must be configured.")
 
+    import base64
+    import binascii
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding,
-        PublicFormat,
-        load_pem_private_key,
-    )
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
     secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
     if settings.is_production:
         try:
-            private_key = load_pem_private_key(secret_bytes, password=None)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("Production deletion-certificate key is not a valid PEM private key.") from exc
-        if not isinstance(private_key, Ed25519PrivateKey):
-            raise RuntimeError("Production deletion-certificate key must be Ed25519.")
+            deletion_seed = base64.b64decode(secret_bytes, altchars=b"-_", validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise RuntimeError(
+                "Production deletion-certificate key must be URL-safe base64 for a 32-byte Ed25519 seed."
+            ) from exc
+        if len(deletion_seed) != 32:
+            raise RuntimeError("Production deletion-certificate Ed25519 seed must decode to exactly 32 bytes.")
+        private_key = Ed25519PrivateKey.from_private_bytes(deletion_seed)
     else:
         # Deterministic development keys preserve repeatable local tests while using the
         # same public-key signature format as production. This seed is never production-safe.
