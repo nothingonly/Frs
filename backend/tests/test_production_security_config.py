@@ -3,8 +3,19 @@ from __future__ import annotations
 import base64
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
 from app.core.config import Settings
+
+
+def deletion_private_key_pem() -> str:
+    private_key = Ed25519PrivateKey.generate()
+    return private_key.private_bytes(
+        Encoding.PEM,
+        PrivateFormat.PKCS8,
+        NoEncryption(),
+    ).decode("ascii")
 
 
 def production_settings(**overrides: object) -> Settings:
@@ -19,7 +30,7 @@ def production_settings(**overrides: object) -> Settings:
         "threshold_calibrated": True,
         "calibrated_models_csv": "ArcFace",
         "require_liveness": False,
-        "deletion_certificate_key": "deletion-" + "c" * 48,
+        "deletion_certificate_key": deletion_private_key_pem(),
     }
     values.update(overrides)
     return Settings(**values)
