@@ -1319,6 +1319,7 @@ class AttendancePipeline:
         photo_index: int = 1,
         client_device_id: str = "kiosk-camera",
         actor_id: str = "faculty:kiosk",
+        actor_type: str = "faculty",
     ) -> dict[str, Any]:
         """Detect all faces in a classroom group photo and match against the session roster."""
         session = db.get(AttendanceSession, session_id)
@@ -1539,7 +1540,7 @@ class AttendancePipeline:
         self._audit(
             db,
             session_id=session_id,
-            actor_type="faculty",
+            actor_type=actor_type,
             actor_id=actor_id,
             action="session.group_capture",
             state="PROCESSED",
@@ -1666,6 +1667,7 @@ class AttendancePipeline:
         new_status: str,
         actor_id: str = "faculty",
         notes: str | None = None,
+        actor_type: str = "faculty",
     ) -> dict[str, Any]:
         """Manually toggle or resolve a student's provisional attendance status."""
         session = db.get(AttendanceSession, session_id)
@@ -1704,11 +1706,11 @@ class AttendancePipeline:
         self._audit(
             db,
             session_id=session_id,
-            actor_type="faculty",
+            actor_type=actor_type,
             actor_id=actor_id,
             action="session.provisional_toggle",
             state=new_status,
-            reasons=["MANUAL_FACULTY_OVERRIDE"],
+            reasons=["MANUAL_ATTENDANCE_OVERRIDE"],
             evidence={"student_id": student_id, "new_status": new_status, "notes": notes},
         )
         db.commit()
@@ -1719,6 +1721,7 @@ class AttendancePipeline:
         db: Session,
         session_id: str,
         actor_id: str = "faculty",
+        actor_type: str = "faculty",
     ) -> dict[str, Any]:
         """Finalize attendance for an open session: persist durable AttendanceEvents and close session."""
         session = db.execute(
@@ -1802,7 +1805,7 @@ class AttendancePipeline:
         self._audit(
             db,
             session_id=session_id,
-            actor_type="faculty",
+            actor_type=actor_type,
             actor_id=actor_id,
             action="attendance_session.finalize",
             state="FINALIZED",
