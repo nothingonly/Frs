@@ -353,14 +353,17 @@ def deactivate_student(
     student = db.execute(select(Student).where(Student.student_id == student_id).with_for_update()).scalar_one_or_none()
     if student is None:
         raise HTTPException(status_code=404, detail="Student not found.")
-    if actor.role == ROLE_DEAN and actor.department_id:
-        student_depts = db.execute(
+    if actor.role == ROLE_DEAN:
+        student_depts = set(db.execute(
             select(ClassGroup.department_id)
             .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
             .where(ClassEnrollment.student_id == student_id, ClassEnrollment.status == "ACTIVE")
-        ).scalars().all()
-        if student_depts and actor.department_id not in student_depts:
-            raise HTTPException(status_code=403, detail="Forbidden: cannot modify student outside your assigned department.")
+        ).scalars().all())
+        if not student_depts or student_depts != {actor.department_id}:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Dean must be scoped to every active department enrollment for this student.",
+            )
     student.is_active = False
     student.updated_at = datetime.now(timezone.utc)
     if student.person_id:
@@ -872,6 +875,25 @@ async def bulk_enroll_photos(
             results.append({"filename": fname, "student_number": roll_no, "status": "FAILED", "reason": f"STUDENT_NOT_FOUND: '{roll_no}'"})
             fail_count += 1
             continue
+
+        if actor.role == ROLE_DEAN:
+            student_departments = set(db.execute(
+                select(ClassGroup.department_id)
+                .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
+                .where(
+                    ClassEnrollment.student_id == student.student_id,
+                    ClassEnrollment.status == "ACTIVE",
+                )
+            ).scalars().all())
+            if not student_departments or student_departments != {actor.department_id}:
+                results.append({
+                    "filename": fname,
+                    "student_number": roll_no,
+                    "status": "FAILED",
+                    "reason": "DEPARTMENT_SCOPE_VIOLATION",
+                })
+                fail_count += 1
+                continue
 
         if not student.person_id:
             person = Person(employee_id=student.student_number, full_name=student.full_name)
