@@ -98,12 +98,13 @@ def de_enroll_student_biometrics(
     storage_service: Any | None = None,
     signing_key: str | None = None,
 ) -> dict[str, Any]:
-    """De-enroll biometric records and issue a shared-secret-authenticated evidence record.
+    """De-enroll biometric records and issue an Ed25519-signed evidence record.
 
-    The HMAC authenticates the recorded payload for holders of a dedicated secret. It is
-    not an asymmetric digital signature and does not establish non-repudiation. Media
-    deletion is classified as complete only when the configured storage provider confirms
-    deletion of every requested object.
+    The signature protects canonical payload integrity and can be checked with the public
+    key. Verifiers must pin the public key against an institutional trust record; the public
+    key embedded in a certificate is not, by itself, a trust anchor. A valid signature does
+    not prove remote media erasure: deletion is complete only when the storage provider
+    confirms deletion of every requested object.
     """
     student = db.get(Student, student_id)
     if student is None:
