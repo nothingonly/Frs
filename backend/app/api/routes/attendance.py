@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -23,15 +21,12 @@ from app.api.dependencies import (
 )
 from app.database import get_db
 from app.db.entities import (
-    AttendanceEvent,
     AttendanceSession,
-    AuditEvent,
     CaptureBatchJob,
     ClassEnrollment,
     ClassGroup,
     Department,
     SessionClassGroup,
-    Student,
 )
 from app.security import encrypt_capture_payload
 from app.services.capture_batches import pack_capture_frames, serialize_capture_batch
