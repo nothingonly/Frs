@@ -331,27 +331,12 @@ def export_attendance_csv(
     if attendance_session_id:
         sess = db.get(AttendanceSession, attendance_session_id)
         if sess:
-            if actor.role == ROLE_FACULTY:
-                check_class_access(actor, sess.class_group_id)
-            elif actor.role == ROLE_DEAN:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg:
-                    check_department_access(actor, cg.department_id)
+            _check_session_scope(db, actor, sess)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
-    else:
-        if actor.role == ROLE_FACULTY:
-            statement = statement.join(
-                AttendanceSession,
-                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
-            ).where(AttendanceSession.class_group_id.in_(actor.class_group_ids or ["__none__"]))
-        elif actor.role == ROLE_DEAN:
-            statement = statement.join(
-                AttendanceSession,
-                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
-            ).join(
-                ClassGroup,
-                AttendanceSession.class_group_id == ClassGroup.class_group_id,
-            ).where(ClassGroup.department_id == actor.department_id)
+    elif actor.role != ROLE_SUPER_ADMIN:
+        statement = statement.where(
+            AttendanceEvent.attendance_session_id.in_(_scoped_session_ids(actor))
+        )
 
     rows = db.execute(statement.order_by(AttendanceEvent.timestamp.desc())).scalars().all()
 
@@ -497,12 +482,7 @@ def list_capture_batches(
     if attendance_session_id:
         sess = db.get(AttendanceSession, attendance_session_id)
         if sess:
-            if actor.role == ROLE_FACULTY:
-                check_class_access(actor, sess.class_group_id)
-            elif actor.role == ROLE_DEAN:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg:
-                    check_department_access(actor, cg.department_id)
+            _check_session_scope(db, actor, sess)
         statement = statement.where(CaptureBatchJob.attendance_session_id == attendance_session_id)
     elif actor.role != ROLE_SUPER_ADMIN:
         statement = statement.where(
@@ -699,12 +679,10 @@ def resolve_review_item(
     ).with_for_update()).scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="Review item not found.")
-    if actor.role == ROLE_FACULTY:
-        check_class_access(actor, job.class_group_id)
-    elif actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, job.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+    session_for_scope = db.get(AttendanceSession, job.attendance_session_id)
+    if session_for_scope is None:
+        raise HTTPException(status_code=404, detail="Associated attendance session not found.")
+    _check_session_scope(db, actor, session_for_scope)
 
     if job.status not in ("REJECTED", "FAILED"):
         raise HTTPException(status_code=409, detail="Only rejected or failed capture jobs can be reviewed.")
