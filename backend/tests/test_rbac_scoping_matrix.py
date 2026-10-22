@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.routes.admin import router as admin_router
 from app.api.routes.college import router as college_router
 from app.api.routes.integrations import router as integrations_router
+from app.services.integrations import AbsenteeAlertService, CsvExportService
 from app.api.routes.enrollment import router as enrollment_router
 from app.core.config import Settings
 from app.core.auth import ROLE_DEAN, ROLE_FACULTY, create_access_token
@@ -282,6 +283,18 @@ def test_production_sftp_rejects_request_supplied_trust_and_path(matrix_client, 
     )
     assert key_override.status_code == 422
     assert "server configuration" in key_override.json()["detail"]
+
+
+def test_mixed_session_exports_and_absentee_lists_include_all_groups(matrix_client):
+    _, testing_sessions = matrix_client
+    with testing_sessions() as db:
+        csv_text = CsvExportService.export_attendance_csv(db, "sess-mixed-1")
+        assert "STU001" in csv_text
+        assert "STU002" in csv_text
+
+        absentees = AbsenteeAlertService.find_absentees(db, "sess-mixed-1")
+        assert {student["student_number"] for student in absentees} == {"STU001", "STU002"}
+
 
 def test_dean_cross_department_audit_forbidden(matrix_client):
     client, _ = matrix_client
