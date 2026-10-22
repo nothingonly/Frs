@@ -43,7 +43,23 @@ This generates:
 - `FRS_ADMIN_API_KEY`: High-entropy (40-char) administrator key.
 - `FRS_DATA_ENCRYPTION_KEY`: 32-byte URL-safe base64 key for AES-GCM encryption.
 
-### 2.2 Environment Variables (Production)
+### 2.2 Render deployment: database URL must not use `db`
+
+The hostname `db` in `postgresql+psycopg://...@db:5432/...` is **only valid for services running on the same Docker Compose network** defined in `backend/compose.yaml`. It is not a Render PostgreSQL hostname. If a Render web service starts with that URL, PostgreSQL connection attempts fail with errors such as `failed to resolve host 'db'`.
+
+For Render:
+
+1. Create or select the Render PostgreSQL database and the backend Web Service.
+2. In the database's Render dashboard, copy its **Internal Database URL** when the Web Service is in the same region; otherwise use a connection URL reachable from the Web Service.
+3. In the backend Web Service's **Environment** settings, set `FRS_DATABASE_URL` to that URL. Do not leave the Compose example value pointing to `@db:5432`.
+4. Keep the URL and credentials in Render's environment settings, never commit them to the repository.
+5. Trigger a deploy and inspect logs. If the hostname resolves but connection still fails, verify the database is available, the URL/credentials are correct, and the service has network access.
+
+Use the Render-provided URL as-is if the driver scheme is supported by the app; otherwise use the equivalent SQLAlchemy psycopg URL form (for example, `postgresql+psycopg://` with the same host, database, username, and password). Do not copy a real database URL into issues, commits, screenshots, or chat.
+
+For local Docker Compose only, the `@db:5432` hostname is correct because Compose creates the `db` service DNS name on its private network.
+
+### 2.3 Environment Variables (Production)
 
 | Variable | Description | Required in Production |
 |---|---|---|
