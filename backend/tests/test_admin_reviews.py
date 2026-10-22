@@ -22,6 +22,7 @@ from app.db.entities import (
     CaptureBatchJob,
     EmbeddingRecord,
     Person,
+    Student,
 )
 
 
@@ -369,6 +370,12 @@ def test_manual_attendance_entry(client_and_sessions: tuple[TestClient, sessionm
         "class_group_id": group["class_group_id"],
         "subject_name": "Thermodynamics",
     }).json()
+    original_person_id = student["person_id"]
+    # Simulate an older inconsistent row: the Person exists but Student.person_id is NULL.
+    with sessions() as session:
+        legacy_student = session.get(Student, student["student_id"])
+        legacy_student.person_id = None
+        session.commit()
 
     # Manual entry request
     entry_resp = client.post("/api/v1/admin/attendance/manual-entry", json={
@@ -387,6 +394,8 @@ def test_manual_attendance_entry(client_and_sessions: tuple[TestClient, sessionm
         assert att.employee_id == "MECH001"
         assert att.punch_type == "CHECK_IN"
         assert att.pipeline_version == "manual-administrative-entry"
+        assert session.get(Student, student["student_id"]).person_id == original_person_id
+        assert session.query(Person).filter_by(employee_id="MECH001").count() == 1
 
 
 def test_attendance_csv_export(client_and_sessions: tuple[TestClient, sessionmaker[Session]]) -> None:

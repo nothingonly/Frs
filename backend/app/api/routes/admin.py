@@ -294,8 +294,9 @@ def list_attendance(
         statement = statement.where(AttendanceEvent.employee_id == employee_id)
     if attendance_session_id:
         sess = db.get(AttendanceSession, attendance_session_id)
-        if sess:
-            _check_session_scope(db, actor, sess)
+        if sess is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+        _check_session_scope(db, actor, sess)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
     elif actor.role != ROLE_SUPER_ADMIN:
         statement = statement.where(
@@ -309,8 +310,9 @@ def list_attendance(
             "employee_id": row.employee_id,
             "punch_type": row.punch_type,
             "timestamp": row.timestamp.isoformat(),
-            "similarity_score": row.similarity_score,
-            "threshold": row.threshold,
+            "similarity_score": None if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review") else row.similarity_score,
+            "threshold": None if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review") else row.threshold,
+            "evidence_type": "HUMAN_VERIFIED" if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review") else "BIOMETRIC",
             "client_device_id": row.client_device_id,
             "pipeline_version": row.pipeline_version,
             "evidence_id": row.evidence_id,
@@ -333,8 +335,9 @@ def export_attendance_csv(
         statement = statement.where(AttendanceEvent.employee_id == employee_id)
     if attendance_session_id:
         sess = db.get(AttendanceSession, attendance_session_id)
-        if sess:
-            _check_session_scope(db, actor, sess)
+        if sess is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+        _check_session_scope(db, actor, sess)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
     elif actor.role != ROLE_SUPER_ADMIN:
         statement = statement.where(
@@ -352,6 +355,7 @@ def export_attendance_csv(
         "timestamp",
         "similarity_score",
         "threshold",
+        "evidence_type",
         "client_device_id",
         "pipeline_version",
         "evidence_id",
@@ -363,8 +367,18 @@ def export_attendance_csv(
             row.employee_id,
             row.punch_type,
             row.timestamp.isoformat(),
-            f"{row.similarity_score:.4f}",
-            f"{row.threshold:.4f}",
+            (
+                "N/A" if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review")
+                else f"{row.similarity_score:.4f}"
+            ),
+            (
+                "N/A" if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review")
+                else f"{row.threshold:.4f}"
+            ),
+            (
+                "HUMAN_VERIFIED" if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review")
+                else "BIOMETRIC"
+            ),
             row.client_device_id,
             row.pipeline_version,
             row.evidence_id,
@@ -906,16 +920,30 @@ def manual_attendance_entry(
         raise HTTPException(status_code=409, detail="Attendance already exists for this student and punch type.")
 
     if not student.person_id:
-        person = Person(
-            person_id=str(uuid.uuid4()),
-            employee_id=student.student_number,
-            full_name=student.full_name,
-            department="NON_BIOMETRIC_ALTERNATIVE",
-            is_active=True,
-        )
-        db.add(person)
-        db.flush()
-        student.person_id = person.person_id
+        # Legacy/manual enrollment can leave a student row without its Person foreign key
+        # even though a matching Person already exists. Reuse by unique employee ID to avoid
+        # creating a second identity and failing the unique constraint during manual attendance.
+        existing_person = db.execute(
+            select(Person).where(Person.employee_id == student.student_number)
+        ).scalar_one_or_none()
+        if existing_person is not None:
+            if not existing_person.is_active:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The student's person identity is inactive; reactivate it before manual attendance.",
+                )
+            student.person_id = existing_person.person_id
+        else:
+            person = Person(
+                person_id=str(uuid.uuid4()),
+                employee_id=student.student_number,
+                full_name=student.full_name,
+                department="NON_BIOMETRIC_ALTERNATIVE",
+                is_active=True,
+            )
+            db.add(person)
+            db.flush()
+            student.person_id = person.person_id
         db.add(student)
 
     now = datetime.now(timezone.utc)
