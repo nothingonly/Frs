@@ -58,13 +58,22 @@ def test_sms_mock_delivery() -> None:
 def test_notification_manager_dispatch() -> None:
     manager = NotificationManager()
     absentees = [
-        {"student_number": "STU101", "full_name": "Student One", "session_id": "sess-1"},
+        {
+            "student_number": "STU101",
+            "full_name": "Student One",
+            "email": "student.one@campus.edu",
+            "session_id": "sess-1",
+        },
         {"student_number": "STU102", "full_name": "Student Two", "session_id": "sess-1"},
     ]
     batch_res = manager.dispatch_batch(absentees, channel="email")
     assert batch_res["total_alerts"] == 2
     assert len(batch_res["alerts"]) == 2
-    assert batch_res["alerts"][0]["recipient"] == "stu101@campus.edu"
+    assert batch_res["alerts"][0]["recipient"] == "student.one@campus.edu"
+    assert batch_res["alerts"][0]["status"] == "SENT_MOCK"
+    assert batch_res["alerts"][1]["status"] == "SKIPPED_NO_VERIFIED_CONTACT"
+    assert batch_res["skipped_count"] == 1
+    assert batch_res["failed_count"] == 0
 
 
 def test_sftp_export_packaging(db_session: Session) -> None:
