@@ -24,6 +24,7 @@ from app.db.entities import (
     ClassGroup,
     Department,
     Person,
+    SessionClassGroup,
     Student,
 )
 
@@ -83,7 +84,10 @@ def matrix_client():
 
         sess_cse = AttendanceSession(session_id="sess-cse-1", class_group_id="cg-cse-a", subject_name="Databases", created_by="admin", status="OPEN")
         sess_ece = AttendanceSession(session_id="sess-ece-1", class_group_id="cg-ece-a", subject_name="Circuits", created_by="admin", status="OPEN")
-        db.add_all([sess_cse, sess_ece])
+        sess_mixed = AttendanceSession(session_id="sess-mixed-1", class_group_id="cg-cse-a", subject_name="Joint Lab", created_by="admin", status="OPEN")
+        db.add_all([sess_cse, sess_ece, sess_mixed])
+        db.commit()
+        db.add(SessionClassGroup(session_id="sess-mixed-1", class_group_id="cg-ece-a"))
         db.commit()
 
         att_cse = AttendanceEvent(
@@ -375,3 +379,24 @@ def test_absentee_notifications_and_sftp_scoping(matrix_client):
         "session_id": "sess-ece-1",
     }, headers=headers_dean_cse)
     assert resp.status_code == 403
+
+    # Mixed sessions require permission for every participating class group.
+    # A user authorized for the primary CSE group must not see ECE absentees.
+    resp = client.post("/api/v1/integrations/notifications/absentees", json={
+        "session_id": "sess-mixed-1",
+        "dry_run": True,
+    }, headers=headers_fac_cse)
+    assert resp.status_code == 403
+
+    # A Dean's department authority must cover every linked class group too.
+    resp = client.post("/api/v1/integrations/notifications/absentees", json={
+        "session_id": "sess-mixed-1",
+        "dry_run": True,
+    }, headers=headers_dean_cse)
+    assert resp.status_code == 403
+
+    resp = client.post("/api/v1/integrations/sftp/export", json={
+        "session_id": "sess-mixed-1",
+    }, headers=headers_dean_cse)
+    assert resp.status_code == 403
+
