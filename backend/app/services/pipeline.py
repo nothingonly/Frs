@@ -1465,6 +1465,9 @@ class AttendancePipeline:
                     else:
                         prov.status = "PRESENT"
                         prov.similarity_score = max(prov.similarity_score, best_score)
+                        # A later confident biometric match supersedes a prior manual marker.
+                        if prov.notes and prov.notes.startswith("MANUAL_FACULTY_ACTION:"):
+                            prov.notes = None
                     faces_matched += 1
                     detected_faces.append({
                         "face_index": obs.face_index,
@@ -1717,12 +1720,26 @@ class AttendancePipeline:
                 status=new_status,
                 # A manual status decision is not biometric similarity evidence.
                 similarity_score=0.0,
-                notes=notes or "MANUAL_FACULTY_ACTION",
+                notes=(
+                    f"MANUAL_FACULTY_ACTION: {notes.strip()}"
+                    if new_status == "PRESENT" and notes and notes.strip()
+                    else "MANUAL_FACULTY_ACTION: Confirmed by faculty"
+                    if new_status == "PRESENT"
+                    else notes or None
+                ),
             )
             db.add(prov)
         else:
             prov.status = new_status
-            if notes:
+            if new_status == "PRESENT":
+                # Record manual provenance separately from the biometric similarity score.
+                prov.similarity_score = 0.0
+                prov.notes = (
+                    f"MANUAL_FACULTY_ACTION: {notes.strip()}"
+                    if notes and notes.strip()
+                    else "MANUAL_FACULTY_ACTION: Confirmed by faculty"
+                )
+            elif notes:
                 prov.notes = notes
 
         self._audit(
@@ -1792,16 +1809,23 @@ class AttendancePipeline:
                     ).first()
                     if not existing_evt:
                         audit_id = str(uuid.uuid4())
+                        is_manual_override = bool(
+                            prov and prov.notes and prov.notes.startswith("MANUAL_FACULTY_ACTION:")
+                        )
                         evt = AttendanceEvent(
                             attendance_id=str(uuid.uuid4()),
                             person_id=pid,
                             employee_id=student_info["student_number"],
                             punch_type="CHECK_IN",
                             timestamp=now,
-                            similarity_score=prov.similarity_score if prov else 1.0,
-                            threshold=self.settings.similarity_threshold,
-                            client_device_id="kiosk-group-photo",
-                            pipeline_version=self.vision.pipeline_version,
+                            # Human review is not represented as a fabricated biometric score.
+                            similarity_score=0.0 if is_manual_override else (prov.similarity_score if prov else 1.0),
+                            threshold=1.0 if is_manual_override else self.settings.similarity_threshold,
+                            client_device_id="faculty-manual-override" if is_manual_override else "kiosk-group-photo",
+                            pipeline_version=(
+                                "manual-administrative-review" if is_manual_override
+                                else self.vision.pipeline_version
+                            ),
                             evidence_id=audit_id,
                             attendance_session_id=session_id,
                         )
