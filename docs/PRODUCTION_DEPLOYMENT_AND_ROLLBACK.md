@@ -51,7 +51,7 @@ For Render:
 
 1. Create or select the Render PostgreSQL database and the backend Web Service.
 2. In the database's Render dashboard, copy its **Internal Database URL** when the Web Service is in the same region; otherwise use a connection URL reachable from the Web Service.
-3. In the backend Web Service's **Environment** settings, set `FRS_DATABASE_URL` to that URL (the backend also accepts Render's conventional `DATABASE_URL` key). Do not leave the Compose example value pointing to `@db:5432`.
+3. In the backend Web Service's **Environment** settings, set `FRS_DATABASE_URL` to that URL (the backend also accepts Render's conventional `DATABASE_URL` key if `FRS_DATABASE_URL` is not set). If both are present, `FRS_DATABASE_URL` takes precedence, so correct or remove any stale value pointing to `@db:5432`.
 4. Keep the URL and credentials in Render's environment settings, never commit them to the repository.
 5. Trigger a deploy and inspect logs. If the hostname resolves but connection still fails, verify the database is available, the URL/credentials are correct, and the service has network access.
 
