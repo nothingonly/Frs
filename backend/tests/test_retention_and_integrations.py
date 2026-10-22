@@ -212,7 +212,7 @@ def test_absentee_alert_service() -> None:
         session_id="sess-200",
         class_group_id="cg-1",
         subject_name="Physics",
-        status="OPEN",
+        status="CLOSED",
         starts_at=datetime.now(timezone.utc),
         created_by="prof-1",
     )

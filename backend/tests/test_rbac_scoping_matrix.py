@@ -100,9 +100,10 @@ def matrix_client():
         db.commit()
 
         sess_cse = AttendanceSession(session_id="sess-cse-1", class_group_id="cg-cse-a", subject_name="Databases", created_by="admin", status="OPEN")
+        sess_cse_closed = AttendanceSession(session_id="sess-cse-closed", class_group_id="cg-cse-a", subject_name="Databases closed", created_by="admin", status="CLOSED")
         sess_ece = AttendanceSession(session_id="sess-ece-1", class_group_id="cg-ece-a", subject_name="Circuits", created_by="admin", status="OPEN")
-        sess_mixed = AttendanceSession(session_id="sess-mixed-1", class_group_id="cg-cse-a", subject_name="Joint Lab", created_by="admin", status="OPEN")
-        db.add_all([sess_cse, sess_ece, sess_mixed])
+        sess_mixed = AttendanceSession(session_id="sess-mixed-1", class_group_id="cg-cse-a", subject_name="Joint Lab", created_by="admin", status="CLOSED")
+        db.add_all([sess_cse, sess_cse_closed, sess_ece, sess_mixed])
         db.commit()
         db.add(SessionClassGroup(session_id="sess-mixed-1", class_group_id="cg-ece-a"))
         db.commit()
@@ -458,7 +459,7 @@ def test_absentee_notifications_and_sftp_scoping(matrix_client):
 
     # Faculty can dry-run absentee alerts for assigned class session
     resp = client.post("/api/v1/integrations/notifications/absentees", json={
-        "session_id": "sess-cse-1",
+        "session_id": "sess-cse-closed",
         "dry_run": True,
     }, headers=headers_fac_cse)
     assert resp.status_code == 200
