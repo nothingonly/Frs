@@ -18,6 +18,7 @@ from app.database import Base, get_db
 from app.db.entities import (
     AttendanceEvent,
     EmbeddingRecord,
+    Student,
 )
 from app.security import encrypt_embedding
 from app.services.pipeline import AttendancePipeline
@@ -413,6 +414,13 @@ def test_multi_photo_group_capture_deduplication_and_review(test_setup):
     # -------------------------------------------------------------
     # Faculty Manual Review and Toggle
     # -------------------------------------------------------------
+    # Exercise the non-biometric/manual path: a legacy student may have no linked person ID.
+    # The backend should recover the existing person record or create one before finalization.
+    with sessions() as db:
+        student_three = db.get(Student, s3["student_id"])
+        student_three.person_id = None
+        db.commit()
+
     # Student 3 was absent; faculty manually resolves student 3 as PRESENT with note
     toggle_res = client.post(
         f"/api/v1/attendance/sessions/{session_id}/provisional/{s3['student_id']}/toggle",

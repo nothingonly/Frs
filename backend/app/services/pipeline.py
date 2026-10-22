@@ -1712,6 +1712,33 @@ class AttendancePipeline:
             )
         ).scalar_one_or_none()
 
+        if new_status == "PRESENT" and not student.person_id:
+            # A non-biometric/manual attendance path still needs a durable person identity.
+            # Reuse a legacy person record when possible instead of violating employee_id
+            # uniqueness by creating a second row for the same student.
+            existing_person = db.execute(
+                select(Person).where(Person.employee_id == student.student_number)
+            ).scalar_one_or_none()
+            if existing_person is not None:
+                if not existing_person.is_active:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="The student's person identity is inactive; reactivate it before recording attendance.",
+                    )
+                student.person_id = existing_person.person_id
+            else:
+                person = Person(
+                    person_id=str(uuid.uuid4()),
+                    employee_id=student.student_number,
+                    full_name=student.full_name,
+                    department="NON_BIOMETRIC_ALTERNATIVE",
+                    is_active=True,
+                )
+                db.add(person)
+                db.flush()
+                student.person_id = person.person_id
+            db.add(student)
+
         if not prov:
             prov = SessionProvisionalAttendance(
                 session_id=session_id,
@@ -1731,6 +1758,8 @@ class AttendancePipeline:
             db.add(prov)
         else:
             prov.status = new_status
+            if student.person_id and prov.person_id != student.person_id:
+                prov.person_id = student.person_id
             if new_status == "PRESENT":
                 # Record manual provenance separately from the biometric similarity score.
                 prov.similarity_score = 0.0
