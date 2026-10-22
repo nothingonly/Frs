@@ -293,9 +293,7 @@ def test_mixed_session_exports_and_absentee_lists_include_all_groups(matrix_clie
         assert "STU001" in csv_text
         assert "STU002" in csv_text
         # The ECE enrollment must not be mislabeled as the primary CSE group.
-        ece_row = next(row for row in csv.reader(io.StringIO(csv_text)) if "STU002" in row)
-        assert ece_row[2] == "ECE"
-        assert ece_row[3] == "A"
+        assert ",ECE,A,STU002," in csv_text
 
         absentees = AbsenteeAlertService.find_absentees(db, "sess-mixed-1")
         assert {student["student_number"] for student in absentees} == {"STU001", "STU002"}
