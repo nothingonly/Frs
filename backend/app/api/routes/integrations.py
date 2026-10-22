@@ -109,6 +109,11 @@ def dispatch_session_absentee_alerts(
         raise HTTPException(status_code=404, detail=f"Attendance session '{payload.session_id}' not found.")
 
     _authorize_integration_session_scope(db, actor, sess)
+    if sess.status != "CLOSED":
+        raise HTTPException(
+            status_code=409,
+            detail="Absentee notifications are available only after the attendance session is closed.",
+        )
 
     try:
         absentees = AbsenteeAlertService.find_absentees(db, payload.session_id)
@@ -181,6 +186,11 @@ def trigger_sftp_attendance_export(
     trusted_fingerprint = settings.sftp_host_key_fingerprint if settings.is_production else (
         payload.sftp_host_key_fingerprint or settings.sftp_host_key_fingerprint
     )
+    if sess.status != "CLOSED":
+        raise HTTPException(
+            status_code=409,
+            detail="SIS export is available only after the attendance session is closed.",
+        )
     try:
         result = SftpExportService.dispatch_sftp_export(
             db=db,
