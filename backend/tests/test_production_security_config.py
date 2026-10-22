@@ -134,3 +134,18 @@ def test_standard_database_url_environment_alias_is_supported(
     settings = Settings(_env_file=None)
 
     assert settings.database_url == "postgresql+psycopg://frs:password@db.example.com:5432/frs"
+
+
+
+def test_render_reports_compose_hostname_before_environment_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    settings = Settings(
+        _env_file=None,
+        env="development",
+        database_url="postgresql+psycopg://frs:password@db:5432/frs",
+    )
+
+    with pytest.raises(ValueError, match="Docker Compose-only hostname 'db'"):
+        settings.validate_startup_security()
