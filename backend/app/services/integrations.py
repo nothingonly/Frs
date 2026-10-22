@@ -25,10 +25,21 @@ from app.db.entities import (
     ClassEnrollment,
     ClassGroup,
     Department,
+    SessionClassGroup,
     Student,
 )
 
 logger = logging.getLogger("frs.integrations")
+
+
+def _session_class_group_ids(db: Session, session: AttendanceSession) -> tuple[str, ...]:
+    """Return every distinct class group attached to a specific or mixed session."""
+    linked = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == session.session_id
+        )
+    ).scalars().all()
+    return tuple(dict.fromkeys([session.class_group_id, *linked]))
 
 
 class CsvExportService:
@@ -43,15 +54,17 @@ class CsvExportService:
         group = db.get(ClassGroup, session.class_group_id)
         department = db.get(Department, group.department_id) if group else None
 
-        # Fetch enrolled students
+        # A mixed session can include several class groups; include every active enrollment
+        # once even when the same student belongs to more than one linked group.
+        group_ids = _session_class_group_ids(db, session)
         enrollments = db.execute(
-            select(Student, ClassEnrollment)
+            select(Student)
             .join(ClassEnrollment, Student.student_id == ClassEnrollment.student_id)
             .where(
-                ClassEnrollment.class_group_id == session.class_group_id,
+                ClassEnrollment.class_group_id.in_(group_ids),
                 ClassEnrollment.status == "ACTIVE",
             )
-        ).all()
+        ).scalars().unique().all()
 
         # Fetch attendance events for this session
         events = db.execute(
@@ -78,7 +91,7 @@ class CsvExportService:
         section_name = group.section if group else "UNKNOWN"
         acad_year = group.academic_year if group else "UNKNOWN"
 
-        for student, _ in enrollments:
+        for student in enrollments:
             event = events_by_person.get(student.person_id)
             status = "PRESENT" if event and event.similarity_score >= event.threshold else ("RECORDED" if event else "ABSENT")
             punch_type = event.punch_type if event else "N/A"
@@ -110,14 +123,15 @@ class AbsenteeAlertService:
         if session is None:
             raise ValueError(f"Session '{session_id}' not found.")
 
+        group_ids = _session_class_group_ids(db, session)
         enrollments = db.execute(
             select(Student)
             .join(ClassEnrollment, Student.student_id == ClassEnrollment.student_id)
             .where(
-                ClassEnrollment.class_group_id == session.class_group_id,
+                ClassEnrollment.class_group_id.in_(group_ids),
                 ClassEnrollment.status == "ACTIVE",
             )
-        ).scalars().all()
+        ).scalars().unique().all()
 
         attended_person_ids = set(
             db.execute(
