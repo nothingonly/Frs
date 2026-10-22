@@ -106,6 +106,21 @@ class Settings(BaseSettings):
     max_request_bytes: int = Field(default=40 * 1024 * 1024, ge=1024)
     allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    @field_validator("database_url")
+    @classmethod
+    def normalize_database_driver(cls, value: str) -> str:
+        """Use the installed psycopg v3 driver for standard PostgreSQL URL schemes.
+
+        Render commonly supplies postgres:// or postgresql:// URLs; SQLAlchemy's
+        plain postgresql:// default selects psycopg2, which is not installed here.
+        Normalize those aliases (and legacy +psycopg2 URLs) to the project's driver.
+        """
+        url = value.strip()
+        for prefix in ("postgres://", "postgresql://", "postgresql+psycopg2://"):
+            if url.lower().startswith(prefix):
+                return "postgresql+psycopg://" + url[len(prefix):]
+        return url
+
     @field_validator("model_provider")
     @classmethod
     def validate_provider(cls, value: str) -> str:
