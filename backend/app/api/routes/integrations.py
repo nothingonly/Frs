@@ -163,7 +163,24 @@ def trigger_sftp_attendance_export(
     _authorize_integration_session_scope(db, actor, sess)
 
     settings = get_settings()
-    remote_path = payload.remote_path or settings.sftp_remote_path
+    # Production trust anchors and SIS destinations are deployment configuration, not
+    # request parameters; callers must not override host-key pinning or the target path.
+    if settings.is_production and payload.sftp_host_key_fingerprint:
+        raise HTTPException(
+            status_code=422,
+            detail="Production SFTP host-key trust must come from server configuration.",
+        )
+    if settings.is_production and payload.remote_path:
+        raise HTTPException(
+            status_code=422,
+            detail="Production SFTP export path must come from server configuration.",
+        )
+    remote_path = settings.sftp_remote_path if settings.is_production else (
+        payload.remote_path or settings.sftp_remote_path
+    )
+    trusted_fingerprint = settings.sftp_host_key_fingerprint if settings.is_production else (
+        payload.sftp_host_key_fingerprint or settings.sftp_host_key_fingerprint
+    )
     try:
         result = SftpExportService.dispatch_sftp_export(
             db=db,
@@ -173,7 +190,7 @@ def trigger_sftp_attendance_export(
             sftp_username=settings.sftp_username,
             sftp_password=settings.sftp_password,
             sftp_key_path=settings.sftp_key_path,
-            sftp_host_key_fingerprint=payload.sftp_host_key_fingerprint or settings.sftp_host_key_fingerprint,
+            sftp_host_key_fingerprint=trusted_fingerprint,
             sftp_known_hosts_file=settings.sftp_known_hosts_file,
             remote_path=remote_path,
         )
