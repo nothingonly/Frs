@@ -15,6 +15,7 @@ from app.db.entities import (
     ClassGroup,
     Department,
     Person,
+    SessionClassGroup,
     Student,
 )
 from app.services.followup_worker import AttendanceFollowupDaemon
@@ -100,6 +101,71 @@ def followup_db():
     with testing_sessions() as session:
         yield session
     engine.dispose()
+
+
+
+def test_followup_counts_all_groups_and_distinct_students(followup_db):
+    # Add a second department/group to a mixed session.
+    department = Department(
+        department_id="dept-two", code="ECE", name="Electrical Engineering", is_active=True
+    )
+    followup_db.add(department)
+    followup_db.commit()
+    group = ClassGroup(
+        class_group_id="cg-two",
+        department_id="dept-two",
+        year_of_study=3,
+        section="B",
+        academic_year="2026-2027",
+        is_active=True,
+    )
+    person = Person(
+        person_id="p-3",
+        employee_id="STU03",
+        full_name="Student Three",
+        department="ECE",
+        is_active=True,
+    )
+    student = Student(
+        student_id="s-3",
+        student_number="STU03",
+        full_name="Student Three",
+        person_id="p-3",
+        is_active=True,
+    )
+    followup_db.add_all([group, person, student])
+    followup_db.commit()
+    enrollment = ClassEnrollment(
+        enrollment_id="e-3",
+        student_id="s-3",
+        class_group_id="cg-two",
+        status="ACTIVE",
+    )
+    link = SessionClassGroup(session_id="sess-closed", class_group_id="cg-two")
+    duplicate_punch = AttendanceEvent(
+        attendance_id="att-1-checkout",
+        person_id="p-1",
+        employee_id="STU01",
+        punch_type="CHECK_OUT",
+        timestamp=datetime.now(timezone.utc),
+        similarity_score=0.95,
+        threshold=0.65,
+        client_device_id="kiosk-1",
+        pipeline_version="v5",
+        evidence_id="ev-1-checkout",
+        attendance_session_id="sess-closed",
+    )
+    followup_db.add_all([enrollment, link, duplicate_punch])
+    followup_db.commit()
+
+    evidence = AttendanceFollowupDaemon().reconcile_session(
+        followup_db, followup_db.get(AttendanceSession, "sess-closed")
+    )
+    assert evidence["total_enrolled"] == 3
+    assert evidence["present_count"] == 1
+    assert evidence["absent_count"] == 2
+    assert evidence["notifications"]["total_alerts"] == 2
+    assert evidence["notifications"]["skipped_count"] == 1
 
 
 def test_followup_worker_detects_only_unreconciled_closed_sessions(followup_db):
