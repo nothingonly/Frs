@@ -88,7 +88,7 @@ def test_restricted_application_role_cannot_mutate_or_drop_audit_trigger(
                         )
                         """
                     ),
-                    {"audit_id": audit_id, "session_id": "session-" + audit_id},
+                    {"audit_id": audit_id, "session_id": audit_id},
                 )
 
             with pytest.raises(DBAPIError, match="audit_events is append-only"):
