@@ -120,7 +120,7 @@ def test_render_rejects_nonproduction_mode(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("RENDER", "true")
     settings = Settings(_env_file=None, env="development")
 
-    with pytest.raises(ValueError, match="set FRS_ENV=production"):
+    with pytest.raises(ValueError, match="set FRS_ENV=staging.*FRS_ENV=production"):
         settings.validate_startup_security()
 
 
@@ -148,4 +148,38 @@ def test_render_reports_compose_hostname_before_environment_mode(
     )
 
     with pytest.raises(ValueError, match="Docker Compose-only hostname 'db'"):
+        settings.validate_startup_security()
+
+
+
+def test_staging_allows_demo_without_production_calibration_but_requires_secure_secrets() -> None:
+    settings = production_settings(
+        env="staging",
+        database_url="postgres://frs:password@demo-db.example.com:5432/frs",
+        threshold_calibrated=False,
+        calibrated_models_csv="",
+    )
+
+    settings.validate_startup_security()
+
+
+def test_staging_rejects_missing_jwt_secret() -> None:
+    settings = production_settings(env="staging", jwt_secret="")
+
+    with pytest.raises(ValueError, match="Staging requires an explicit FRS_JWT_SECRET"):
+        settings.validate_startup_security()
+
+
+def test_staging_rejects_sqlite() -> None:
+    settings = production_settings(env="staging", database_url="sqlite:///./frs.db")
+
+    with pytest.raises(ValueError, match="Staging requires PostgreSQL"):
+        settings.validate_startup_security()
+
+
+def test_render_staging_rejects_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    settings = production_settings(env="staging", database_url="sqlite:///./frs.db")
+
+    with pytest.raises(ValueError, match="SQLite is not suitable for a hosted service"):
         settings.validate_startup_security()
