@@ -36,15 +36,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e '.[dev]'
+          python -m pip install pip-audit
       - name: Compile Python
         run: python -m compileall -q app tests
       - name: Lint Python
         run: ruff check app tests
       - name: Run backend tests
         run: pytest -q
+      - name: Audit backend dependencies
+        run: pip-audit --desc
 
-  android-debug-build:
-    name: Flutter quality gate and Android APK
+  android-release-build:
+    name: Flutter quality gate and signed Android release APK
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -60,27 +63,46 @@ jobs:
         run: flutter analyze --fatal-infos
       - name: Run Flutter tests
         run: flutter test --reporter expanded
-      - name: Build Android debug APK
-        run: flutter build apk --debug
-      - name: Upload APK for release
+      - name: Configure Android release signing
+        env:
+          FRS_ANDROID_KEYSTORE_BASE64: ${{ secrets.FRS_ANDROID_KEYSTORE_BASE64 }}
+          FRS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.FRS_ANDROID_KEYSTORE_PASSWORD }}
+          FRS_ANDROID_KEY_PASSWORD: ${{ secrets.FRS_ANDROID_KEY_PASSWORD }}
+          FRS_ANDROID_KEY_ALIAS: ${{ secrets.FRS_ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          for name in FRS_ANDROID_KEYSTORE_BASE64 FRS_ANDROID_KEYSTORE_PASSWORD FRS_ANDROID_KEY_PASSWORD FRS_ANDROID_KEY_ALIAS; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required GitHub Actions secret: $name"
+              exit 1
+            fi
+          done
+          printf '%s' "$FRS_ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          test -s android/app/upload-keystore.jks
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=upload-keystore.jks\n' \
+            "$FRS_ANDROID_KEYSTORE_PASSWORD" "$FRS_ANDROID_KEY_PASSWORD" "$FRS_ANDROID_KEY_ALIAS" \
+            > android/key.properties
+      - name: Build signed Android release APK
+        run: flutter build apk --release
+      - name: Upload signed release APK
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: frs-android-debug
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          name: frs-android-release
+          path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
 
   publish:
     name: Publish GitHub prerelease
-    needs: [backend-quality, android-debug-build]
+    needs: [backend-quality, android-release-build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release notes
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Download tested Android APK
+      - name: Download signed Android release APK
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          name: frs-android-debug
+          name: frs-android-release
           path: artifacts
       - name: Update repository About metadata
         continue-on-error: true
@@ -118,15 +140,15 @@ jobs:
           fi
           
           if [ -n "$NOTES_FILE" ]; then
-            gh release create "$VERSION" artifacts/app-debug.apk \
+            gh release create "$VERSION" artifacts/app-release.apk \
               --title "FRS Release $VERSION" \
               --notes-file "$NOTES_FILE" \
               --prerelease \
-              --target main
+              --target "$GITHUB_SHA"
           else
-            gh release create "$VERSION" artifacts/app-debug.apk \
+            gh release create "$VERSION" artifacts/app-release.apk \
               --title "FRS Release $VERSION" \
               --notes "Automated build release for FRS $VERSION" \
               --prerelease \
-              --target main
+              --target "$GITHUB_SHA"
           fi
