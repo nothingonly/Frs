@@ -122,6 +122,8 @@ class AbsenteeAlertService:
         session = db.get(AttendanceSession, session_id)
         if session is None:
             raise ValueError(f"Session '{session_id}' not found.")
+        if session.status != "CLOSED":
+            raise ValueError(f"Attendance session '{session_id}' must be closed before calculating absentees.")
 
         group_ids = _session_class_group_ids(db, session)
         enrollments = db.execute(
@@ -548,6 +550,11 @@ class SftpExportService:
 
     @staticmethod
     def prepare_export_package(db: Session, session_id: str) -> dict[str, Any]:
+        session = db.get(AttendanceSession, session_id)
+        if session is None:
+            raise ValueError(f"Attendance session '{session_id}' not found.")
+        if session.status != "CLOSED":
+            raise ValueError(f"Attendance session '{session_id}' must be closed before SIS export.")
         csv_content = CsvExportService.export_attendance_csv(db, session_id)
         content_bytes = csv_content.encode("utf-8")
         checksum = hashlib.sha256(content_bytes).hexdigest()
