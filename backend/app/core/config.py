@@ -168,6 +168,8 @@ class Settings(BaseSettings):
             self.encryption_key_bytes()
             if not self.threshold_calibrated or "ArcFace" not in self.calibrated_models:
                 raise ValueError("Production startup refused: ArcFace threshold must be calibrated on project data")
+            # Fail during startup rather than letting /health raise a 500 for a missing threshold.
+            self.threshold_for("ArcFace")
             # FRS_MODEL_LICENSE_ATTESTED is informational only. Actual artifact
             # license terms are always enforced by VisionEngine from the signed/hashed
             # provenance manifest and cannot be overridden by a boolean setting.
@@ -244,7 +246,11 @@ class Settings(BaseSettings):
         return self.jwt_secret or self.admin_api_key or "frs-dev-jwt-secret-do-not-use-in-production"
 
     def is_model_calibrated(self, model_id: str) -> bool:
-        return self.threshold_calibrated and model_id == "ArcFace" or model_id in self.calibrated_models
+        # ArcFace has a legacy explicit calibration gate in addition to the model list.
+        # Parenthesize the conditions so listing ArcFace alone cannot override its gate.
+        if model_id == "ArcFace":
+            return self.threshold_calibrated and model_id in self.calibrated_models
+        return model_id in self.calibrated_models
 
     def threshold_for(self, model_id: str) -> float:
         parsed = json.loads(self.model_thresholds_json)
