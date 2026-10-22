@@ -81,3 +81,11 @@ jobs:
         run: python -m app.db.migrator --apply
       - name: Verify PostgreSQL migration state, RLS and append-only audit behavior
         run: pytest tests/test_postgres_migrations_integration.py -v
+
+  backend-container-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build backend image
+        run: docker build --pull --tag frs-backend-ci:pr ./backend
