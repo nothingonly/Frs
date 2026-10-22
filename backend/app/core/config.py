@@ -165,8 +165,9 @@ class Settings(BaseSettings):
         if self.minimum_identification_frames > self.maximum_identification_frames:
             raise ValueError("Minimum identification frames cannot exceed maximum frames")
         # Render sets RENDER=true for deployed services. Diagnose a stale Compose URL
-        # before enforcing environment mode, regardless of whether FRS_ENV was set correctly.
+        # first, then require an explicit staging/demo or production environment.
         on_render = os.getenv("RENDER", "").strip().lower() == "true"
+        current_env = self.env.strip().lower()
         if on_render:
             render_db_url = self.database_url.strip()
             render_host = urlsplit(render_db_url).hostname
@@ -174,14 +175,63 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Render startup refused: FRS_DATABASE_URL points to the Docker Compose-only "
                     "hostname 'db'. Replace it with the Render PostgreSQL Internal Database URL "
-                    "(when services share a region) or another URL reachable from this service."
+                    "(when services share a region/workspace) or another URL reachable from this service."
                 )
-            if self.env.lower() != "production":
+            if current_env not in {"staging", "production"}:
                 raise ValueError(
-                    "Render deployment refused: set FRS_ENV=production so production database, "
-                    "credential, encryption, calibration, and model-provenance checks are enforced."
+                    "Render deployment refused: set FRS_ENV=staging for a demo/test deployment "
+                    "or FRS_ENV=production for a production deployment."
                 )
-        if self.env.lower() == "production":
+            if render_db_url.lower().startswith("sqlite") or not (
+                render_db_url.lower().startswith("postgresql")
+                or render_db_url.lower().startswith("postgres")
+            ):
+                raise ValueError(
+                    "Render deployment refused: SQLite is not suitable for a hosted service. "
+                    "Configure FRS_DATABASE_URL or DATABASE_URL with a reachable PostgreSQL URL."
+                )
+        if current_env == "staging":
+            db_url = self.database_url.lower().strip()
+            if db_url.startswith("sqlite") or not (
+                db_url.startswith("postgresql") or db_url.startswith("postgres")
+            ):
+                raise ValueError(
+                    "Staging requires PostgreSQL; SQLite is reserved for local development/tests."
+                )
+            if not self.device_keys or any(len(token) < 32 for token in self.device_keys):
+                raise ValueError("Staging requires device API keys of at least 32 characters")
+            if len(self.admin_api_key) < 32:
+                raise ValueError("Staging requires an admin API key of at least 32 characters")
+            jwt_secret = self.jwt_secret.strip()
+            if len(jwt_secret) < 32:
+                raise ValueError("Staging requires an explicit FRS_JWT_SECRET of at least 32 characters")
+            if jwt_secret == self.admin_api_key.strip() or jwt_secret in self.device_keys:
+                raise ValueError("Staging requires FRS_JWT_SECRET to be distinct from admin and device API keys")
+            self.encryption_key_bytes()
+            try:
+                import base64
+                import binascii
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+                deletion_seed = base64.b64decode(
+                    self.deletion_certificate_key.strip().encode("ascii"),
+                    altchars=b"-_",
+                    validate=True,
+                )
+            except (UnicodeError, ValueError, binascii.Error) as exc:
+                raise ValueError(
+                    "Staging requires FRS_DELETION_CERTIFICATE_KEY to be URL-safe base64 for a 32-byte Ed25519 private-key seed"
+                ) from exc
+            if len(deletion_seed) != 32:
+                raise ValueError(
+                    "Staging FRS_DELETION_CERTIFICATE_KEY must decode to exactly 32 bytes for Ed25519"
+                )
+            Ed25519PrivateKey.from_private_bytes(deletion_seed)
+            if self.lti_client_id and not self.lti_platform_public_key_pem.strip():
+                raise ValueError("Staging LTI is enabled but FRS_LTI_PLATFORM_PUBLIC_KEY_PEM is missing")
+            if self.lti_client_id and (not self.lti_issuer.strip() or not self.lti_deployment_id.strip()):
+                raise ValueError("Staging LTI requires configured issuer and deployment ID")
+        if current_env == "production":
             db_url = self.database_url.lower().strip()
             if db_url.startswith("sqlite") or not (
                 db_url.startswith("postgresql") or db_url.startswith("postgres")
