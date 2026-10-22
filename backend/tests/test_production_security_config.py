@@ -74,3 +74,23 @@ def test_production_accepts_separate_strong_jwt_secret() -> None:
     settings = production_settings()
 
     settings.validate_startup_security()
+
+
+
+def test_render_rejects_compose_only_database_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    settings = production_settings(
+        database_url="postgresql+psycopg://frs:password@db:5432/frs",
+    )
+
+    with pytest.raises(ValueError, match="Docker Compose-only hostname 'db'"):
+        settings.validate_startup_security()
+
+
+def test_compose_database_hostname_remains_valid_outside_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RENDER", raising=False)
+    settings = production_settings(
+        database_url="postgresql+psycopg://frs:password@db:5432/frs",
+    )
+
+    settings.validate_startup_security()
