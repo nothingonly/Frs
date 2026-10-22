@@ -47,7 +47,10 @@ def followup_db():
         db.commit()
 
         s1 = Student(student_id="s-1", student_number="STU01", full_name="Student One", person_id="p-1", is_active=True)
-        s2 = Student(student_id="s-2", student_number="STU02", full_name="Student Two", person_id="p-2", is_active=True)
+        s2 = Student(
+            student_id="s-2", student_number="STU02", full_name="Student Two",
+            person_id="p-2", email="student.two@campus.edu", is_active=True,
+        )
         db.add_all([s1, s2])
         db.commit()
 
@@ -123,7 +126,7 @@ def test_followup_worker_reconciles_session_and_records_audit(followup_db):
     alerts = notifications["alerts"]
     assert len(alerts) == 1
     assert alerts[0]["status"] in ("SENT", "SENT_MOCK")
-    assert "stu02@campus.edu" in alerts[0]["recipient"]
+    assert alerts[0]["recipient"] == "student.two@campus.edu"
 
     # Audit event written
     audit = followup_db.execute(
