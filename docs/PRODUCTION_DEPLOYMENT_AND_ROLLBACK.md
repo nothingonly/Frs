@@ -137,11 +137,13 @@ pnpm start -p 3000
 ```
 
 ### 5.3 Android Kiosk Setup
-1. Build release APK:
+1. Build a locally signed release APK only after creating a dedicated Android upload keystore and configuring `android/key.properties` from `android/key.properties.example`:
    ```bash
    flutter build apk --release
    ```
-2. On Android device, install APK:
+   Do not publish a debug-signed APK as a release.
+2. For the GitHub alpha-prerelease workflow, configure these repository Actions secrets before dispatching `.github/workflows/publish-alpha-release.yml`: `FRS_ANDROID_KEYSTORE_BASE64` (base64-encoded JKS/PKCS12 keystore), `FRS_ANDROID_KEYSTORE_PASSWORD`, `FRS_ANDROID_KEY_PASSWORD`, and `FRS_ANDROID_KEY_ALIAS`. The workflow fails closed when any are missing, builds a signed release APK, and points the release tag at the exact tested commit.
+3. On Android device, install APK:
    ```bash
    adb install -r build/app/outputs/flutter-apk/app-release.apk
    ```
