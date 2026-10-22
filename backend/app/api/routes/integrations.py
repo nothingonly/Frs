@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import (
     ROLE_DEAN,
     ROLE_FACULTY,
+    ROLE_SUPER_ADMIN,
     TokenClaims,
     check_class_access,
     check_department_access,
@@ -22,7 +23,7 @@ from app.api.dependencies import (
 )
 from app.core.config import get_settings
 from app.database import get_db
-from app.db.entities import AttendanceSession, ClassGroup, LtiLaunchNonce, LtiNonceUse
+from app.db.entities import AttendanceSession, ClassGroup, LtiLaunchNonce, LtiNonceUse, SessionClassGroup
 from app.services.integrations import (
     AbsenteeAlertService,
     LtiService,
@@ -63,6 +64,39 @@ class LtiAgsPassbackRequest(BaseModel):
     comment: str = "FRS attendance passback"
 
 
+def _authorize_integration_session_scope(
+    db: Session,
+    actor: TokenClaims,
+    session: AttendanceSession,
+) -> None:
+    """Validate all primary and linked class groups before returning student data or exporting records."""
+    linked_ids = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == session.session_id
+        )
+    ).scalars().all()
+    group_ids = tuple(dict.fromkeys([session.class_group_id, *linked_ids]))
+    groups = db.execute(
+        select(ClassGroup).where(ClassGroup.class_group_id.in_(group_ids))
+    ).scalars().all()
+    if not group_ids or {group.class_group_id for group in groups} != set(group_ids):
+        raise HTTPException(
+            status_code=409,
+            detail="Attendance session references a missing class group.",
+        )
+
+    if actor.role == ROLE_SUPER_ADMIN:
+        return
+    if actor.role not in (ROLE_FACULTY, ROLE_DEAN):
+        raise HTTPException(status_code=403, detail="Forbidden: role cannot access integration session data.")
+
+    for group in groups:
+        if actor.role == ROLE_FACULTY:
+            check_class_access(actor, group.class_group_id, group.department_id)
+        else:
+            check_department_access(actor, group.department_id)
+
+
 @router.post("/notifications/absentees")
 def dispatch_session_absentee_alerts(
     payload: AbsenteeAlertRequest,
@@ -74,13 +108,7 @@ def dispatch_session_absentee_alerts(
     if sess is None:
         raise HTTPException(status_code=404, detail=f"Attendance session '{payload.session_id}' not found.")
 
-    if actor.role == ROLE_FACULTY:
-        check_class_access(actor, sess.class_group_id)
-    elif actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, sess.class_group_id)
-        if cg is None:
-            raise HTTPException(status_code=404, detail="Session class group not found.")
-        check_department_access(actor, cg.department_id)
+    _authorize_integration_session_scope(db, actor, sess)
 
     try:
         absentees = AbsenteeAlertService.find_absentees(db, payload.session_id)
@@ -132,11 +160,7 @@ def trigger_sftp_attendance_export(
     if sess is None:
         raise HTTPException(status_code=404, detail=f"Attendance session '{payload.session_id}' not found.")
 
-    if actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, sess.class_group_id)
-        if cg is None:
-            raise HTTPException(status_code=404, detail="Session class group not found.")
-        check_department_access(actor, cg.department_id)
+    _authorize_integration_session_scope(db, actor, sess)
 
     settings = get_settings()
     remote_path = payload.remote_path or settings.sftp_remote_path
