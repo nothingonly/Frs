@@ -12,6 +12,8 @@ from sqlalchemy.pool import StaticPool
 from app.api.routes.admin import router as admin_router
 from app.api.routes.college import router as college_router
 from app.api.routes.integrations import router as integrations_router
+from app.api.routes.enrollment import router as enrollment_router
+from app.core.config import Settings
 from app.core.auth import ROLE_DEAN, ROLE_FACULTY, create_access_token
 from app.core.config import get_settings
 from app.database import Base, get_db
@@ -43,6 +45,20 @@ def matrix_client():
     app.include_router(college_router)
     app.include_router(admin_router)
     app.include_router(integrations_router)
+    app.include_router(enrollment_router)
+    app.state.settings = get_settings()
+
+    class EnrollmentPipelineStub:
+        def enroll(self, db, payloads, *, employee_id, full_name, department, admin_actor_id):
+            return {
+                "status": "TEST_ENROLLED",
+                "employee_id": employee_id,
+                "department": department,
+                "admin_actor_id": admin_actor_id,
+                "frame_count": len(payloads),
+            }
+
+    app.state.pipeline = EnrollmentPipelineStub()
 
     def override_db():
         session = testing_sessions()
@@ -199,6 +215,73 @@ def matrix_client():
         yield client, testing_sessions
     engine.dispose()
 
+
+
+def test_dean_legacy_biometric_enrollment_is_department_scoped(matrix_client):
+    client, _ = matrix_client
+    settings = get_settings()
+    dean_cse = create_access_token(
+        sub="dean-cse", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu", department_id="dept-cse",
+    )
+    headers = {"Authorization": f"Bearer {dean_cse}"}
+    frames = [
+        ("images", (f"frame-{index}.jpg", b"demo-frame", "image/jpeg"))
+        for index in range(3)
+    ]
+
+    denied = client.post(
+        "/api/v1/biometrics/enroll/admin",
+        data={"employee_id": "STU-ECE-01", "full_name": "ECE Student", "department": "ECE"},
+        files=frames,
+        headers=headers,
+    )
+    assert denied.status_code == 403
+
+    allowed = client.post(
+        "/api/v1/biometrics/enroll/admin",
+        data={"employee_id": "STU-CSE-01", "full_name": "CSE Student", "department": "CSE"},
+        files=frames,
+        headers=headers,
+    )
+    assert allowed.status_code == 201
+    assert allowed.json()["department"] == "CSE"
+    assert allowed.json()["frame_count"] == 3
+
+
+def test_production_sftp_rejects_request_supplied_trust_and_path(matrix_client, monkeypatch):
+    client, _ = matrix_client
+    settings = get_settings()
+    super_admin = create_access_token(
+        sub="super-admin", role="super_admin", secret=settings.effective_jwt_secret,
+        email="admin@campus.edu",
+    )
+    monkeypatch.setattr(
+        "app.api.routes.integrations.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            env="production",
+            sftp_remote_path="/approved/attendance",
+            sftp_host_key_fingerprint="SHA256:trusted-host-key",
+        ),
+    )
+    headers = {"Authorization": f"Bearer {super_admin}"}
+
+    path_override = client.post(
+        "/api/v1/integrations/sftp/export",
+        json={"session_id": "sess-cse-1", "remote_path": "/other/path"},
+        headers=headers,
+    )
+    assert path_override.status_code == 422
+    assert "server configuration" in path_override.json()["detail"]
+
+    key_override = client.post(
+        "/api/v1/integrations/sftp/export",
+        json={"session_id": "sess-cse-1", "sftp_host_key_fingerprint": "SHA256:attacker-key"},
+        headers=headers,
+    )
+    assert key_override.status_code == 422
+    assert "server configuration" in key_override.json()["detail"]
 
 def test_dean_cross_department_audit_forbidden(matrix_client):
     client, _ = matrix_client
