@@ -108,7 +108,7 @@ FRS is an enterprise-grade attendance management system specifically redesigned 
 - **Classroom Framing Guide**: Replaced oval reticle with wide classroom corner brackets and rule-of-thirds grid guides.
 - **Interactive Roster Review**: Search bar, status filter tabs (`All`, `Present`, `Pending Review`, `Absent`), confidence scores, and manual toggle overrides.
 - **Idempotent Finalization**: Confirmation dialog summarizing total present, absent, and flagged resolution before committing durable records.
-- **Hardware-Backed Keystore & Offline Queue**: Device bearer credentials and offline bursts secured via Android Keystore `EncryptedSharedPreferences` (AES-256-GCM).
+- **Secure Offline Queue**: Device credentials and offline bursts stored through `flutter_secure_storage` using Android encrypted SharedPreferences, with frame-format corruption checks, 24-hour expiry, and server idempotency on retries. The current queue does not use SQLCipher; target-device key protection and crash/reconnect behavior still require physical-device validation.
 
 ---
 
