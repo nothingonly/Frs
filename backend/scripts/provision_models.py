@@ -11,8 +11,10 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tarfile
+from pathlib import Path, PurePosixPath
 import zipfile
 
 EXPECTED_SCRFD_SHA256 = "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
@@ -72,23 +74,73 @@ def find_archive(custom_path: str | None = None) -> Path | None:
     return None
 
 
+def _validated_archive_path(root: Path, member_name: str) -> Path:
+    """Reject absolute/traversal archive paths before writing any extracted data."""
+    normalized_name = member_name.replace("\\", "/")
+    relative = PurePosixPath(normalized_name)
+    if relative.is_absolute() or any(part == ".." for part in relative.parts):
+        raise ValueError(f"Unsafe archive member path: {member_name!r}")
+    destination = (root / Path(*relative.parts)).resolve()
+    resolved_root = root.resolve()
+    if destination != resolved_root and resolved_root not in destination.parents:
+        raise ValueError(f"Archive member escapes extraction directory: {member_name!r}")
+    return destination
+
+
+def _safe_extract_tar(archive: tarfile.TarFile, target_dir: Path) -> None:
+    root = target_dir.resolve()
+    members = archive.getmembers()
+    for member in members:
+        _validated_archive_path(root, member.name)
+        # Model packages only need ordinary files/directories. Links and special files can
+        # redirect writes outside the extraction root or alter later path resolution.
+        if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+            raise ValueError(f"Refusing link or special tar member: {member.name!r}")
+        if not (member.isdir() or member.isfile()):
+            raise ValueError(f"Unsupported tar member type: {member.name!r}")
+    archive.extractall(path=root, members=members)
+
+
+def _safe_extract_zip(archive: zipfile.ZipFile, target_dir: Path) -> None:
+    root = target_dir.resolve()
+    members = archive.infolist()
+    for member in members:
+        _validated_archive_path(root, member.filename)
+        mode = (member.external_attr >> 16) & 0xFFFF
+        file_type = stat.S_IFMT(mode)
+        if file_type == stat.S_IFLNK:
+            raise ValueError(f"Refusing symbolic link in zip archive: {member.filename!r}")
+        if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+            raise ValueError(f"Refusing special file in zip archive: {member.filename!r}")
+    archive.extractall(path=root, members=members)
+
+
 def extract_and_verify(archive_path: Path, target_dir: Path) -> bool:
     print(f"-> Inspecting archive: {archive_path}")
     pkg_hash = compute_sha256(archive_path)
     print(f"-> Archive SHA-256: {pkg_hash}")
+    # The project-produced tarball has a pinned package digest. The upstream zip is instead
+    # authenticated by the exact SCRFD and ArcFace file hashes checked below.
+    if archive_path.name == "frs_buffalo_l_verified.tar.gz" and pkg_hash != EXPECTED_PACKAGE_SHA256:
+        print(f"ERROR: package SHA-256 mismatch; expected {EXPECTED_PACKAGE_SHA256}")
+        return False
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    if archive_path.name.endswith(".tar.gz") or archive_path.name.endswith(".tgz"):
-        print(f"-> Extracting tar archive to {target_dir}...")
-        with tarfile.open(archive_path, "r:gz") as tar:
-            tar.extractall(target_dir)
-    elif archive_path.name.endswith(".zip"):
-        print(f"-> Extracting zip archive to {target_dir}...")
-        with zipfile.ZipFile(archive_path, "r") as z:
-            z.extractall(target_dir)
-    else:
-        print(f"Unsupported archive format: {archive_path.name}")
+    try:
+        if archive_path.name.endswith(".tar.gz") or archive_path.name.endswith(".tgz"):
+            print(f"-> Safely extracting tar archive to {target_dir}...")
+            with tarfile.open(archive_path, "r:gz") as tar:
+                _safe_extract_tar(tar, target_dir)
+        elif archive_path.name.endswith(".zip"):
+            print(f"-> Safely extracting zip archive to {target_dir}...")
+            with zipfile.ZipFile(archive_path, "r") as z:
+                _safe_extract_zip(z, target_dir)
+        else:
+            print(f"Unsupported archive format: {archive_path.name}")
+            return False
+    except (tarfile.TarError, zipfile.BadZipFile, OSError, ValueError) as exc:
+        print(f"ERROR: archive extraction was rejected: {exc}")
         return False
 
     # Check if files extracted into a subfolder or directly
