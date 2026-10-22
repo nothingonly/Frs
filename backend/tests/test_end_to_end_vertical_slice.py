@@ -403,6 +403,7 @@ def test_complete_end_to_end_attendance_workflow(e2e_harness: dict) -> None:
         "notes": "Verified student identity card in person during class.",
     })
     assert resolve_resp.status_code == 200
+    assert resolve_resp.json()["duplicate_suppressed"] is True
 
     # 12c. Authorized Correction: Punch adjustment with audit trail
     corr_resp = client.post(f"/api/v1/admin/attendance/{attendance_id}/correct", json={

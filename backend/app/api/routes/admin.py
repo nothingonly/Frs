@@ -722,37 +722,44 @@ def resolve_review_item(
                 AttendanceEvent.punch_type == job.punch_type,
             ).limit(1)
         ).scalar_one_or_none()
+
+        duplicate_suppressed = existing_attendance is not None
         if existing_attendance is not None:
-            raise HTTPException(status_code=409, detail="Attendance already exists for this student and punch type.")
+            # The same student/punch already has a durable attendance event. Resolve the
+            # rejected batch as reviewed, referencing that event instead of creating a duplicate.
+            attendance_event = existing_attendance
+            decision_state = "MANUAL_APPROVAL_DUPLICATE_SUPPRESSED"
+        else:
+            if not student.person_id:
+                raise HTTPException(status_code=409, detail="Student has no biometric identity record.")
 
-        if not student.person_id:
-            raise HTTPException(status_code=409, detail="Student has no biometric identity record.")
+            attendance_event = AttendanceEvent(
+                attendance_id=str(uuid.uuid4()),
+                person_id=student.person_id,
+                employee_id=student.student_number,
+                punch_type=job.punch_type,
+                timestamp=now,
+                # Manual approval is an audited human decision, not a biometric match score.
+                similarity_score=0.0,
+                threshold=1.0,
+                client_device_id=job.client_device_id,
+                pipeline_version="manual-administrative-review",
+                evidence_id=f"review:{job.batch_id}",
+                attendance_session_id=job.attendance_session_id,
+            )
+            db.add(attendance_event)
+            decision_state = "MANUALLY_APPROVED"
 
-        attendance_event = AttendanceEvent(
-            attendance_id=str(uuid.uuid4()),
-            person_id=student.person_id,
-            employee_id=student.student_number,
-            punch_type=job.punch_type,
-            timestamp=now,
-            # Manual approval is an audited human decision, not a biometric match score.
-            similarity_score=0.0,
-            threshold=1.0,
-            client_device_id=job.client_device_id,
-            pipeline_version="manual-administrative-review",
-            evidence_id=f"review:{job.batch_id}",
-            attendance_session_id=job.attendance_session_id,
-        )
-        db.add(attendance_event)
         job.status = "SUCCEEDED"
         job.result_json = json.dumps({
             "manual_approval": True,
+            "duplicate_suppressed": duplicate_suppressed,
             "attendance_id": attendance_event.attendance_id,
             "student_id": student.student_id,
             "student_number": student.student_number,
             "actor": actor_id_str,
             "notes": payload.notes,
         })
-        decision_state = "MANUALLY_APPROVED"
     else:
         decision_state = "DISMISSED"
 
@@ -771,11 +778,18 @@ def resolve_review_item(
             "action": payload.action,
             "student_id": payload.student_id,
             "notes": payload.notes,
+            "duplicate_suppressed": duplicate_suppressed if payload.action == "APPROVE_MANUAL" else False,
+            "attendance_record_created": not duplicate_suppressed if payload.action == "APPROVE_MANUAL" else False,
         }),
     )
     db.add(audit)
     db.commit()
-    return {"status": "success", "action": payload.action, "batch_id": batch_id}
+    return {
+        "status": "success",
+        "action": payload.action,
+        "batch_id": batch_id,
+        "duplicate_suppressed": duplicate_suppressed if payload.action == "APPROVE_MANUAL" else False,
+    }
 
 
 @router.post("/attendance/{attendance_id}/correct")
