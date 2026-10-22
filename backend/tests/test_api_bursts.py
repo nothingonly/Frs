@@ -10,6 +10,7 @@ from starlette.datastructures import Headers, UploadFile
 
 from app.api.routes.attendance import identify_attendance, verify_attendance
 from app.api.routes.enrollment import enroll_person
+from app.core.auth import ROLE_SUPER_ADMIN, TokenClaims
 from app.core.config import Settings
 
 
@@ -114,8 +115,11 @@ def test_enrollment_route_passes_burst_and_admin_identity() -> None:
     request = make_request(pipeline)
     files = [make_upload(b"frame-one"), make_upload(b"frame-two"), make_upload(b"frame-three")]
 
+    actor = TokenClaims(
+        sub="admin-test", role=ROLE_SUPER_ADMIN, exp=4102444800, iat=1,
+    )
     result = asyncio.run(enroll_person(
-        request=request, admin_id="admin-test", db=None,
+        request=request, actor=actor, db=None,
         employee_id="EMP-001", full_name="Example Person", department="Operations",
         images=files, image=None,
     ))
@@ -128,5 +132,5 @@ def test_enrollment_route_passes_burst_and_admin_identity() -> None:
         "employee_id": "EMP-001",
         "full_name": "Example Person",
         "department": "Operations",
-        "admin_actor_id": "admin-test",
+        "admin_actor_id": "admin:admin-test",
     }

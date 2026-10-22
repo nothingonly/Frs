@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import (
     ROLE_DEAN,
     ROLE_FACULTY,
+    ROLE_SUPER_ADMIN,
     TokenClaims,
     check_class_access,
     check_department_access,
@@ -17,7 +23,7 @@ from app.api.dependencies import (
 )
 from app.core.config import get_settings
 from app.database import get_db
-from app.db.entities import AttendanceSession, ClassGroup
+from app.db.entities import AttendanceSession, ClassGroup, LtiLaunchNonce, LtiNonceUse, SessionClassGroup
 from app.services.integrations import (
     AbsenteeAlertService,
     LtiService,
@@ -58,6 +64,39 @@ class LtiAgsPassbackRequest(BaseModel):
     comment: str = "FRS attendance passback"
 
 
+def _authorize_integration_session_scope(
+    db: Session,
+    actor: TokenClaims,
+    session: AttendanceSession,
+) -> None:
+    """Validate all primary and linked class groups before returning student data or exporting records."""
+    linked_ids = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == session.session_id
+        )
+    ).scalars().all()
+    group_ids = tuple(dict.fromkeys([session.class_group_id, *linked_ids]))
+    groups = db.execute(
+        select(ClassGroup).where(ClassGroup.class_group_id.in_(group_ids))
+    ).scalars().all()
+    if not group_ids or {group.class_group_id for group in groups} != set(group_ids):
+        raise HTTPException(
+            status_code=409,
+            detail="Attendance session references a missing class group.",
+        )
+
+    if actor.role == ROLE_SUPER_ADMIN:
+        return
+    if actor.role not in (ROLE_FACULTY, ROLE_DEAN):
+        raise HTTPException(status_code=403, detail="Forbidden: role cannot access integration session data.")
+
+    for group in groups:
+        if actor.role == ROLE_FACULTY:
+            check_class_access(actor, group.class_group_id, group.department_id)
+        else:
+            check_department_access(actor, group.department_id)
+
+
 @router.post("/notifications/absentees")
 def dispatch_session_absentee_alerts(
     payload: AbsenteeAlertRequest,
@@ -69,12 +108,12 @@ def dispatch_session_absentee_alerts(
     if sess is None:
         raise HTTPException(status_code=404, detail=f"Attendance session '{payload.session_id}' not found.")
 
-    if actor.role == ROLE_FACULTY:
-        check_class_access(actor, sess.class_group_id)
-    elif actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, sess.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+    _authorize_integration_session_scope(db, actor, sess)
+    if sess.status != "CLOSED":
+        raise HTTPException(
+            status_code=409,
+            detail="Absentee notifications are available only after the attendance session is closed.",
+        )
 
     try:
         absentees = AbsenteeAlertService.find_absentees(db, payload.session_id)
@@ -126,13 +165,32 @@ def trigger_sftp_attendance_export(
     if sess is None:
         raise HTTPException(status_code=404, detail=f"Attendance session '{payload.session_id}' not found.")
 
-    if actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, sess.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+    _authorize_integration_session_scope(db, actor, sess)
 
     settings = get_settings()
-    remote_path = payload.remote_path or settings.sftp_remote_path
+    # Production trust anchors and SIS destinations are deployment configuration, not
+    # request parameters; callers must not override host-key pinning or the target path.
+    if settings.is_production and payload.sftp_host_key_fingerprint:
+        raise HTTPException(
+            status_code=422,
+            detail="Production SFTP host-key trust must come from server configuration.",
+        )
+    if settings.is_production and payload.remote_path:
+        raise HTTPException(
+            status_code=422,
+            detail="Production SFTP export path must come from server configuration.",
+        )
+    remote_path = settings.sftp_remote_path if settings.is_production else (
+        payload.remote_path or settings.sftp_remote_path
+    )
+    trusted_fingerprint = settings.sftp_host_key_fingerprint if settings.is_production else (
+        payload.sftp_host_key_fingerprint or settings.sftp_host_key_fingerprint
+    )
+    if sess.status != "CLOSED":
+        raise HTTPException(
+            status_code=409,
+            detail="SIS export is available only after the attendance session is closed.",
+        )
     try:
         result = SftpExportService.dispatch_sftp_export(
             db=db,
@@ -142,7 +200,7 @@ def trigger_sftp_attendance_export(
             sftp_username=settings.sftp_username,
             sftp_password=settings.sftp_password,
             sftp_key_path=settings.sftp_key_path,
-            sftp_host_key_fingerprint=payload.sftp_host_key_fingerprint or settings.sftp_host_key_fingerprint,
+            sftp_host_key_fingerprint=trusted_fingerprint,
             sftp_known_hosts_file=settings.sftp_known_hosts_file,
             remote_path=remote_path,
         )
@@ -153,10 +211,47 @@ def trigger_sftp_attendance_export(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.post("/lti/launch/nonce", status_code=201)
+def issue_lti_launch_nonce(
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Issue a short-lived server nonce to include in an LMS OIDC authorization request."""
+    settings = get_settings()
+    if settings.is_production and not (
+        settings.lti_client_id.strip()
+        and settings.lti_issuer.strip()
+        and settings.lti_deployment_id.strip()
+        and settings.lti_platform_public_key_pem.strip()
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Production LTI issuer, client ID, deployment ID and trusted public key must be configured.",
+        )
+
+    now = datetime.now(timezone.utc)
+    nonce = secrets.token_urlsafe(32)
+    challenge = LtiLaunchNonce(
+        nonce=nonce,
+        issued_by=actor.email or actor.sub,
+        issued_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    db.add(challenge)
+    db.commit()
+    return {
+        "nonce": nonce,
+        "issued_at": now.isoformat(),
+        "expires_at": challenge.expires_at.isoformat(),
+        "expires_in_seconds": 300,
+    }
+
+
 @router.post("/lti/launch/validate")
 def validate_lti_launch(
     payload: LtiLaunchValidationRequest,
     _actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Validate incoming 1EdTech LTI 1.3 launch token or claims for Canvas/Moodle LMS integration."""
     settings = get_settings()
@@ -175,9 +270,32 @@ def validate_lti_launch(
         expected_deployment = payload.expected_deployment_id or (settings.lti_deployment_id if settings.lti_deployment_id else None)
 
     if payload.id_token:
-        secret_or_key = payload.signing_key_or_secret if not settings.is_production and payload.signing_key_or_secret else settings.effective_jwt_secret
+        if settings.is_production:
+            if not settings.lti_platform_public_key_pem.strip():
+                raise HTTPException(status_code=503, detail="Trusted LMS platform verification key is not configured.")
+            if not payload.nonce:
+                raise HTTPException(status_code=422, detail="Production LTI launch requires a server-initiated nonce.")
+            nonce_challenge = db.execute(
+                select(LtiLaunchNonce)
+                .where(
+                    LtiLaunchNonce.nonce == payload.nonce,
+                    LtiLaunchNonce.consumed_at.is_(None),
+                    LtiLaunchNonce.expires_at > datetime.now(timezone.utc),
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if nonce_challenge is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="LTI nonce was not issued by this server, has expired, or was already consumed.",
+                )
+            if not expected_client_id or not expected_issuer or not expected_deployment:
+                raise HTTPException(status_code=503, detail="Production LTI issuer, client ID, and deployment ID must be configured.")
+            secret_or_key = settings.lti_platform_public_key_pem
+        else:
+            secret_or_key = payload.signing_key_or_secret or settings.lti_platform_public_key_pem or settings.effective_jwt_secret
         try:
-            return LtiService.validate_launch_id_token(
+            verified = LtiService.validate_launch_id_token(
                 id_token=payload.id_token,
                 signing_key_or_secret=secret_or_key,
                 expected_issuer=expected_issuer,
@@ -186,7 +304,24 @@ def validate_lti_launch(
                 expected_nonce=payload.nonce,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        if settings.is_production:
+            nonce = verified.get("nonce")
+            if not isinstance(nonce, str) or not nonce:
+                raise HTTPException(status_code=422, detail="Verified LTI ID token does not contain a nonce.")
+            # Consume the server-issued challenge and record token replay evidence atomically.
+            nonce_challenge.consumed_at = datetime.now(timezone.utc)
+            db.add(LtiNonceUse(
+                nonce=nonce,
+                token_sha256=hashlib.sha256(payload.id_token.encode("utf-8")).hexdigest(),
+            ))
+            try:
+                db.commit()
+            except IntegrityError as exc:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="LTI nonce has already been consumed; launch replay rejected.") from exc
+        return verified
 
     if payload.claims:
         if settings.is_production:

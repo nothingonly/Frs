@@ -22,10 +22,10 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.11"
           cache: pip
@@ -41,7 +41,7 @@ jobs:
       - name: Cache Buffalo_L ONNX model weights
         id: cache-models
         if: ${{ github.event.inputs.download_weights != 'true' }}
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: backend/model-artifacts/insightface/models/buffalo_l
           key: buffalo-l-onnx-${{ hashFiles('backend/app/vision/onnx_models.py', 'backend/model-artifacts/primary-model-manifest.json') }}
@@ -64,10 +64,43 @@ jobs:
           echo "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43  model-artifacts/insightface/models/buffalo_l/w600k_r50.onnx" | sha256sum -c -
           cp model-artifacts/primary-model-manifest.json model-artifacts/insightface/models/buffalo_l/manifest.json
 
+      - name: Verify cached or downloaded model hashes
+        env:
+          FRS_MODEL_ROOT: model-artifacts/insightface
+        run: |
+          model_dir="model-artifacts/insightface/models/buffalo_l"
+          test -f "$model_dir/det_10g.onnx"
+          test -f "$model_dir/w600k_r50.onnx"
+          echo "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91  $model_dir/det_10g.onnx" | sha256sum -c -
+          echo "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43  $model_dir/w600k_r50.onnx" | sha256sum -c -
+          cp model-artifacts/primary-model-manifest.json "$model_dir/manifest.json"
+
       - name: Run real vision inference test suite (zero skips required)
         env:
           FRS_MODEL_ROOT: model-artifacts/insightface
           FRS_MODEL_PACK: buffalo_l
         run: |
-          # Execute real inference test suite; fail if any test is skipped or fails
-          pytest tests/test_real_vision_inference.py -v -s -rA
+          pytest tests/test_real_vision_inference.py -v -s -rA --junitxml=real-vision-inference-results.xml
+          python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("real-vision-inference-results.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+          skipped = sum(int(suite.attrib.get("skipped", "0")) for suite in suites)
+          if skipped:
+              print(f"::error::Real-inference staging gate requires zero skipped tests; found {skipped}.")
+              sys.exit(1)
+          print("Real-inference staging gate passed with zero skipped tests.")
+          PY
+
+      - name: Archive real-inference evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frs-real-vision-inference-evidence
+          path: |
+            backend/real-vision-inference-results.xml
+            backend/model-artifacts/insightface/models/buffalo_l/manifest.json
+          if-no-files-found: warn
+          retention-days: 30

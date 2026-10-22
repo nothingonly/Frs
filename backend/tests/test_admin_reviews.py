@@ -22,6 +22,7 @@ from app.db.entities import (
     CaptureBatchJob,
     EmbeddingRecord,
     Person,
+    Student,
 )
 
 
@@ -58,6 +59,63 @@ def client_and_sessions() -> Generator[tuple[TestClient, sessionmaker[Session]],
         yield client, testing_sessions
     engine.dispose()
 
+
+
+def test_manual_attendance_entry_is_open_session_scoped_and_idempotent(client_and_sessions) -> None:
+    client, sessions = client_and_sessions
+    department = client.post("/api/v1/admin/college/departments", json={
+        "code": "MAN", "name": "Manual Attendance Test",
+    }).json()
+    group = client.post("/api/v1/admin/college/class-groups", json={
+        "department_id": department["department_id"],
+        "year_of_study": 3,
+        "section": "A",
+        "academic_year": "2026-2027",
+    }).json()
+    student = client.post("/api/v1/admin/college/students", json={
+        "student_number": "MAN3001",
+        "full_name": "Manual Attendance Student",
+        "class_group_id": group["class_group_id"],
+    }).json()
+    session = client.post("/api/v1/admin/college/attendance-sessions", json={
+        "class_group_id": group["class_group_id"],
+        "subject_name": "Demo Session",
+    }).json()
+    payload = {
+        "student_id": student["student_id"],
+        "attendance_session_id": session["session_id"],
+        "punch_type": "CHECK_IN",
+        "reason_code": "ID_DOCUMENT_VERIFIED",
+        "justification": "Verified institutional ID at the desk.",
+    }
+
+    first = client.post("/api/v1/admin/attendance/manual-entry", json=payload)
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "success"
+    assert first.json().get("idempotent_replay") is not True
+
+    repeated = client.post("/api/v1/admin/attendance/manual-entry", json=payload)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["attendance_id"] == first.json()["attendance_id"]
+    assert repeated.json()["idempotent_replay"] is True
+
+    with sessions() as db:
+        matching = db.query(AttendanceEvent).filter_by(
+            attendance_session_id=session["session_id"],
+            employee_id="MAN3001",
+            punch_type="CHECK_IN",
+        ).all()
+        assert len(matching) == 1
+        assert matching[0].pipeline_version == "manual-administrative-entry"
+        assert matching[0].similarity_score == 0.0
+        assert matching[0].threshold == 1.0
+
+    closed = client.post(
+        f"/api/v1/admin/college/attendance-sessions/{session['session_id']}/close"
+    )
+    assert closed.status_code == 200
+    blocked = client.post("/api/v1/admin/attendance/manual-entry", json=payload)
+    assert blocked.status_code == 409
 
 def test_admin_stats_endpoint(client_and_sessions: tuple[TestClient, sessionmaker[Session]]) -> None:
     client, sessions = client_and_sessions
@@ -312,6 +370,12 @@ def test_manual_attendance_entry(client_and_sessions: tuple[TestClient, sessionm
         "class_group_id": group["class_group_id"],
         "subject_name": "Thermodynamics",
     }).json()
+    original_person_id = student["person_id"]
+    # Simulate an older inconsistent row: the Person exists but Student.person_id is NULL.
+    with sessions() as session:
+        legacy_student = session.get(Student, student["student_id"])
+        legacy_student.person_id = None
+        session.commit()
 
     # Manual entry request
     entry_resp = client.post("/api/v1/admin/attendance/manual-entry", json={
@@ -330,6 +394,8 @@ def test_manual_attendance_entry(client_and_sessions: tuple[TestClient, sessionm
         assert att.employee_id == "MECH001"
         assert att.punch_type == "CHECK_IN"
         assert att.pipeline_version == "manual-administrative-entry"
+        assert session.get(Student, student["student_id"]).person_id == original_person_id
+        assert session.query(Person).filter_by(employee_id="MECH001").count() == 1
 
 
 def test_attendance_csv_export(client_and_sessions: tuple[TestClient, sessionmaker[Session]]) -> None:

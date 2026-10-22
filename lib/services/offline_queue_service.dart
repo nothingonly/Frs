@@ -57,8 +57,8 @@ class OfflineBurstBatch {
   final PunchType punchType;
   final String idempotencyKey;
   final int frameCount;
-  final String encryptedBurstPayload;
-  final String payloadNonce;
+  String encryptedBurstPayload;
+  String payloadNonce;
   final DateTime capturedAtUtc;
   final DateTime expiresAtUtc;
   OfflineSyncStatus syncStatus;
@@ -152,13 +152,17 @@ class DrainResult {
   });
 }
 
-/// Service implementing the Hardware Keystore Encrypted Offline Burst Buffer.
-/// Storage-at-rest authenticated encryption is provided by Android Keystore EncryptedSharedPreferences (AES-256-GCM).
-/// Client payloads use binary framing with SHA-256 cryptographic integrity verification and tamper detection.
+/// Offline burst queue backed by flutter_secure_storage on Android.
+/// The platform secure-storage implementation protects each stored value at rest. The additional
+/// unkeyed SHA-256 checksum is a corruption check; it is not an authentication mechanism by itself.
 class OfflineQueueService {
   static const String _indexKey = 'frs_offline_queue_index';
   static const String _batchKeyPrefix = 'frs_offline_batch_';
   static const int maxBufferedBatches = 500;
+  // Keep client burst sizes within the backend's default frame and request limits.
+  static const int maxFramesPerBatch = 8;
+  static const int maxFrameBytes = 5 * 1024 * 1024;
+  static const int maxBurstBytes = 40 * 1024 * 1024;
   static const Duration payloadTtl = Duration(hours: 24);
 
   // Binary framing format constants
@@ -172,8 +176,9 @@ class OfflineQueueService {
   OfflineQueueService({IEncryptedQueueStorage? storage})
       : _storage = storage ?? SecureStorageAdapter();
 
-  /// Pack frames into binary framed bytes with SHA-256 cryptographic integrity checksum.
-  /// The packed payload is stored in Android Keystore AES-256-GCM encrypted storage.
+  /// Pack frames with a corruption-detection checksum before placing the whole record in
+  /// platform encrypted secure storage. This SHA-256 checksum is unkeyed and must not be
+  /// treated as a substitute for the secure-storage encryption/authentication boundary.
   static Map<String, String> _encryptFrames(List<Uint8List> frames) {
     // Structure: 2-byte magic ('FR'), 1-byte version (0x01), 1-byte reserved (0x00),
     // 2-byte count, then for each frame: 4-byte length + frame bytes, followed by 32-byte SHA-256 checksum.
@@ -221,58 +226,72 @@ class OfflineQueueService {
   /// Decrypt, verify SHA-256 integrity, and unpack frames from payload bytes and nonce.
   /// Returns empty list if payload is missing, altered, or corrupted (failing closed).
   static List<Uint8List> _decryptFrames(String encodedPayload, String encodedNonce) {
-    if (encodedPayload.isEmpty || encodedNonce.isEmpty) {
-      return <Uint8List>[];
-    }
-    final rawPayload = base64Decode(encodedPayload);
-    final nonce = base64Decode(encodedNonce);
+    try {
+      if (encodedPayload.isEmpty || encodedNonce.isEmpty) return <Uint8List>[];
+      // Bound base64 input before allocating the decoded buffer.
+      if (encodedPayload.length > 56 * 1024 * 1024) return <Uint8List>[];
 
-    const minLen = 6 + _checksumLen; // 6-byte header + 32-byte checksum
-    if (rawPayload.length < minLen) return <Uint8List>[];
+      final rawPayload = base64Decode(encodedPayload);
+      final nonce = base64Decode(encodedNonce);
+      if (nonce.length != 16) return <Uint8List>[];
 
-    // Split packed body and checksum
-    final packedLen = rawPayload.length - _checksumLen;
-    final packed = Uint8List.fromList(rawPayload.sublist(0, packedLen));
-    final expectedChecksum = rawPayload.sublist(packedLen);
-
-    // Verify SHA-256 integrity checksum over (nonce + packed)
-    final integrityInput = Uint8List(nonce.length + packed.length);
-    integrityInput.setRange(0, nonce.length, nonce);
-    integrityInput.setRange(nonce.length, integrityInput.length, packed);
-    final actualChecksum = sha256.convert(integrityInput).bytes;
-
-    var checksumValid = true;
-    for (var i = 0; i < _checksumLen; i++) {
-      if (expectedChecksum[i] != actualChecksum[i]) {
-        checksumValid = false;
-        break;
+      const headerLen = 6;
+      const maxPackedLen = maxBurstBytes + headerLen + (maxFramesPerBatch * 4);
+      if (rawPayload.length < headerLen + (3 * 4) + _checksumLen ||
+          rawPayload.length > maxPackedLen + _checksumLen) {
+        return <Uint8List>[];
       }
-    }
-    if (!checksumValid) {
-      // Cryptographic integrity check failed: payload was tampered with or corrupted
-      return <Uint8List>[];
-    }
 
-    final bdata = ByteData.sublistView(packed);
-    if (bdata.getUint8(0) != _magic0 || bdata.getUint8(1) != _magic1) {
-      return <Uint8List>[];
-    }
-    if (bdata.getUint8(2) != _formatVersion) {
-      return <Uint8List>[];
-    }
+      final packedLen = rawPayload.length - _checksumLen;
+      final packed = Uint8List.fromList(rawPayload.sublist(0, packedLen));
+      final expectedChecksum = rawPayload.sublist(packedLen);
+      final integrityInput = Uint8List(nonce.length + packed.length);
+      integrityInput.setRange(0, nonce.length, nonce);
+      integrityInput.setRange(nonce.length, integrityInput.length, packed);
+      final actualChecksum = sha256.convert(integrityInput).bytes;
 
-    final count = bdata.getUint16(4);
-    var offset = 6;
-    final frames = <Uint8List>[];
-    for (var i = 0; i < count; i++) {
-      if (offset + 4 > packed.length) return <Uint8List>[];
-      final len = bdata.getUint32(offset);
-      offset += 4;
-      if (offset + len > packed.length) return <Uint8List>[];
-      frames.add(Uint8List.fromList(packed.sublist(offset, offset + len)));
-      offset += len;
+      var checksumValid = true;
+      for (var i = 0; i < _checksumLen; i++) {
+        if (expectedChecksum[i] != actualChecksum[i]) {
+          checksumValid = false;
+          break;
+        }
+      }
+      if (!checksumValid) return <Uint8List>[];
+
+      final bdata = ByteData.sublistView(packed);
+      if (bdata.getUint8(0) != _magic0 ||
+          bdata.getUint8(1) != _magic1 ||
+          bdata.getUint8(2) != _formatVersion ||
+          bdata.getUint8(3) != 0) {
+        return <Uint8List>[];
+      }
+
+      final count = bdata.getUint16(4);
+      if (count < 3 || count > maxFramesPerBatch) return <Uint8List>[];
+
+      var offset = headerLen;
+      var totalFrameBytes = 0;
+      final frames = <Uint8List>[];
+      for (var i = 0; i < count; i++) {
+        if (offset + 4 > packed.length) return <Uint8List>[];
+        final len = bdata.getUint32(offset);
+        offset += 4;
+        if (len == 0 || len > maxFrameBytes || offset + len > packed.length) {
+          return <Uint8List>[];
+        }
+        totalFrameBytes += len;
+        if (totalFrameBytes > maxBurstBytes) return <Uint8List>[];
+        frames.add(Uint8List.fromList(packed.sublist(offset, offset + len)));
+        offset += len;
+      }
+      if (offset != packed.length) return <Uint8List>[];
+      return frames;
+    } catch (_) {
+      // Malformed base64, short headers and invalid lengths are corrupt queue data, not fatal
+      // application errors. The caller records a failed batch and refuses to upload it.
+      return <Uint8List>[];
     }
-    return frames;
   }
 
   /// Read the list of all queued batch IDs.
@@ -303,8 +322,18 @@ class OfflineQueueService {
     String? clientDeviceId,
     String? deviceActorId,
   }) async {
-    if (frames.length < 3 || frames.length > 16) {
-      throw ArgumentError('Capture burst must contain between 3 and 16 frames.');
+    if (frames.length < 3 || frames.length > maxFramesPerBatch) {
+      throw ArgumentError('Capture burst must contain between 3 and $maxFramesPerBatch frames.');
+    }
+    var totalFrameBytes = 0;
+    for (final frame in frames) {
+      if (frame.isEmpty || frame.length > maxFrameBytes) {
+        throw ArgumentError('Each frame must be non-empty and no larger than $maxFrameBytes bytes.');
+      }
+      totalFrameBytes += frame.length;
+      if (totalFrameBytes > maxBurstBytes) {
+        throw ArgumentError('Capture burst exceeds the $maxBurstBytes-byte request limit.');
+      }
     }
 
     final index = await _readIndex();
@@ -319,7 +348,7 @@ class OfflineQueueService {
 
     final now = DateTime.now().toUtc();
     final expires = now.add(payloadTtl);
-    final batchId = 'batch_${now.millisecondsSinceEpoch}_${Random().nextInt(10000)}';
+    final batchId = 'batch_${now.millisecondsSinceEpoch}_${Random.secure().nextInt(1 << 32)}';
 
     final enc = _encryptFrames(frames);
 
@@ -341,13 +370,26 @@ class OfflineQueueService {
       createdAtUtc: now,
     );
 
-    await _storage.write(
-      key: '$_batchKeyPrefix$batchId',
-      value: jsonEncode(batch.toJson()),
-    );
-
+    // Commit the queue index first. If the app stops before the batch write, the next
+    // drain/purge pass can remove the dangling index entry; the reverse order could leave an
+    // unindexed encrypted batch that cannot be expired or synchronized.
+    final originalIndex = List<String>.from(index);
     index.add(batchId);
     await _saveIndex(index);
+    try {
+      await _storage.write(
+        key: '$_batchKeyPrefix$batchId',
+        value: jsonEncode(batch.toJson()),
+      );
+    } catch (_) {
+      try {
+        await _saveIndex(originalIndex);
+      } catch (_) {
+        // Keep the original storage error as the primary failure; a later drain repairs
+        // a dangling index entry whose batch record was never committed.
+      }
+      rethrow;
+    }
 
     return batch;
   }
@@ -368,11 +410,19 @@ class OfflineQueueService {
   Future<List<OfflineBurstBatch>> getPendingBatches() async {
     final index = await _readIndex();
     final list = <OfflineBurstBatch>[];
+    final repairedIndex = <String>[];
     for (final bid in index) {
       final b = await getBatch(bid);
-      if (b != null && b.syncStatus == OfflineSyncStatus.pending) {
+      if (b == null) continue;
+      repairedIndex.add(bid);
+      if (b.syncStatus == OfflineSyncStatus.pending ||
+          b.syncStatus == OfflineSyncStatus.syncing ||
+          b.syncStatus == OfflineSyncStatus.failed) {
         list.add(b);
       }
+    }
+    if (repairedIndex.length != index.length) {
+      await _saveIndex(repairedIndex);
     }
     return list;
   }
@@ -432,7 +482,11 @@ class OfflineQueueService {
 
     for (final bid in List<String>.from(index)) {
       final batch = await getBatch(bid);
-      if (batch == null) continue;
+      if (batch == null) {
+        index.remove(bid);
+        await _saveIndex(index);
+        continue;
+      }
 
       // Check expiry
       if (batch.isExpired) {
@@ -445,7 +499,17 @@ class OfflineQueueService {
       }
 
       if (batch.syncStatus != OfflineSyncStatus.pending &&
-          batch.syncStatus != OfflineSyncStatus.failed) {
+          batch.syncStatus != OfflineSyncStatus.failed &&
+          batch.syncStatus != OfflineSyncStatus.syncing) {
+        continue;
+      }
+
+      // A process can die after persisting SYNCING. Retry it on the next drain; the server-side
+      // idempotency key makes replay after an uncertain response safe.
+      if (batch.encryptedBurstPayload.isEmpty || batch.payloadNonce.isEmpty) {
+        batch.syncStatus = OfflineSyncStatus.failed;
+        batch.lastSyncError ??= 'Stored payload is corrupt or unavailable.';
+        failed++;
         continue;
       }
 
@@ -458,6 +522,9 @@ class OfflineQueueService {
       if (frames.isEmpty) {
         batch.syncStatus = OfflineSyncStatus.failed;
         batch.lastSyncError = 'Stored payload is corrupt or empty.';
+        // Wipe unusable biometric bytes but preserve non-sensitive failure metadata.
+        batch.encryptedBurstPayload = '';
+        batch.payloadNonce = '';
         await _storage.write(key: '$_batchKeyPrefix$bid', value: jsonEncode(batch.toJson()));
         failed++;
         continue;

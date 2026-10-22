@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
@@ -13,6 +13,7 @@ from app.db.migrator import (
     get_applied_migrations,
     get_migration_files,
     init_migration_table,
+    MigrationIntegrityError,
     verify_all_migrations,
 )
 
@@ -169,5 +170,74 @@ def test_assert_production_schema_halts_on_pending_migrations(monkeypatch) -> No
     # Mock verify_all_migrations to simulate pending migration
     monkeypatch.setattr("app.db.migrator.verify_all_migrations", lambda eng: (False, ["0005_future_migration"]))
 
-    with pytest.raises(RuntimeError, match="Production startup halted: Database schema is out of date"):
+    with pytest.raises(RuntimeError, match="Production startup halted: database migration state is not ready"):
         assert_production_schema_ready(engine)
+
+
+def test_verification_is_read_only_when_migration_registry_is_missing(tmp_path: Path) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        migration = tmp_path / "0001_initial.sql"
+        migration.write_text("CREATE TABLE example (id INTEGER PRIMARY KEY);", encoding="utf-8")
+
+        ready, issues = verify_all_migrations(engine, directory=tmp_path)
+
+        assert not ready
+        assert issues == ["0001_initial"]
+        assert not inspect(engine).has_table("schema_migrations")
+    finally:
+        engine.dispose()
+
+
+def test_migration_checksum_drift_blocks_verification_and_apply(tmp_path: Path) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        migration = tmp_path / "0001_checksum_probe.sql"
+        migration.write_text("CREATE TABLE checksum_probe (id INTEGER PRIMARY KEY);", encoding="utf-8")
+        apply_all_migrations(engine, directory=tmp_path)
+
+        migration.write_text(
+            "CREATE TABLE checksum_probe (id INTEGER PRIMARY KEY, name TEXT);",
+            encoding="utf-8",
+        )
+        ready, issues = verify_all_migrations(engine, directory=tmp_path)
+
+        assert not ready
+        assert any("0001_checksum_probe (checksum mismatch)" == issue for issue in issues)
+        with pytest.raises(MigrationIntegrityError, match="Migration checksum mismatch"):
+            apply_all_migrations(engine, directory=tmp_path)
+    finally:
+        engine.dispose()
+
+
+def test_production_create_schema_only_verifies_and_never_creates_tables(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import database
+
+    engine = create_engine("sqlite://")
+    production_settings = Settings(_env_file=None, env="production")
+    readiness_calls: list[object] = []
+
+    monkeypatch.setattr(database, "settings", production_settings)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(
+        "app.db.migrator.assert_production_schema_ready",
+        lambda target_engine: readiness_calls.append(target_engine),
+    )
+    monkeypatch.setattr(
+        database.Base.metadata,
+        "create_all",
+        lambda **kwargs: pytest.fail("Production process startup must not call Base.metadata.create_all()."),
+    )
+    try:
+        database.create_schema()
+        assert readiness_calls == [engine]
+    finally:
+        engine.dispose()

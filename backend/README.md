@@ -60,6 +60,8 @@ For development that does not require loading a real model pack, unit tests exer
 ## Configuration notes
 
 - Device API keys authenticate kiosk attendance endpoints. The administrator key is separate and must not be distributed to kiosks.
+- Production JWT signing requires an explicit `FRS_JWT_SECRET` of at least 32 characters, distinct from every admin and device API key.
+- `FRS_DELETION_CERTIFICATE_KEY` is URL-safe base64 encoding of a randomly generated 32-byte Ed25519 private-key seed. The generator creates it independently; keep the seed private and pin the corresponding public key out of band for certificate verification.
 - Embedding encryption requires a URL-safe base64 key decoding to exactly 32 bytes.
 - Model registry records include artifact provenance, checksum, preprocessing and input/output contracts.
 - Model-specific similarity thresholds must be calibrated from site-representative validation data.

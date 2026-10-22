@@ -112,14 +112,16 @@ class VisionEngine:
                 "training_dataset": str(training_dataset).strip() or "unresolved",
             }
 
-        if settings.env.lower() == "production" and not settings.model_license_attested:
+        if settings.env.lower() == "production":
             for role, prov in self.primary_model_provenance.items():
                 perm = prov.get("permitted_use", "").lower()
                 lic = prov.get("license_name", "").lower()
                 if "research" in perm or "academic" in perm or "non-commercial" in lic:
                     raise VisionError(
-                        f"Production startup blocked: {role} weights have non-commercial terms ({prov.get('license_name')}). "
-                        "Commercial license clearance or permissible weights must be attested via FRS_MODEL_LICENSE_ATTESTED."
+                        f"Production startup blocked: {role} weights have restrictive terms "
+                        f"({prov.get('license_name')}; permitted_use={prov.get('permitted_use')}). "
+                        "Replace these weights with artifacts whose documented license permits the "
+                        "intended production use. FRS_MODEL_LICENSE_ATTESTED cannot override this check."
                     )
 
         try:

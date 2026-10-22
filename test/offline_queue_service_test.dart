@@ -32,7 +32,7 @@ void main() {
   });
 
   group('OfflineQueueService', () {
-    test('enforces frame count validation (between 3 and 16 frames)', () async {
+    test('enforces backend-compatible frame count validation (between 3 and 8 frames)', () async {
       final oneFrame = [Uint8List.fromList([1, 2, 3])];
       expect(
         () => queueService.enqueueBatch(
@@ -41,6 +41,19 @@ void main() {
           punchType: PunchType.checkIn,
           frames: oneFrame,
           idempotencyKey: 'idemp-123456789012',
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+      final nineFrames = List<Uint8List>.generate(
+        9, (index) => Uint8List.fromList([index + 1, index + 2, index + 3]),
+      );
+      await expectLater(
+        queueService.enqueueBatch(
+          sessionId: 'sess-too-many',
+          classGroupId: 'cg-1',
+          punchType: PunchType.checkIn,
+          frames: nineFrames,
+          idempotencyKey: 'idemp-too-many-123456',
         ),
         throwsA(isA<ArgumentError>()),
       );
@@ -136,7 +149,7 @@ void main() {
       expect(await queueService.getPendingCount(), equals(0));
     });
 
-    test('drainQueue synchronizes batches when backend is healthy and wipes local payload', () async {
+    test('drainQueue recovers a batch left syncing by a crash and wipes local payload', () async {
       final frames = [
         Uint8List.fromList([1, 2, 3]),
         Uint8List.fromList([4, 5, 6]),
@@ -152,6 +165,16 @@ void main() {
       );
 
       expect(await queueService.getPendingCount(), equals(1));
+
+      // Simulate process death after the persisted status changed to SYNCING but before
+      // the HTTP request completed. A future drain must replay the request idempotently.
+      final storedRaw = await fakeStorage.read(key: 'frs_offline_batch_${batch.batchId}');
+      final stuckMap = jsonDecode(storedRaw!) as Map<String, dynamic>;
+      stuckMap['sync_status'] = 'syncing';
+      await fakeStorage.write(
+        key: 'frs_offline_batch_${batch.batchId}',
+        value: jsonEncode(stuckMap),
+      );
 
       // Mock API service using custom http client
       var enqueuedSession = '';

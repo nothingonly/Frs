@@ -145,7 +145,8 @@ def test_de_enroll_student_biometrics() -> None:
     session.commit()
 
     result = de_enroll_student_biometrics(session, "s-1", operator_id="admin-user-99")
-    assert result["status"] == "DE_ENROLLED"
+    assert result["status"] == "DELETION_INCOMPLETE"
+    assert result["signed_certificate"]["qualification"] == "STORAGE_SERVICE_REQUIRED_FOR_VERIFIED_DELETION"
     assert result["deleted_embeddings_count"] == 2
     assert len(result["deletion_certificate"]) == 64
 
@@ -211,7 +212,7 @@ def test_absentee_alert_service() -> None:
         session_id="sess-200",
         class_group_id="cg-1",
         subject_name="Physics",
-        status="OPEN",
+        status="CLOSED",
         starts_at=datetime.now(timezone.utc),
         created_by="prof-1",
     )

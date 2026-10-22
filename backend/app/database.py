@@ -90,8 +90,31 @@ def _upgrade_capture_batch_dead_letter_constraint(target_engine) -> None:
 
 
 def create_schema() -> None:
-    # Import models before create_all so every mapped entity is registered.
+    """Prepare a local SQLite schema, but never mutate a deployed database at process startup.
+
+    PostgreSQL migrations are a separate, serialized deployment step. API and worker
+    processes only verify the already-migrated schema; they never call create_all(), alter
+    tables, apply migrations, or repair constraints at startup.
+    """
+    # Import models so schema/table readiness checks see the complete mapped entity set.
     from app.db import entities  # noqa: F401
+    from app.db.migrator import assert_production_schema_ready, verify_all_migrations
+
+    if settings.is_production:
+        assert_production_schema_ready(engine)
+        return
+
+    if engine.dialect.name != "sqlite":
+        ready, problems = verify_all_migrations(engine)
+        if not ready:
+            raise RuntimeError(
+                "Database schema is not ready. Run 'python -m app.db.migrator --apply' "
+                f"as a controlled deployment step before starting services. Issues: {problems}"
+            )
+        return
+
+    # SQLite schema creation is restricted to local/test environments. Production startup
+    # rejects SQLite above, and deployed PostgreSQL schemas are migration-managed only.
     from app.db.migrator import apply_all_migrations
 
     Base.metadata.create_all(bind=engine)
@@ -101,9 +124,4 @@ def create_schema() -> None:
     try:
         apply_all_migrations(engine)
     except Exception as exc:
-        if engine.dialect.name == "sqlite" and not settings.is_production:
-            # SQLite in non-production unit tests uses metadata create_all
-            logger.debug("SQLite dev/test migration bypass: %s", exc)
-        else:
-            logger.error("Production database migration failed: %s", exc)
-            raise
+        logger.debug("SQLite dev/test migration compatibility: %s", exc)

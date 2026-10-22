@@ -1,14 +1,46 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
+import tarfile
+import zipfile
 
 import pytest
 
 from app.core.config import Settings
 from app.vision.engine import VisionEngine
 from app.vision.onnx_models import OnnxTensorModel
+from scripts.provision_models import extract_and_verify
+
+
+def test_model_provisioner_rejects_tar_path_traversal(tmp_path: Path) -> None:
+    archive_path = tmp_path / "malicious.tar.gz"
+    target_dir = tmp_path / "models"
+    outside_path = tmp_path / "escaped.txt"
+    payload = b"must not escape target"
+
+    with tarfile.open(archive_path, "w:gz") as archive:
+        member = tarfile.TarInfo("../escaped.txt")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    assert extract_and_verify(archive_path, target_dir) is False
+    assert not outside_path.exists()
+
+
+def test_model_provisioner_rejects_zip_path_traversal(tmp_path: Path) -> None:
+    archive_path = tmp_path / "malicious.zip"
+    target_dir = tmp_path / "models"
+    outside_path = tmp_path / "escaped.txt"
+
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("../escaped.txt", "must not escape target")
+
+    assert extract_and_verify(archive_path, target_dir) is False
+    assert not outside_path.exists()
+
 
 
 def test_vision_engine_fails_when_weights_are_missing(tmp_path: Path) -> None:
@@ -227,7 +259,7 @@ def test_vision_engine_rejects_placeholder_publisher(tmp_path: Path) -> None:
         VisionEngine(settings)
 
 
-def test_vision_engine_rejects_noncommercial_weights_in_production_without_attestation(tmp_path: Path) -> None:
+def test_vision_engine_rejects_restrictive_weights_even_with_attestation(tmp_path: Path) -> None:
     pack_dir = tmp_path / "models" / "buffalo_l"
     pack_dir.mkdir(parents=True)
     scrfd_bytes = b"dummy-scrfd-weights"
@@ -261,9 +293,9 @@ def test_vision_engine_rejects_noncommercial_weights_in_production_without_attes
     settings = Settings(
         _env_file=None,
         env="production",
-        model_license_attested=False,
+        model_license_attested=True,
         model_root=str(tmp_path),
         model_pack="buffalo_l",
     )
-    with pytest.raises(VisionError, match="Production startup blocked:.*weights have non-commercial terms"):
+    with pytest.raises(VisionError, match="Production startup blocked:.*restrictive terms.*cannot override this check"):
         VisionEngine(settings)

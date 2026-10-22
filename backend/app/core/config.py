@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
+from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,13 +18,17 @@ class Settings(BaseSettings):
     )
 
     env: str = "development"
-    database_url: str = "sqlite:///./frs.db"
+    database_url: str = Field(default="sqlite:///./frs.db", validation_alias=AliasChoices("FRS_DATABASE_URL", "DATABASE_URL", "database_url"))
     device_api_keys: str = ""
     admin_api_key: str = ""
     data_encryption_key: str = ""
     jwt_secret: str = ""
     jwt_issuer: str = "frs-auth"
     jwt_expiry_minutes: int = 60
+    # Scope kiosk credentials to an explicit allowlist of class-group IDs. Keys are full
+    # SHA-256 hex digests of device tokens, never raw device secrets.
+    device_class_group_scopes_json: str = "{}"
+    deletion_certificate_key: str = ""
     worker_in_process: bool = Field(default=True, validation_alias=AliasChoices("FRS_WORKER_IN_PROCESS", "WORKER_IN_PROCESS"))
     max_capture_batch_retries: int = Field(default=3, ge=1, le=10)
     retention_purge_days: int = Field(default=30, ge=1, le=365)
@@ -60,11 +66,14 @@ class Settings(BaseSettings):
     lti_deployment_id: str = Field(default="", validation_alias=AliasChoices("FRS_LTI_DEPLOYMENT_ID", "LTI_DEPLOYMENT_ID"))
     lti_issuer: str = Field(default="https://canvas.instructure.com", validation_alias=AliasChoices("FRS_LTI_ISSUER", "LTI_ISSUER"))
     lti_keyset_url: str = Field(default="", validation_alias=AliasChoices("FRS_LTI_KEYSET_URL", "LTI_KEYSET_URL"))
+    # PEM-encoded LMS platform public key used for RS256 ID-token verification.
+    lti_platform_public_key_pem: str = Field(default="", validation_alias=AliasChoices("FRS_LTI_PLATFORM_PUBLIC_KEY_PEM", "LTI_PLATFORM_PUBLIC_KEY_PEM"))
 
     model_pack: str = "buffalo_l"
     model_root: str = "~/.insightface"
     detect_size: int = Field(default=640, ge=320, le=1280)
     model_provider: str = "CPUExecutionProvider"
+    # Deprecated for compatibility. This boolean never overrides actual manifest terms.
     model_license_attested: bool = False
     require_all_specialists: bool = False
     retinaface_onnx_path: str = ""
@@ -97,6 +106,21 @@ class Settings(BaseSettings):
     max_request_bytes: int = Field(default=40 * 1024 * 1024, ge=1024)
     allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    @field_validator("database_url")
+    @classmethod
+    def normalize_database_driver(cls, value: str) -> str:
+        """Use the installed psycopg v3 driver for standard PostgreSQL URL schemes.
+
+        Render commonly supplies postgres:// or postgresql:// URLs; SQLAlchemy's
+        plain postgresql:// default selects psycopg2, which is not installed here.
+        Normalize those aliases (and legacy +psycopg2 URLs) to the project's driver.
+        """
+        url = value.strip()
+        for prefix in ("postgres://", "postgresql://", "postgresql+psycopg2://"):
+            if url.lower().startswith(prefix):
+                return "postgresql+psycopg://" + url[len(prefix):]
+        return url
+
     @field_validator("model_provider")
     @classmethod
     def validate_provider(cls, value: str) -> str:
@@ -121,29 +145,118 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid similarity threshold for {model_name}")
         return value
 
+    @field_validator("device_class_group_scopes_json")
+    @classmethod
+    def validate_device_class_group_scopes(cls, value: str) -> str:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("FRS_DEVICE_CLASS_GROUP_SCOPES_JSON must be a JSON object") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("FRS_DEVICE_CLASS_GROUP_SCOPES_JSON must be a JSON object")
+        for digest, groups in parsed.items():
+            if not isinstance(digest, str) or len(digest) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in digest):
+                raise ValueError("Device scope keys must be full 64-character SHA-256 hex digests")
+            if not isinstance(groups, list) or any(not isinstance(group, str) or not group.strip() for group in groups):
+                raise ValueError("Each device scope must be a list of non-empty class-group IDs")
+        return value
+
     def validate_startup_security(self) -> None:
         if self.minimum_identification_frames > self.maximum_identification_frames:
             raise ValueError("Minimum identification frames cannot exceed maximum frames")
-        if self.env.lower() == "production":
+        # Render sets RENDER=true for deployed services. Diagnose a stale Compose URL
+        # first, then require an explicit staging/demo or production environment.
+        on_render = os.getenv("RENDER", "").strip().lower() == "true"
+        current_env = self.env.strip().lower()
+        if on_render:
+            render_db_url = self.database_url.strip()
+            render_host = urlsplit(render_db_url).hostname
+            if render_host and render_host.lower() == "db":
+                raise ValueError(
+                    "Render startup refused: FRS_DATABASE_URL points to the Docker Compose-only "
+                    "hostname 'db'. Replace it with the Render PostgreSQL Internal Database URL "
+                    "(when services share a region/workspace) or another URL reachable from this service."
+                )
+            if current_env not in {"staging", "production"}:
+                raise ValueError(
+                    "Render deployment refused: set FRS_ENV=staging for a demo/test deployment "
+                    "or FRS_ENV=production for a production deployment."
+                )
+            if render_db_url.lower().startswith("sqlite") or not (
+                render_db_url.lower().startswith("postgresql")
+                or render_db_url.lower().startswith("postgres")
+            ):
+                raise ValueError(
+                    "Render deployment refused: SQLite is not suitable for a hosted service. "
+                    "Configure FRS_DATABASE_URL or DATABASE_URL with a reachable PostgreSQL URL."
+                )
+        if current_env == "staging":
+            db_url = self.database_url.lower().strip()
+            if db_url.startswith("sqlite") or not (
+                db_url.startswith("postgresql") or db_url.startswith("postgres")
+            ):
+                raise ValueError(
+                    "Staging requires PostgreSQL; SQLite is reserved for local development/tests."
+                )
+            if not self.device_keys or any(len(token) < 32 for token in self.device_keys):
+                raise ValueError("Staging requires device API keys of at least 32 characters")
+            if len(self.admin_api_key) < 32:
+                raise ValueError("Staging requires an admin API key of at least 32 characters")
+            jwt_secret = self.jwt_secret.strip()
+            if len(jwt_secret) < 32:
+                raise ValueError("Staging requires an explicit FRS_JWT_SECRET of at least 32 characters")
+            if jwt_secret == self.admin_api_key.strip() or jwt_secret in self.device_keys:
+                raise ValueError("Staging requires FRS_JWT_SECRET to be distinct from admin and device API keys")
+            self.encryption_key_bytes()
+            try:
+                import base64
+                import binascii
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+                deletion_seed = base64.b64decode(
+                    self.deletion_certificate_key.strip().encode("ascii"),
+                    altchars=b"-_",
+                    validate=True,
+                )
+            except (UnicodeError, ValueError, binascii.Error) as exc:
+                raise ValueError(
+                    "Staging requires FRS_DELETION_CERTIFICATE_KEY to be URL-safe base64 for a 32-byte Ed25519 private-key seed"
+                ) from exc
+            if len(deletion_seed) != 32:
+                raise ValueError(
+                    "Staging FRS_DELETION_CERTIFICATE_KEY must decode to exactly 32 bytes for Ed25519"
+                )
+            Ed25519PrivateKey.from_private_bytes(deletion_seed)
+            if self.lti_client_id and not self.lti_platform_public_key_pem.strip():
+                raise ValueError("Staging LTI is enabled but FRS_LTI_PLATFORM_PUBLIC_KEY_PEM is missing")
+            if self.lti_client_id and (not self.lti_issuer.strip() or not self.lti_deployment_id.strip()):
+                raise ValueError("Staging LTI requires configured issuer and deployment ID")
+        if current_env == "production":
             db_url = self.database_url.lower().strip()
             if db_url.startswith("sqlite") or not (
                 db_url.startswith("postgresql") or db_url.startswith("postgres")
             ):
                 raise ValueError(
                     "Production startup refused: SQLite is not permitted in production. "
-                    "Configure a production PostgreSQL database URL (postgresql+psycopg2:// or postgresql://)."
+                    "Configure FRS_DATABASE_URL with a production PostgreSQL URL (postgresql+psycopg:// or postgresql://)."
                 )
             if not self.device_keys or any(len(token) < 32 for token in self.device_keys):
                 raise ValueError("Production requires device API keys of at least 32 characters")
             if len(self.admin_api_key) < 32:
                 raise ValueError("Production requires a separate admin API key of at least 32 characters")
-            if self.jwt_secret and len(self.jwt_secret) < 32:
-                raise ValueError("Production requires FRS_JWT_SECRET of at least 32 characters when configured")
+            jwt_secret = self.jwt_secret.strip()
+            if len(jwt_secret) < 32:
+                raise ValueError("Production requires an explicit FRS_JWT_SECRET of at least 32 characters")
+            if jwt_secret == self.admin_api_key.strip() or jwt_secret in self.device_keys:
+                raise ValueError("Production requires FRS_JWT_SECRET to be distinct from admin and device API keys")
             self.encryption_key_bytes()
             if not self.threshold_calibrated or "ArcFace" not in self.calibrated_models:
                 raise ValueError("Production startup refused: ArcFace threshold must be calibrated on project data")
-            if not self.model_license_attested:
-                raise ValueError("Production requires explicit verification of every model-weight license")
+            # Fail during startup rather than letting /health raise a 500 for a missing threshold.
+            self.threshold_for("ArcFace")
+            # FRS_MODEL_LICENSE_ATTESTED is informational only. Actual artifact
+            # license terms are always enforced by VisionEngine from the signed/hashed
+            # provenance manifest and cannot be overridden by a boolean setting.
             if self.require_liveness and not self.minifasnet_onnx_path:
                 raise ValueError("Production requires FRS_MINIFASNET_ONNX_PATH when liveness is mandatory")
             if self.require_all_specialists:
@@ -163,6 +276,30 @@ class Settings(BaseSettings):
                     self.threshold_for(model_id)
             if self.sftp_host and self.sftp_host != "mock" and not (self.sftp_host_key_fingerprint or self.sftp_known_hosts_file):
                 raise ValueError("Production startup refused: SFTP export requires sftp_host_key_fingerprint or sftp_known_hosts_file to pin server identity")
+            try:
+                import base64
+                import binascii
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+                deletion_seed = base64.b64decode(
+                    self.deletion_certificate_key.strip().encode("ascii"),
+                    altchars=b"-_",
+                    validate=True,
+                )
+            except (UnicodeError, ValueError, binascii.Error) as exc:
+                raise ValueError(
+                    "Production requires FRS_DELETION_CERTIFICATE_KEY to be URL-safe base64 for a 32-byte Ed25519 private-key seed"
+                ) from exc
+            if len(deletion_seed) != 32:
+                raise ValueError(
+                    "FRS_DELETION_CERTIFICATE_KEY must decode to exactly 32 bytes for Ed25519"
+                )
+            # Construction validates that the seed is accepted by the configured crypto library.
+            Ed25519PrivateKey.from_private_bytes(deletion_seed)
+            if self.lti_client_id and not self.lti_platform_public_key_pem.strip():
+                raise ValueError("Production LTI is enabled but FRS_LTI_PLATFORM_PUBLIC_KEY_PEM is missing")
+            if self.lti_client_id and (not self.lti_issuer.strip() or not self.lti_deployment_id.strip()):
+                raise ValueError("Production LTI requires configured issuer and deployment ID")
 
     @property
     def is_production(self) -> bool:
@@ -171,6 +308,14 @@ class Settings(BaseSettings):
     @property
     def device_keys(self) -> tuple[str, ...]:
         return tuple(token.strip() for token in self.device_api_keys.split(",") if token.strip())
+
+    @property
+    def device_class_group_scopes(self) -> dict[str, tuple[str, ...]]:
+        parsed = json.loads(self.device_class_group_scopes_json)
+        return {
+            digest.lower(): tuple(dict.fromkeys(group.strip() for group in groups))
+            for digest, groups in parsed.items()
+        }
 
     @property
     def calibrated_models(self) -> tuple[str, ...]:
@@ -185,7 +330,11 @@ class Settings(BaseSettings):
         return self.jwt_secret or self.admin_api_key or "frs-dev-jwt-secret-do-not-use-in-production"
 
     def is_model_calibrated(self, model_id: str) -> bool:
-        return self.threshold_calibrated and model_id == "ArcFace" or model_id in self.calibrated_models
+        # ArcFace has a legacy explicit calibration gate in addition to the model list.
+        # Parenthesize the conditions so listing ArcFace alone cannot override its gate.
+        if model_id == "ArcFace":
+            return self.threshold_calibrated and model_id in self.calibrated_models
+        return model_id in self.calibrated_models
 
     def threshold_for(self, model_id: str) -> float:
         parsed = json.loads(self.model_thresholds_json)

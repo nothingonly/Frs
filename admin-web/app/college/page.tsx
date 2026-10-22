@@ -429,7 +429,7 @@ export default function CollegeSetupPage() {
             {departments.length === 0 ? (
               <div className="empty-state">
                 <strong>No departments configured</strong>
-                <span>Click "Seed 7 Engineering Departments" above or create your first department.</span>
+                <span>Click &quot;Seed 7 Engineering Departments&quot; above or create your first department.</span>
               </div>
             ) : (
               <div className="department-list">

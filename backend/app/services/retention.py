@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -99,13 +98,13 @@ def de_enroll_student_biometrics(
     storage_service: Any | None = None,
     signing_key: str | None = None,
 ) -> dict[str, Any]:
-    """Execute complete student biometric de-enrollment with cryptographic deletion verification.
-    
-    1. Removes all biometric embedding records.
-    2. Deactivates the Person identity record.
-    3. Purges associated cloud-stored face crops (if storage_service is provided).
-    4. Writes an immutable audit log entry.
-    5. Returns an HMAC-SHA256 authenticated digital deletion certificate.
+    """De-enroll biometric records and issue an Ed25519-signed evidence record.
+
+    The signature protects canonical payload integrity and can be checked with the public
+    key. Verifiers must pin the public key against an institutional trust record; the public
+    key embedded in a certificate is not, by itself, a trust anchor. A valid signature does
+    not prove remote media erasure: deletion is complete only when the storage provider
+    confirms deletion of every requested object.
     """
     student = db.get(Student, student_id)
     if student is None:
@@ -154,7 +153,7 @@ def de_enroll_student_biometrics(
         if all_confirmed:
             media_purged = True
             status_state = "DE_ENROLLED"
-            qualification = "FULL_DELETION_VERIFIED"
+            qualification = "MEDIA_PROVIDER_DELETION_CONFIRMED"
         else:
             media_purged = False
             status_state = "DELETION_INCOMPLETE"
@@ -162,16 +161,71 @@ def de_enroll_student_biometrics(
     else:
         for mid in target_ids:
             media_outcomes[mid] = "NO_STORAGE_SERVICE_PROVIDED"
-        status_state = "DE_ENROLLED"
-        qualification = "DATABASE_ONLY_UNVERIFIED_MEDIA"
+        status_state = "DELETION_INCOMPLETE"
+        qualification = "STORAGE_SERVICE_REQUIRED_FOR_VERIFIED_DELETION"
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    raw_cert_string = f"{student_id}:{student.person_id}:{now_iso}:{deleted_embeddings_count}:{operator_id}:{qualification}"
-    cert_hash = hashlib.sha256(raw_cert_string.encode("utf-8")).hexdigest()
+    certificate_payload = {
+        "student_id": student_id,
+        "person_id": student.person_id,
+        "deleted_embeddings_count": deleted_embeddings_count,
+        "operator_id": operator_id,
+        "qualification": qualification,
+        "issued_at": now_iso,
+        "media_purged": media_purged,
+        "media_deletion_details": media_outcomes,
+    }
+    canonical_payload = json.dumps(
+        certificate_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    cert_hash = hashlib.sha256(canonical_payload).hexdigest()
 
-    secret = signing_key or get_settings().effective_jwt_secret
+    settings = get_settings()
+    # Production signatures must always come from the private key provisioned at startup.
+    # Internal callers cannot override the institutional signing identity.
+    secret = settings.deletion_certificate_key if settings.is_production else (
+        signing_key or settings.deletion_certificate_key
+    )
+    if not secret and not settings.is_production:
+        # Stable development-only seed; never accepted as a production private key.
+        secret = "frs-development-only-deletion-certificate-key-not-for-production"
+    if not secret:
+        raise RuntimeError("A dedicated biometric deletion-certificate signing key must be configured.")
+
+    import base64
+    import binascii
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
     secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
-    cert_signature = hmac.new(secret_bytes, raw_cert_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if settings.is_production:
+        try:
+            deletion_seed = base64.b64decode(secret_bytes, altchars=b"-_", validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise RuntimeError(
+                "Production deletion-certificate key must be URL-safe base64 for a 32-byte Ed25519 seed."
+            ) from exc
+        if len(deletion_seed) != 32:
+            raise RuntimeError("Production deletion-certificate Ed25519 seed must decode to exactly 32 bytes.")
+        private_key = Ed25519PrivateKey.from_private_bytes(deletion_seed)
+    else:
+        # Deterministic development keys preserve repeatable local tests while using the
+        # same public-key signature format as production. This seed is never production-safe.
+        private_key = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(secret_bytes).digest())
+
+    public_key_pem = private_key.public_key().public_bytes(
+        Encoding.PEM,
+        PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+    public_key_sha256 = hashlib.sha256(public_key_pem.encode("ascii")).hexdigest()
+    cert_signature = private_key.sign(canonical_payload).hex()
+    certificate_assurance = (
+        "ED25519_SIGNATURE_OVER_CANONICAL_PAYLOAD; VERIFY_WITH_AN_INSTITUTION-TRUSTED_PUBLIC_KEY; "
+        "SIGNATURE_DOES_NOT_INDEPENDENTLY_PROVE_REMOTE_MEDIA_ERASURE"
+    )
 
     audit_entry = AuditEvent(
         audit_id=f"audit-{cert_hash[:16]}",
@@ -188,6 +242,11 @@ def de_enroll_student_biometrics(
             "deleted_embeddings": deleted_embeddings_count,
             "deletion_certificate": cert_hash,
             "signature": cert_signature,
+            "signature_algorithm": "Ed25519",
+            "signature_public_key_sha256": public_key_sha256,
+            "certificate_assurance": certificate_assurance,
+            "signature_public_key_pem": public_key_pem,
+            "certificate_payload": certificate_payload,
             "media_purged": media_purged,
             "qualification": qualification,
             "media_deletion_details": media_outcomes,
@@ -208,12 +267,18 @@ def de_enroll_student_biometrics(
         "person_id": student.person_id,
         "deleted_embeddings_count": deleted_embeddings_count,
         "deletion_certificate": cert_hash,
+        # Compatibility alias retained; callers should use deletion_authentication_tag.
         "deletion_signature": cert_signature,
+        "deletion_authentication_tag": cert_signature,
         "signed_certificate": {
             "certificate_id": f"cert-{cert_hash[:16]}",
             "digest": cert_hash,
+            "payload": certificate_payload,
             "signature": cert_signature,
-            "algorithm": "HMAC-SHA256",
+            "algorithm": "Ed25519",
+            "assurance": certificate_assurance,
+            "public_key_pem": public_key_pem,
+            "public_key_sha256": public_key_sha256,
             "issuer": "FRS-Biometric-Privacy-Lifecycle",
             "qualification": qualification,
             "signed_at": now_iso,

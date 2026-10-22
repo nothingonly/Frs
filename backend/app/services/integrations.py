@@ -14,7 +14,7 @@ import socket
 import time
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import _b64url_decode, _b64url_encode
@@ -25,10 +25,26 @@ from app.db.entities import (
     ClassEnrollment,
     ClassGroup,
     Department,
+    SessionClassGroup,
     Student,
 )
 
 logger = logging.getLogger("frs.integrations")
+
+MANUAL_ATTENDANCE_PIPELINES = (
+    "manual-administrative-entry",
+    "manual-administrative-review",
+)
+
+
+def _session_class_group_ids(db: Session, session: AttendanceSession) -> tuple[str, ...]:
+    """Return every distinct class group attached to a specific or mixed session."""
+    linked = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == session.session_id
+        )
+    ).scalars().all()
+    return tuple(dict.fromkeys([session.class_group_id, *linked]))
 
 
 class CsvExportService:
@@ -40,24 +56,51 @@ class CsvExportService:
         if session is None:
             raise ValueError(f"Attendance session '{session_id}' not found.")
 
-        group = db.get(ClassGroup, session.class_group_id)
-        department = db.get(Department, group.department_id) if group else None
-
-        # Fetch enrolled students
-        enrollments = db.execute(
-            select(Student, ClassEnrollment)
+        # Mixed sessions may span several departments/sections. Keep each student's actual
+        # membership metadata instead of incorrectly labeling every row as the primary group.
+        group_ids = _session_class_group_ids(db, session)
+        enrollment_rows = db.execute(
+            select(Student, ClassGroup, Department)
             .join(ClassEnrollment, Student.student_id == ClassEnrollment.student_id)
+            .join(ClassGroup, ClassGroup.class_group_id == ClassEnrollment.class_group_id)
+            .join(Department, Department.department_id == ClassGroup.department_id)
             .where(
-                ClassEnrollment.class_group_id == session.class_group_id,
+                ClassEnrollment.class_group_id.in_(group_ids),
                 ClassEnrollment.status == "ACTIVE",
             )
+            .order_by(Student.student_number, Department.code, ClassGroup.section)
         ).all()
 
-        # Fetch attendance events for this session
+        enrollments: dict[str, dict[str, Any]] = {}
+        for student, class_group, department in enrollment_rows:
+            record = enrollments.setdefault(
+                student.student_id,
+                {"student": student, "groups": [], "departments": []},
+            )
+            record["groups"].append(class_group)
+            record["departments"].append(department.code)
+
         events = db.execute(
             select(AttendanceEvent).where(AttendanceEvent.attendance_session_id == session_id)
         ).scalars().all()
-        events_by_person = {e.person_id: e for e in events}
+        events_by_person: dict[str, AttendanceEvent] = {}
+        for event in events:
+            previous = events_by_person.get(event.person_id)
+            if previous is None:
+                events_by_person[event.person_id] = event
+                continue
+            event_is_match = (
+                event.pipeline_version in MANUAL_ATTENDANCE_PIPELINES
+                or (event.similarity_score is not None and event.similarity_score >= event.threshold)
+            )
+            previous_is_match = (
+                previous.pipeline_version in MANUAL_ATTENDANCE_PIPELINES
+                or (previous.similarity_score is not None and previous.similarity_score >= previous.threshold)
+            )
+            if (event_is_match and not previous_is_match) or (
+                event_is_match == previous_is_match and event.similarity_score > previous.similarity_score
+            ):
+                events_by_person[event.person_id] = event
 
         output = io.StringIO()
         writer = csv.writer(output)
@@ -74,22 +117,35 @@ class CsvExportService:
             "Recorded At (UTC)",
         ])
 
-        dept_code = department.code if department else "UNKNOWN"
-        section_name = group.section if group else "UNKNOWN"
-        acad_year = group.academic_year if group else "UNKNOWN"
-
-        for student, _ in enrollments:
+        for record in enrollments.values():
+            student = record["student"]
+            groups = record["groups"]
             event = events_by_person.get(student.person_id)
-            status = "PRESENT" if event and event.similarity_score >= event.threshold else ("RECORDED" if event else "ABSENT")
+            is_present = bool(
+                event and (
+                    event.pipeline_version in MANUAL_ATTENDANCE_PIPELINES
+                    or (event.similarity_score is not None and event.similarity_score >= event.threshold)
+                )
+            )
+            status = "PRESENT" if is_present else ("RECORDED" if event else "ABSENT")
             punch_type = event.punch_type if event else "N/A"
-            score = f"{event.similarity_score:.3f}" if event and event.similarity_score is not None else "0.000"
+            score = (
+                "N/A"
+                if event and event.pipeline_version in MANUAL_ATTENDANCE_PIPELINES
+                else f"{event.similarity_score:.3f}"
+                if event and event.similarity_score is not None
+                else "0.000"
+            )
             timestamp = event.timestamp.isoformat() if event else "N/A"
+            acad_years = sorted({item.academic_year for item in groups})
+            departments = sorted(set(record["departments"]))
+            sections = sorted({item.section for item in groups})
 
             writer.writerow([
                 session_id,
-                acad_year,
-                dept_code,
-                section_name,
+                ", ".join(acad_years),
+                ", ".join(departments),
+                ", ".join(sections),
                 student.student_number,
                 student.full_name,
                 status,
@@ -109,21 +165,27 @@ class AbsenteeAlertService:
         session = db.get(AttendanceSession, session_id)
         if session is None:
             raise ValueError(f"Session '{session_id}' not found.")
+        if session.status != "CLOSED":
+            raise ValueError(f"Attendance session '{session_id}' must be closed before calculating absentees.")
 
+        group_ids = _session_class_group_ids(db, session)
         enrollments = db.execute(
             select(Student)
             .join(ClassEnrollment, Student.student_id == ClassEnrollment.student_id)
             .where(
-                ClassEnrollment.class_group_id == session.class_group_id,
+                ClassEnrollment.class_group_id.in_(group_ids),
                 ClassEnrollment.status == "ACTIVE",
             )
-        ).scalars().all()
+        ).scalars().unique().all()
 
         attended_person_ids = set(
             db.execute(
                 select(AttendanceEvent.person_id).where(
                     AttendanceEvent.attendance_session_id == session_id,
-                    AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
+                    or_(
+                        AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
+                        AttendanceEvent.pipeline_version.in_(MANUAL_ATTENDANCE_PIPELINES),
+                    ),
                 )
             ).scalars().all()
         )
@@ -135,7 +197,9 @@ class AbsenteeAlertService:
                     "student_id": s.student_id,
                     "student_number": s.student_number,
                     "full_name": s.full_name,
-                    "email": s.email or f"{s.student_number.lower()}@campus.edu",
+                    # Never synthesize a recipient address. Missing contact information must
+                    # result in a visible skipped delivery, not a guessed destination.
+                    "email": (s.email or "").strip(),
                     "session_id": session_id,
                 })
         return absentees
@@ -465,7 +529,15 @@ class NotificationManager:
         channel: str = "email",
         contact_address: str | None = None,
     ) -> dict[str, Any]:
-        recipient = contact_address or (f"{student_number.lower()}@campus.edu" if channel == "email" else student_number)
+        recipient = (contact_address or "").strip()
+        if not recipient:
+            return {
+                "status": "SKIPPED_NO_VERIFIED_CONTACT",
+                "recipient": "",
+                "channel": channel,
+                "reason": "No contact address was supplied for this student.",
+                "timestamp": int(time.time()),
+            }
         subject = f"Attendance Notice - Session {session_id}"
         body = (
             f"Dear {student_name},\n\n"
@@ -482,6 +554,7 @@ class NotificationManager:
         sent_count = 0
         mocked_count = 0
         failed_count = 0
+        skipped_count = 0
         for a in absentees:
             res = self.send_absentee_alert(
                 student_name=a.get("full_name", "Student"),
@@ -496,6 +569,8 @@ class NotificationManager:
                 sent_count += 1
             elif st in ("SENT_MOCK", "FAILED_FALLBACK_MOCK"):
                 mocked_count += 1
+            elif st == "SKIPPED_NO_VERIFIED_CONTACT":
+                skipped_count += 1
             else:
                 failed_count += 1
 
@@ -504,7 +579,8 @@ class NotificationManager:
             "sent_count": sent_count,
             "mocked_count": mocked_count,
             "failed_count": failed_count,
-            "is_mock": bool(mocked_count > 0 and sent_count == 0),
+            "skipped_count": skipped_count,
+            "is_mock": bool(mocked_count > 0 and sent_count == 0 and skipped_count == 0),
             "channel": channel,
             "alerts": results,
         }
@@ -520,6 +596,11 @@ class SftpExportService:
 
     @staticmethod
     def prepare_export_package(db: Session, session_id: str) -> dict[str, Any]:
+        session = db.get(AttendanceSession, session_id)
+        if session is None:
+            raise ValueError(f"Attendance session '{session_id}' not found.")
+        if session.status != "CLOSED":
+            raise ValueError(f"Attendance session '{session_id}' must be closed before SIS export.")
         csv_content = CsvExportService.export_attendance_csv(db, session_id)
         content_bytes = csv_content.encode("utf-8")
         checksum = hashlib.sha256(content_bytes).hexdigest()
@@ -712,9 +793,16 @@ class LtiService:
         signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
 
         # Signature verification
-        key = signing_key_or_secret or (get_settings().effective_jwt_secret if get_settings() else "")
+        settings = get_settings()
+        key = signing_key_or_secret
+        if key is None and alg == "RS256" and settings:
+            key = settings.lti_platform_public_key_pem or None
+        if key is None and alg == "HS256" and settings and not settings.is_production:
+            key = settings.effective_jwt_secret or None
         if not key:
-            raise ValueError("LTI token verification refused: no trusted key or secret configured.")
+            raise ValueError("LTI token verification refused: no trusted platform key configured.")
+        if settings and settings.is_production and alg != "RS256":
+            raise ValueError("Production LTI 1.3 launches must use RS256 platform signatures.")
 
         if alg == "HS256":
             key_bytes = key.encode("utf-8") if isinstance(key, str) else key
@@ -793,6 +881,8 @@ class LtiService:
             "course_id": context.get("id"),
             "course_title": context.get("title"),
             "resource_link_id": resource_link.get("id"),
+            "nonce": payload.get("nonce"),
+            "jti": payload.get("jti"),
             "verified_at": now,
         }
 

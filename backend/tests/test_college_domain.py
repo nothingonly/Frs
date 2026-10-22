@@ -263,8 +263,9 @@ def test_list_audit_events_and_attendance_session_filter(client_and_sessions) ->
     assert filtered_res.status_code == 200
     assert all(item["action"] == "department.create" for item in filtered_res.json()["items"])
 
-    # Test attendance session filter on /api/v1/admin/attendance
+    # A caller-supplied nonexistent session cannot bypass object-level scope checks.
+    # The endpoint now fails closed instead of silently returning an empty list.
     att_res = client.get("/api/v1/admin/attendance", params={"attendance_session_id": "non-existent-session-id"})
-    assert att_res.status_code == 200
-    assert len(att_res.json()["items"]) == 0
+    assert att_res.status_code == 404
+    assert att_res.json()["detail"] == "Attendance session not found."
 

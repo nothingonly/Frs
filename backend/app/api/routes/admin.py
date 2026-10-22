@@ -34,6 +34,7 @@ from app.db.entities import (
     ModelRegistryEntry,
     Person,
     Student,
+    SessionClassGroup,
 )
 from app.schemas.college import (
     AttendanceCorrectionRequest,
@@ -53,6 +54,124 @@ from app.services.retention import de_enroll_student_biometrics, run_retention_p
 router = APIRouter(prefix="/api/v1/admin", tags=["administration"])
 
 
+def _session_scope_groups(db: Session, session: AttendanceSession) -> list[ClassGroup]:
+    linked_ids = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == session.session_id
+        )
+    ).scalars().all()
+    group_ids = list(dict.fromkeys([session.class_group_id, *linked_ids]))
+    groups = db.execute(
+        select(ClassGroup).where(ClassGroup.class_group_id.in_(group_ids))
+    ).scalars().all()
+    if {group.class_group_id for group in groups} != set(group_ids):
+        raise HTTPException(status_code=409, detail="Attendance session references a missing class group.")
+    return groups
+
+
+def _check_session_scope(db: Session, actor: TokenClaims, session: AttendanceSession) -> None:
+    """Enforce authorization over every class group attached to a single/mixed session."""
+    groups = _session_scope_groups(db, session)
+    for group in groups:
+        check_class_access(actor, group.class_group_id, group.department_id)
+
+
+def _scoped_session_ids(actor: TokenClaims):
+    """SQL subquery for sessions whose entire class-group scope belongs to the actor."""
+    if actor.role == ROLE_SUPER_ADMIN:
+        return select(AttendanceSession.session_id)
+    if actor.role == ROLE_DEAN:
+        foreign_group_link = (
+            select(SessionClassGroup.session_id)
+            .join(ClassGroup, ClassGroup.class_group_id == SessionClassGroup.class_group_id)
+            .where(
+                SessionClassGroup.session_id == AttendanceSession.session_id,
+                ClassGroup.department_id != actor.department_id,
+            )
+            .exists()
+        )
+        return (
+            select(AttendanceSession.session_id)
+            .join(ClassGroup, ClassGroup.class_group_id == AttendanceSession.class_group_id)
+            .where(
+                ClassGroup.department_id == actor.department_id,
+                ~foreign_group_link,
+            )
+        )
+    if actor.role == ROLE_FACULTY:
+        allowed = tuple(actor.class_group_ids)
+        if not allowed:
+            return select(AttendanceSession.session_id).where(False)
+        foreign_group_link = (
+            select(SessionClassGroup.session_id)
+            .where(
+                SessionClassGroup.session_id == AttendanceSession.session_id,
+                ~SessionClassGroup.class_group_id.in_(allowed),
+            )
+            .exists()
+        )
+        return select(AttendanceSession.session_id).where(
+            AttendanceSession.class_group_id.in_(allowed),
+            ~foreign_group_link,
+        )
+    return select(AttendanceSession.session_id).where(False)
+
+
+def _audit_object_scope(db: Session, actor: TokenClaims, object_id: str) -> None:
+    """Map non-session audit references to their owning department, fail closed when unknown."""
+    if actor.role == ROLE_SUPER_ADMIN:
+        return
+    if actor.role != ROLE_DEAN:
+        raise HTTPException(status_code=403, detail="Only Super Administrators and scoped Deans can inspect audit evidence.")
+
+    session = db.get(AttendanceSession, object_id)
+    if session is not None:
+        _check_session_scope(db, actor, session)
+        return
+
+    department = db.get(Department, actor.department_id) if actor.department_id else None
+    if department is None:
+        raise HTTPException(status_code=403, detail="Dean token must reference an existing department.")
+
+    if object_id.startswith("admin:"):
+        employee_id = object_id.split(":", 1)[1]
+        person = db.execute(select(Person).where(Person.employee_id == employee_id)).scalar_one_or_none()
+        if person is not None and person.department == department.code:
+            return
+        raise HTTPException(status_code=403, detail="Audit object is outside the Dean's department or unresolvable.")
+
+    group = db.get(ClassGroup, object_id)
+    if group is not None:
+        check_department_access(actor, group.department_id)
+        return
+    if object_id in {row.department_id for row in db.execute(select(Department)).scalars()}:
+        check_department_access(actor, object_id)
+        return
+
+    student = db.get(Student, object_id)
+    if student is not None:
+        departments = set(db.execute(
+            select(ClassGroup.department_id)
+            .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
+            .where(ClassEnrollment.student_id == student.student_id, ClassEnrollment.status == "ACTIVE")
+        ).scalars().all())
+        if departments == {actor.department_id}:
+            return
+        raise HTTPException(status_code=403, detail="Audit object is outside the Dean's department or unresolvable.")
+
+    enrollment = db.get(ClassEnrollment, object_id)
+    if enrollment is not None:
+        group = db.get(ClassGroup, enrollment.class_group_id)
+        if group is not None:
+            check_department_access(actor, group.department_id)
+            return
+
+    person = db.get(Person, object_id)
+    if person is not None and person.department == department.code:
+        return
+    raise HTTPException(status_code=403, detail="Audit object has no verifiable department scope.")
+
+
 @router.get("/people")
 def list_people(
     actor: Annotated[TokenClaims, Depends(scoped_actor)],
@@ -64,10 +183,11 @@ def list_people(
     statement = select(Person)
     if active_only:
         statement = statement.where(Person.is_active.is_(True))
-    if actor.role == ROLE_DEAN and actor.department_id:
-        dept = db.get(Department, actor.department_id)
-        if dept:
-            statement = statement.where(Person.department == dept.code)
+    if actor.role == ROLE_DEAN:
+        dept = db.get(Department, actor.department_id) if actor.department_id else None
+        if dept is None or not dept.is_active:
+            raise HTTPException(status_code=403, detail="Dean token must reference an existing active department.")
+        statement = statement.where(Person.department == dept.code)
     elif actor.role == ROLE_FACULTY:
         if not actor.class_group_ids:
             return {"items": [], "limit": limit, "offset": offset, "total": 0}
@@ -81,6 +201,8 @@ def list_people(
             )
         )
         statement = statement.where(Person.person_id.in_(subq))
+    elif actor.role != ROLE_SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Forbidden: role cannot list person identities.")
 
     people = db.execute(statement.order_by(Person.employee_id).limit(limit).offset(offset)).scalars().all()
     return {
@@ -108,10 +230,10 @@ def deactivate_person(
     person = db.execute(select(Person).where(Person.employee_id == employee_id).with_for_update()).scalar_one_or_none()
     if person is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
-    if actor.role == ROLE_DEAN and actor.department_id:
-        dept = db.get(Department, actor.department_id)
-        if dept and person.department != dept.code:
-            raise HTTPException(status_code=403, detail="Deans can only modify identities in their department.")
+    if actor.role == ROLE_DEAN:
+        dept = db.get(Department, actor.department_id) if actor.department_id else None
+        if dept is None or not dept.is_active or person.department != dept.code:
+            raise HTTPException(status_code=403, detail="Dean must have an active department scope matching this identity.")
     if person.is_active:
         person.is_active = False
         person.updated_at = datetime.now(timezone.utc)
@@ -172,28 +294,14 @@ def list_attendance(
         statement = statement.where(AttendanceEvent.employee_id == employee_id)
     if attendance_session_id:
         sess = db.get(AttendanceSession, attendance_session_id)
-        if sess:
-            if actor.role == ROLE_FACULTY:
-                check_class_access(actor, sess.class_group_id)
-            elif actor.role == ROLE_DEAN:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg:
-                    check_department_access(actor, cg.department_id)
+        if sess is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+        _check_session_scope(db, actor, sess)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
-    else:
-        if actor.role == ROLE_FACULTY:
-            statement = statement.join(
-                AttendanceSession,
-                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
-            ).where(AttendanceSession.class_group_id.in_(actor.class_group_ids or ["__none__"]))
-        elif actor.role == ROLE_DEAN:
-            statement = statement.join(
-                AttendanceSession,
-                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
-            ).join(
-                ClassGroup,
-                AttendanceSession.class_group_id == ClassGroup.class_group_id,
-            ).where(ClassGroup.department_id == actor.department_id)
+    elif actor.role != ROLE_SUPER_ADMIN:
+        statement = statement.where(
+            AttendanceEvent.attendance_session_id.in_(_scoped_session_ids(actor))
+        )
 
     rows = db.execute(statement.order_by(AttendanceEvent.timestamp.desc()).limit(limit).offset(offset)).scalars().all()
     return {
@@ -202,8 +310,9 @@ def list_attendance(
             "employee_id": row.employee_id,
             "punch_type": row.punch_type,
             "timestamp": row.timestamp.isoformat(),
-            "similarity_score": row.similarity_score,
-            "threshold": row.threshold,
+            "similarity_score": None if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review") else row.similarity_score,
+            "threshold": None if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review") else row.threshold,
+            "evidence_type": "HUMAN_VERIFIED" if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review") else "BIOMETRIC",
             "client_device_id": row.client_device_id,
             "pipeline_version": row.pipeline_version,
             "evidence_id": row.evidence_id,
@@ -226,28 +335,14 @@ def export_attendance_csv(
         statement = statement.where(AttendanceEvent.employee_id == employee_id)
     if attendance_session_id:
         sess = db.get(AttendanceSession, attendance_session_id)
-        if sess:
-            if actor.role == ROLE_FACULTY:
-                check_class_access(actor, sess.class_group_id)
-            elif actor.role == ROLE_DEAN:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg:
-                    check_department_access(actor, cg.department_id)
+        if sess is None:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+        _check_session_scope(db, actor, sess)
         statement = statement.where(AttendanceEvent.attendance_session_id == attendance_session_id)
-    else:
-        if actor.role == ROLE_FACULTY:
-            statement = statement.join(
-                AttendanceSession,
-                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
-            ).where(AttendanceSession.class_group_id.in_(actor.class_group_ids or ["__none__"]))
-        elif actor.role == ROLE_DEAN:
-            statement = statement.join(
-                AttendanceSession,
-                AttendanceEvent.attendance_session_id == AttendanceSession.session_id,
-            ).join(
-                ClassGroup,
-                AttendanceSession.class_group_id == ClassGroup.class_group_id,
-            ).where(ClassGroup.department_id == actor.department_id)
+    elif actor.role != ROLE_SUPER_ADMIN:
+        statement = statement.where(
+            AttendanceEvent.attendance_session_id.in_(_scoped_session_ids(actor))
+        )
 
     rows = db.execute(statement.order_by(AttendanceEvent.timestamp.desc())).scalars().all()
 
@@ -260,6 +355,7 @@ def export_attendance_csv(
         "timestamp",
         "similarity_score",
         "threshold",
+        "evidence_type",
         "client_device_id",
         "pipeline_version",
         "evidence_id",
@@ -271,8 +367,18 @@ def export_attendance_csv(
             row.employee_id,
             row.punch_type,
             row.timestamp.isoformat(),
-            f"{row.similarity_score:.4f}",
-            f"{row.threshold:.4f}",
+            (
+                "N/A" if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review")
+                else f"{row.similarity_score:.4f}"
+            ),
+            (
+                "N/A" if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review")
+                else f"{row.threshold:.4f}"
+            ),
+            (
+                "HUMAN_VERIFIED" if row.pipeline_version in ("manual-administrative-entry", "manual-administrative-review")
+                else "BIOMETRIC"
+            ),
             row.client_device_id,
             row.pipeline_version,
             row.evidence_id,
@@ -298,26 +404,14 @@ def list_audit_events(
     offset: int = Query(default=0, ge=0),
 ):
     statement = select(AuditEvent)
-    if actor.role == ROLE_DEAN and actor.department_id:
-        dept = db.get(Department, actor.department_id)
+    if actor.role == ROLE_DEAN:
         if session_id:
-            sess = db.get(AttendanceSession, session_id)
-            if sess:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg and cg.department_id != actor.department_id:
-                    raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
-            elif session_id.startswith("admin:"):
-                emp_id = session_id.split(":", 1)[1]
-                person = db.execute(select(Person).where(Person.employee_id == emp_id)).scalar_one_or_none()
-                if person and dept and person.department != dept.code:
-                    raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
+            _audit_object_scope(db, actor, session_id)
         else:
-            dept_sessions = select(AttendanceSession.session_id).join(
-                ClassGroup, AttendanceSession.class_group_id == ClassGroup.class_group_id
-            ).where(ClassGroup.department_id == actor.department_id)
             actor_id_str = actor.email or actor.sub
             statement = statement.where(
-                (AuditEvent.session_id.in_(dept_sessions)) | (AuditEvent.actor_id == actor_id_str)
+                (AuditEvent.session_id.in_(_scoped_session_ids(actor)))
+                | (AuditEvent.actor_id == actor_id_str)
             )
 
     if session_id:
@@ -351,18 +445,8 @@ def get_audit(
     event = db.get(AuditEvent, audit_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Audit event not found.")
-    if actor.role == ROLE_DEAN and actor.department_id:
-        dept = db.get(Department, actor.department_id)
-        sess = db.get(AttendanceSession, event.session_id) if event.session_id else None
-        if sess:
-            cg = db.get(ClassGroup, sess.class_group_id)
-            if cg and cg.department_id != actor.department_id:
-                raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
-        elif event.session_id and event.session_id.startswith("admin:"):
-            emp_id = event.session_id.split(":", 1)[1]
-            person = db.execute(select(Person).where(Person.employee_id == emp_id)).scalar_one_or_none()
-            if person and dept and person.department != dept.code:
-                raise HTTPException(status_code=403, detail="Deans can only inspect audit logs for their department.")
+    if actor.role == ROLE_DEAN:
+        _audit_object_scope(db, actor, event.session_id or "")
     return {
         "audit_id": event.audit_id,
         "session_id": event.session_id,
@@ -415,20 +499,12 @@ def list_capture_batches(
     if attendance_session_id:
         sess = db.get(AttendanceSession, attendance_session_id)
         if sess:
-            if actor.role == ROLE_FACULTY:
-                check_class_access(actor, sess.class_group_id)
-            elif actor.role == ROLE_DEAN:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg:
-                    check_department_access(actor, cg.department_id)
+            _check_session_scope(db, actor, sess)
         statement = statement.where(CaptureBatchJob.attendance_session_id == attendance_session_id)
-    else:
-        if actor.role == ROLE_FACULTY:
-            statement = statement.where(CaptureBatchJob.class_group_id.in_(actor.class_group_ids or ["__none__"]))
-        elif actor.role == ROLE_DEAN:
-            statement = statement.join(
-                ClassGroup, CaptureBatchJob.class_group_id == ClassGroup.class_group_id
-            ).where(ClassGroup.department_id == actor.department_id)
+    elif actor.role != ROLE_SUPER_ADMIN:
+        statement = statement.where(
+            CaptureBatchJob.attendance_session_id.in_(_scoped_session_ids(actor))
+        )
 
     if status:
         normalized_status = status.strip().upper()
@@ -450,12 +526,10 @@ def retry_capture_batch(
     ).with_for_update()).scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="Capture batch not found.")
-    if actor.role == ROLE_FACULTY:
-        check_class_access(actor, job.class_group_id)
-    elif actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, job.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+    session_for_scope = db.get(AttendanceSession, job.attendance_session_id)
+    if session_for_scope is None:
+        raise HTTPException(status_code=404, detail="Associated attendance session not found.")
+    _check_session_scope(db, actor, session_for_scope)
     if job.status != "FAILED":
         raise HTTPException(status_code=409, detail="Only failed capture batches can be retried.")
     now = datetime.now(timezone.utc)
@@ -487,13 +561,78 @@ def get_system_stats(
     now = datetime.now(timezone.utc)
     today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
 
-    dept_count = db.scalar(select(func.count(Department.department_id)).where(Department.is_active.is_(True))) or 0
-    group_count = db.scalar(select(func.count(ClassGroup.class_group_id)).where(ClassGroup.is_active.is_(True))) or 0
-    student_count = db.scalar(select(func.count(Student.student_id)).where(Student.is_active.is_(True))) or 0
-    biometric_count = db.scalar(select(func.count(func.distinct(EmbeddingRecord.person_id)))) or 0
-    open_sess_count = db.scalar(select(func.count(AttendanceSession.session_id)).where(AttendanceSession.status == "OPEN")) or 0
-    today_att_count = db.scalar(select(func.count(AttendanceEvent.attendance_id)).where(AttendanceEvent.timestamp >= today_start)) or 0
-    pending_rev_count = db.scalar(select(func.count(CaptureBatchJob.batch_id)).where(CaptureBatchJob.status.in_(["FAILED", "REJECTED"]))) or 0
+    if _actor.role == ROLE_SUPER_ADMIN:
+        allowed_group_ids = None
+    elif _actor.role == ROLE_DEAN:
+        allowed_group_ids = select(ClassGroup.class_group_id).where(
+            ClassGroup.department_id == _actor.department_id
+        )
+    else:
+        allowed_group_ids = tuple(_actor.class_group_ids) or ("__none__",)
+
+    if allowed_group_ids is None:
+        dept_scope = select(Department.department_id).where(Department.is_active.is_(True))
+        group_scope = select(ClassGroup.class_group_id).where(ClassGroup.is_active.is_(True))
+    elif isinstance(allowed_group_ids, tuple):
+        group_scope = select(ClassGroup.class_group_id).where(
+            ClassGroup.class_group_id.in_(allowed_group_ids),
+            ClassGroup.is_active.is_(True),
+        )
+        dept_scope = select(ClassGroup.department_id).where(
+            ClassGroup.class_group_id.in_(group_scope)
+        ).distinct()
+    else:
+        group_scope = select(ClassGroup.class_group_id).where(
+            ClassGroup.class_group_id.in_(allowed_group_ids),
+            ClassGroup.is_active.is_(True),
+        )
+        dept_scope = select(ClassGroup.department_id).where(
+            ClassGroup.class_group_id.in_(group_scope)
+        ).distinct()
+
+    scoped_students = (
+        select(ClassEnrollment.student_id)
+        .where(
+            ClassEnrollment.class_group_id.in_(group_scope),
+            ClassEnrollment.status == "ACTIVE",
+        )
+        .distinct()
+    )
+    scoped_sessions = _scoped_session_ids(_actor)
+
+    dept_count = db.scalar(select(func.count()).select_from(dept_scope.subquery())) or 0
+    group_count = db.scalar(select(func.count()).select_from(group_scope.subquery())) or 0
+    student_count = db.scalar(
+        select(func.count(func.distinct(Student.student_id)))
+        .where(Student.is_active.is_(True), Student.student_id.in_(scoped_students))
+    ) or 0
+    biometric_count = db.scalar(
+        select(func.count(func.distinct(EmbeddingRecord.person_id)))
+        .join(Student, Student.person_id == EmbeddingRecord.person_id)
+        .where(
+            Student.is_active.is_(True),
+            Student.student_id.in_(scoped_students),
+            EmbeddingRecord.accepted.is_(True),
+        )
+    ) or 0
+    open_sess_count = db.scalar(
+        select(func.count(AttendanceSession.session_id)).where(
+            AttendanceSession.status == "OPEN",
+            AttendanceSession.session_id.in_(scoped_sessions),
+        )
+    ) or 0
+    today_att_count = db.scalar(
+        select(func.count(AttendanceEvent.attendance_id)).where(
+            AttendanceEvent.timestamp >= today_start,
+            AttendanceEvent.attendance_session_id.in_(scoped_sessions),
+        )
+    ) or 0
+    pending_rev_count = db.scalar(
+        select(func.count(CaptureBatchJob.batch_id)).where(
+            CaptureBatchJob.status.in_(["FAILED", "REJECTED"]),
+            CaptureBatchJob.attendance_session_id.in_(scoped_sessions),
+        )
+    ) or 0
 
     return {
         "departments_count": dept_count,
@@ -517,12 +656,10 @@ def list_review_queue(
         select(CaptureBatchJob)
         .where(CaptureBatchJob.status.in_(["REJECTED", "FAILED"]))
     )
-    if actor.role == ROLE_FACULTY:
-        statement = statement.where(CaptureBatchJob.class_group_id.in_(actor.class_group_ids or ["__none__"]))
-    elif actor.role == ROLE_DEAN:
-        statement = statement.join(
-            ClassGroup, CaptureBatchJob.class_group_id == ClassGroup.class_group_id
-        ).where(ClassGroup.department_id == actor.department_id)
+    if actor.role != ROLE_SUPER_ADMIN:
+        statement = statement.where(
+            CaptureBatchJob.attendance_session_id.in_(_scoped_session_ids(actor))
+        )
 
     jobs = db.execute(statement.order_by(CaptureBatchJob.created_at.desc()).limit(limit)).scalars().all()
     items = []
@@ -559,12 +696,12 @@ def resolve_review_item(
     ).with_for_update()).scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="Review item not found.")
-    if actor.role == ROLE_FACULTY:
-        check_class_access(actor, job.class_group_id)
-    elif actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, job.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+    session_for_scope = db.get(AttendanceSession, job.attendance_session_id)
+    if session_for_scope is None:
+        raise HTTPException(status_code=404, detail="Associated attendance session not found.")
+    scope_groups = _session_scope_groups(db, session_for_scope)
+    for scope_group in scope_groups:
+        check_class_access(actor, scope_group.class_group_id, scope_group.department_id)
 
     if job.status not in ("REJECTED", "FAILED"):
         raise HTTPException(status_code=409, detail="Only rejected or failed capture jobs can be reviewed.")
@@ -583,42 +720,63 @@ def resolve_review_item(
         if student is None or not student.is_active:
             raise HTTPException(status_code=404, detail="Student not found or inactive.")
 
+        session_group_ids = tuple(group.class_group_id for group in scope_groups)
+        if job.class_group_id not in session_group_ids:
+            raise HTTPException(status_code=409, detail="Capture job class group is outside its attendance session.")
         enrollment = db.execute(
             select(ClassEnrollment)
             .where(ClassEnrollment.student_id == student.student_id)
-            .where(ClassEnrollment.class_group_id == job.class_group_id)
+            .where(ClassEnrollment.class_group_id.in_(session_group_ids))
             .where(ClassEnrollment.status == "ACTIVE")
         ).scalar_one_or_none()
         if enrollment is None:
-            raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
+            raise HTTPException(status_code=409, detail="Student is not actively enrolled in this attendance session.")
 
-        if not student.person_id:
-            raise HTTPException(status_code=409, detail="Student has no biometric identity record.")
+        existing_attendance = db.execute(
+            select(AttendanceEvent).where(
+                AttendanceEvent.attendance_session_id == sess.session_id,
+                AttendanceEvent.employee_id == student.student_number,
+                AttendanceEvent.punch_type == job.punch_type,
+            ).limit(1)
+        ).scalar_one_or_none()
 
-        attendance_event = AttendanceEvent(
-            attendance_id=str(uuid.uuid4()),
-            person_id=student.person_id,
-            employee_id=student.student_number,
-            punch_type=job.punch_type,
-            timestamp=now,
-            similarity_score=1.0,
-            threshold=1.0,
-            client_device_id=job.client_device_id,
-            pipeline_version="manual-administrative-review",
-            evidence_id=f"review:{job.batch_id}",
-            attendance_session_id=job.attendance_session_id,
-        )
-        db.add(attendance_event)
+        duplicate_suppressed = existing_attendance is not None
+        if existing_attendance is not None:
+            # The same student/punch already has a durable attendance event. Resolve the
+            # rejected batch as reviewed, referencing that event instead of creating a duplicate.
+            attendance_event = existing_attendance
+            decision_state = "MANUAL_APPROVAL_DUPLICATE_SUPPRESSED"
+        else:
+            if not student.person_id:
+                raise HTTPException(status_code=409, detail="Student has no biometric identity record.")
+
+            attendance_event = AttendanceEvent(
+                attendance_id=str(uuid.uuid4()),
+                person_id=student.person_id,
+                employee_id=student.student_number,
+                punch_type=job.punch_type,
+                timestamp=now,
+                # Manual approval is an audited human decision, not a biometric match score.
+                similarity_score=0.0,
+                threshold=1.0,
+                client_device_id=job.client_device_id,
+                pipeline_version="manual-administrative-review",
+                evidence_id=f"review:{job.batch_id}",
+                attendance_session_id=job.attendance_session_id,
+            )
+            db.add(attendance_event)
+            decision_state = "MANUALLY_APPROVED"
+
         job.status = "SUCCEEDED"
         job.result_json = json.dumps({
             "manual_approval": True,
+            "duplicate_suppressed": duplicate_suppressed,
             "attendance_id": attendance_event.attendance_id,
             "student_id": student.student_id,
             "student_number": student.student_number,
             "actor": actor_id_str,
             "notes": payload.notes,
         })
-        decision_state = "MANUALLY_APPROVED"
     else:
         decision_state = "DISMISSED"
 
@@ -627,7 +785,7 @@ def resolve_review_item(
 
     audit = AuditEvent(
         session_id=job.attendance_session_id,
-        actor_type="administrator",
+        actor_type=actor.role,
         actor_id=actor_id_str,
         action="review_queue.resolve",
         decision_state=decision_state,
@@ -637,11 +795,18 @@ def resolve_review_item(
             "action": payload.action,
             "student_id": payload.student_id,
             "notes": payload.notes,
+            "duplicate_suppressed": duplicate_suppressed if payload.action == "APPROVE_MANUAL" else False,
+            "attendance_record_created": not duplicate_suppressed if payload.action == "APPROVE_MANUAL" else False,
         }),
     )
     db.add(audit)
     db.commit()
-    return {"status": "success", "action": payload.action, "batch_id": batch_id}
+    return {
+        "status": "success",
+        "action": payload.action,
+        "batch_id": batch_id,
+        "duplicate_suppressed": duplicate_suppressed if payload.action == "APPROVE_MANUAL" else False,
+    }
 
 
 @router.post("/attendance/{attendance_id}/correct")
@@ -659,21 +824,17 @@ def correct_attendance_record(
 
     if event.attendance_session_id:
         sess = db.get(AttendanceSession, event.attendance_session_id)
-        if sess:
-            if actor.role == ROLE_FACULTY:
-                check_class_access(actor, sess.class_group_id)
-            elif actor.role == ROLE_DEAN:
-                cg = db.get(ClassGroup, sess.class_group_id)
-                if cg:
-                    check_department_access(actor, cg.department_id)
+        if sess is None:
+            raise HTTPException(status_code=409, detail="Attendance record references a missing session.")
+        _check_session_scope(db, actor, sess)
     else:
         if actor.role == ROLE_FACULTY:
             raise HTTPException(status_code=403, detail="Faculty can only correct session-scoped attendance records.")
         elif actor.role == ROLE_DEAN:
             dept = db.get(Department, actor.department_id) if actor.department_id else None
             person = db.get(Person, event.person_id) if event.person_id else None
-            if dept and person and person.department != dept.code:
-                raise HTTPException(status_code=403, detail="Deans can only modify attendance records in their department.")
+            if dept is None or person is None or person.department != dept.code:
+                raise HTTPException(status_code=403, detail="Deans can only modify verifiably scoped attendance records in their department.")
 
     previous_punch = event.punch_type
 
@@ -690,7 +851,7 @@ def correct_attendance_record(
 
     audit = AuditEvent(
         session_id=event.attendance_session_id or f"attendance:{attendance_id}",
-        actor_type="administrator",
+        actor_type=actor.role,
         actor_id=actor.email or actor.sub,
         action=action,
         decision_state=decision_state,
@@ -717,38 +878,73 @@ def manual_attendance_entry(
     student = db.get(Student, payload.student_id)
     if student is None or not student.is_active:
         raise HTTPException(status_code=404, detail="Student not found or inactive.")
-    if not student.person_id:
-        person = Person(
-            person_id=str(uuid.uuid4()),
-            employee_id=student.student_number,
-            full_name=student.full_name,
-            department="NON_BIOMETRIC_ALTERNATIVE",
-            is_active=True,
-        )
-        db.add(person)
-        db.flush()
-        student.person_id = person.person_id
-        db.add(student)
-
     sess = db.get(AttendanceSession, payload.attendance_session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
-
-    if actor.role == ROLE_FACULTY:
-        check_class_access(actor, sess.class_group_id)
-    elif actor.role == ROLE_DEAN:
-        cg = db.get(ClassGroup, sess.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+    if sess.status != "OPEN":
+        raise HTTPException(status_code=409, detail="Manual attendance can only be recorded for an open session.")
+    scope_groups = _session_scope_groups(db, sess)
+    for scope_group in scope_groups:
+        check_class_access(actor, scope_group.class_group_id, scope_group.department_id)
+        scope_department = db.get(Department, scope_group.department_id)
+        if not scope_group.is_active or scope_department is None or not scope_department.is_active:
+            raise HTTPException(status_code=409, detail="Manual attendance is unavailable because a session class group is inactive.")
+    session_group_ids = tuple(group.class_group_id for group in scope_groups)
 
     enrollment = db.execute(
         select(ClassEnrollment)
         .where(ClassEnrollment.student_id == student.student_id)
-        .where(ClassEnrollment.class_group_id == sess.class_group_id)
+        .where(ClassEnrollment.class_group_id.in_(session_group_ids))
         .where(ClassEnrollment.status == "ACTIVE")
     ).scalar_one_or_none()
     if enrollment is None:
-        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
+        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this attendance session.")
+
+    existing_attendance = db.execute(
+        select(AttendanceEvent).where(
+            AttendanceEvent.attendance_session_id == sess.session_id,
+            AttendanceEvent.employee_id == student.student_number,
+            AttendanceEvent.punch_type == payload.punch_type,
+        ).limit(1)
+    ).scalar_one_or_none()
+    if existing_attendance is not None:
+        if (
+            existing_attendance.pipeline_version == "manual-administrative-entry"
+            and existing_attendance.punch_type == payload.punch_type
+        ):
+            return {
+                "status": "success",
+                "attendance_id": existing_attendance.attendance_id,
+                "idempotent_replay": True,
+            }
+        raise HTTPException(status_code=409, detail="Attendance already exists for this student and punch type.")
+
+    if not student.person_id:
+        # Legacy/manual enrollment can leave a student row without its Person foreign key
+        # even though a matching Person already exists. Reuse by unique employee ID to avoid
+        # creating a second identity and failing the unique constraint during manual attendance.
+        existing_person = db.execute(
+            select(Person).where(Person.employee_id == student.student_number)
+        ).scalar_one_or_none()
+        if existing_person is not None:
+            if not existing_person.is_active:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The student's person identity is inactive; reactivate it before manual attendance.",
+                )
+            student.person_id = existing_person.person_id
+        else:
+            person = Person(
+                person_id=str(uuid.uuid4()),
+                employee_id=student.student_number,
+                full_name=student.full_name,
+                department="NON_BIOMETRIC_ALTERNATIVE",
+                is_active=True,
+            )
+            db.add(person)
+            db.flush()
+            student.person_id = person.person_id
+        db.add(student)
 
     now = datetime.now(timezone.utc)
     actor_id_str = actor.email or actor.sub
@@ -758,7 +954,8 @@ def manual_attendance_entry(
         employee_id=student.student_number,
         punch_type=payload.punch_type,
         timestamp=now,
-        similarity_score=1.0,
+        # Manual entry is not a similarity measurement.
+        similarity_score=0.0,
         threshold=1.0,
         client_device_id=f"manual:{actor_id_str}",
         pipeline_version="manual-administrative-entry",
@@ -769,7 +966,7 @@ def manual_attendance_entry(
 
     audit = AuditEvent(
         session_id=sess.session_id,
-        actor_type="administrator",
+        actor_type=actor.role,
         actor_id=actor_id_str,
         action="attendance.manual_entry",
         decision_state="MANUAL_ENTRY",
@@ -806,8 +1003,16 @@ def get_storage_status(
 def get_signed_storage_url(
     payload: SignedUrlRequest,
     request: Request,
-    _actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
 ):
+    # Media public IDs are not linked to a department-scoped ownership record. Until that
+    # relationship exists, only Super Admin may mint signed URLs; allowing arbitrary Dean
+    # public IDs would let a caller preview another department's biometric media.
+    if actor.role != ROLE_SUPER_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Super Administrators can generate signed URLs until media ownership is department-scoped.",
+        )
     storage = getattr(request.app.state, "storage", None)
     if not storage or not storage.is_configured:
         raise HTTPException(status_code=503, detail="Cloud storage is not configured.")
@@ -854,8 +1059,20 @@ def get_dead_letter_batches(
     limit: int = Query(default=50, ge=1, le=100),
 ):
     """List poisoned or retry-exhausted capture batches for operator triage."""
-    dept_id = actor.department_id if actor.role == ROLE_DEAN else None
-    items = list_dead_letter_batches(db, limit=limit, department_id=dept_id)
+    if actor.role == ROLE_DEAN:
+        statement = (
+            select(CaptureBatchJob)
+            .where(
+                CaptureBatchJob.status == "DEAD_LETTER",
+                CaptureBatchJob.attendance_session_id.in_(_scoped_session_ids(actor)),
+            )
+            .order_by(CaptureBatchJob.updated_at.desc())
+            .limit(min(max(1, limit), 100))
+        )
+        rows = db.execute(statement).scalars().all()
+        items = [serialize_capture_batch(row) for row in rows]
+    else:
+        items = list_dead_letter_batches(db, limit=limit)
     return {"items": items, "total": len(items)}
 
 
@@ -867,6 +1084,13 @@ def requeue_batch(
     db: Annotated[Session, Depends(get_db)],
 ):
     """Requeue an exhausted dead-letter batch back to the queue for reprocessing."""
+    job = db.get(CaptureBatchJob, batch_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Capture batch not found.")
+    session = db.get(AttendanceSession, job.attendance_session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Associated attendance session not found.")
+    _check_session_scope(db, actor, session)
     allowed_dept = actor.department_id if actor.role == ROLE_DEAN else None
     return requeue_dead_letter_batch(
         db, batch_id, operator_id=actor.email or actor.sub, allowed_department_id=allowed_dept
@@ -903,22 +1127,19 @@ def de_enroll_student(
     if student is None:
         raise HTTPException(status_code=404, detail=f"Student '{student_id}' does not exist.")
     if actor.role == ROLE_DEAN:
-        dept = db.get(Department, actor.department_id) if actor.department_id else None
-        in_dept = False
-        if dept:
-            enrolled = db.execute(
-                select(ClassGroup)
-                .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
-                .where(ClassEnrollment.student_id == student_id, ClassGroup.department_id == actor.department_id)
-            ).scalars().first()
-            if enrolled:
-                in_dept = True
-            elif student.person_id:
-                person = db.get(Person, student.person_id)
-                if person and person.department == dept.code:
-                    in_dept = True
-        if not in_dept:
-            raise HTTPException(status_code=403, detail="Deans can only de-enroll students within their own department.")
+        active_departments = set(db.execute(
+            select(ClassGroup.department_id)
+            .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
+            .where(
+                ClassEnrollment.student_id == student_id,
+                ClassEnrollment.status == "ACTIVE",
+            )
+        ).scalars().all())
+        if active_departments != {actor.department_id}:
+            raise HTTPException(
+                status_code=403,
+                detail="Deans can only de-enroll students whose active enrollments are entirely within their own department.",
+            )
 
     storage = getattr(request.app.state, "storage", None)
     try:

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 
 from datetime import datetime, timezone
+import base64
 import hashlib
+import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -55,13 +58,22 @@ def test_sms_mock_delivery() -> None:
 def test_notification_manager_dispatch() -> None:
     manager = NotificationManager()
     absentees = [
-        {"student_number": "STU101", "full_name": "Student One", "session_id": "sess-1"},
+        {
+            "student_number": "STU101",
+            "full_name": "Student One",
+            "email": "student.one@campus.edu",
+            "session_id": "sess-1",
+        },
         {"student_number": "STU102", "full_name": "Student Two", "session_id": "sess-1"},
     ]
     batch_res = manager.dispatch_batch(absentees, channel="email")
     assert batch_res["total_alerts"] == 2
     assert len(batch_res["alerts"]) == 2
-    assert batch_res["alerts"][0]["recipient"] == "stu101@campus.edu"
+    assert batch_res["alerts"][0]["recipient"] == "student.one@campus.edu"
+    assert batch_res["alerts"][0]["status"] == "SENT_MOCK"
+    assert batch_res["alerts"][1]["status"] == "SKIPPED_NO_VERIFIED_CONTACT"
+    assert batch_res["skipped_count"] == 1
+    assert batch_res["failed_count"] == 0
 
 
 def test_sftp_export_packaging(db_session: Session) -> None:
@@ -220,6 +232,55 @@ def test_lti_signed_token_cryptographic_verification() -> None:
     assert validated["user_id"] == "student-uuid-888"
     assert validated["deployment_id"] == "dep-deployment-42"
     assert validated["course_id"] == "course-101"
+
+
+def test_lti_rs256_verification_uses_trusted_platform_public_key() -> None:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def b64url(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    now = int(time.time())
+    header = {"alg": "RS256", "typ": "JWT", "kid": "test-platform-key"}
+    claims = {
+        "iss": "https://canvas.example.edu",
+        "aud": "frs-client-id",
+        "sub": "learner-123",
+        "exp": now + 300,
+        "iat": now,
+        "nonce": "server-issued-nonce-abc",
+        "https://purl.imsglobal.org/spec/lti/claim/message_type": "LtiResourceLinkRequest",
+        "https://purl.imsglobal.org/spec/lti/claim/version": "1.3.0",
+        "https://purl.imsglobal.org/spec/lti/claim/deployment_id": "deployment-1",
+        "https://purl.imsglobal.org/spec/lti/claim/context": {"id": "course-1", "title": "Test Course"},
+        "https://purl.imsglobal.org/spec/lti/claim/resource_link": {"id": "resource-1"},
+        "https://purl.imsglobal.org/spec/lti/claim/roles": ["http://purl.imsglobal.org/vocab/lis/v2/membership#Learner"],
+    }
+    encoded_header = b64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    encoded_claims = b64url(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{encoded_header}.{encoded_claims}".encode("ascii")
+    signature = private_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+    id_token = f"{encoded_header}.{encoded_claims}.{b64url(signature)}"
+    trusted_public_key = private_key.public_key().public_bytes(
+        Encoding.PEM,
+        PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+
+    verified = LtiService.validate_launch_id_token(
+        id_token=id_token,
+        signing_key_or_secret=trusted_public_key,
+        expected_issuer="https://canvas.example.edu",
+        expected_client_id="frs-client-id",
+        expected_deployment_id="deployment-1",
+        expected_nonce="server-issued-nonce-abc",
+    )
+    assert verified["cryptographically_verified"] is True
+    assert verified["nonce"] == "server-issued-nonce-abc"
+    assert verified["user_id"] == "learner-123"
 
 
 def test_lti_token_verification_failures() -> None:

@@ -15,6 +15,20 @@ services:
       retries: 10
     networks: [frs-internal]
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    env_file: .env
+    environment:
+      FRS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-frs}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-frs}
+    command: ["python", "-m", "app.db.migrator", "--apply"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [frs-internal]
+
   api:
     build:
       context: .
@@ -28,6 +42,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./model-artifacts:/models:ro
     ports:
@@ -47,6 +63,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./model-artifacts:/models:ro
     networks: [frs-internal]
@@ -64,6 +82,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     networks: [frs-internal]
 
 volumes:

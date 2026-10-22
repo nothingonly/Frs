@@ -6,6 +6,10 @@ Run these scripts in order against a fresh PostgreSQL database, including a fres
 2. `0002_college_domain.sql` creates departments, class groups, students, class enrollments and attendance sessions, then adds the optional attendance-session link to legacy attendance events.
 3. `0003_capture_batches.sql` creates the encrypted attendance capture queue and enables RLS without adding public policies.
 4. `0004_dead_letter_status.sql` updates the `capture_batch_jobs` status check constraint to include `DEAD_LETTER` for forward compatibility on existing PostgreSQL deployments.
+5. `0005_group_attendance_workflow.sql` creates group-photo captures and provisional attendance review state.
+6. `0006_lti_nonce_uses.sql` creates the unique nonce-consumption ledger used to reject repeated production LTI launch tokens.
+7. `0007_audit_events_append_only.sql` installs PostgreSQL triggers that reject updates and deletes on `audit_events`.
+8. `0008_lti_launch_nonces.sql` stores short-lived, server-issued LTI nonce challenges and enables row-level security. Production launch validation requires an unused, unexpired challenge and consumes it atomically with the replay ledger. SQLite test runs checksum-track but skip PostgreSQL-specific operations.
 
 These scripts are idempotent for the current schema shape and intentionally insert no sample records. For a database already created by an earlier FRS version, back up first and apply the scripts in a staging copy before production.
 
@@ -19,7 +23,7 @@ The Next.js console calls the FastAPI admin API; it does not connect to Supabase
 
 RLS is enabled on the tables. These scripts intentionally create no policies for the Supabase `anon` or `authenticated` roles. End-user access must go through the protected FastAPI routes until the college's real user/role model and least-privilege policies have been designed and tested. The backend connection itself must be treated as privileged and must never be shipped to a client.
 
-RLS on its own is not a complete authorization design. Review grants, database roles, backups, transport encryption, key rotation and application authorization for the target project.
+RLS on its own is not a complete authorization design. Review grants, database roles, backups, transport encryption, key rotation and application authorization for the target project. The application also installs an append-only trigger on `audit_events` for normal PostgreSQL application roles. Database owners/superusers can still alter the trigger; production operations must separate DBA credentials from the application role and enable database-level logging.
 
 ## College model
 

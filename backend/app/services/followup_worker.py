@@ -8,14 +8,20 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.logging_config import setup_logging
 from app.core.metrics import get_metrics
 from app.database import SessionLocal, create_schema
-from app.db.entities import AttendanceEvent, AttendanceSession, AuditEvent, ClassEnrollment
+from app.db.entities import (
+    AttendanceEvent,
+    AttendanceSession,
+    AuditEvent,
+    ClassEnrollment,
+    SessionClassGroup,
+)
 from app.services.integrations import (
     AbsenteeAlertService,
     NotificationManager,
@@ -61,29 +67,78 @@ class AttendanceFollowupDaemon:
         return list(db.execute(statement).scalars().all())
 
     def reconcile_session(self, db: Session, session: AttendanceSession) -> dict[str, Any]:
-        """Perform reconciliation, absentee notification, and optional SFTP export for a closed session."""
+        """Perform reconciliation once per closed session, serializing concurrent workers."""
         session_id = session.session_id
+
+        # Use the session row as a per-session claim. PostgreSQL workers attempting the same
+        # session serialize here; the winner holds the lock through delivery and audit commit.
+        # The post-lock audit recheck prevents another worker from dispatching duplicate work
+        # after waiting for a previous worker's successful commit.
+        locked_session = db.execute(
+            select(AttendanceSession)
+            .where(AttendanceSession.session_id == session_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if locked_session is None:
+            raise ValueError(f"Attendance session '{session_id}' no longer exists.")
+        session = locked_session
+        if session.status != "CLOSED":
+            db.rollback()
+            raise ValueError(f"Attendance session '{session_id}' is no longer closed.")
+
+        prior_reconciliation = db.execute(
+            select(AuditEvent.audit_id)
+            .where(
+                AuditEvent.session_id == session_id,
+                AuditEvent.action == "attendance.followup_reconciled",
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if prior_reconciliation is not None:
+            db.rollback()
+            return {
+                "session_id": session_id,
+                "status": "SKIPPED_ALREADY_RECONCILED",
+            }
+
         logger.info("Reconciling attendance follow-up for closed session '%s'...", session_id)
 
         # 1. Total active enrollments
+        linked_group_ids = db.execute(
+            select(SessionClassGroup.class_group_id).where(
+                SessionClassGroup.session_id == session_id
+            )
+        ).scalars().all()
+        session_group_ids = tuple(dict.fromkeys([session.class_group_id, *linked_group_ids]))
+
         total_enrolled = len(
-            db.execute(
-                select(ClassEnrollment).where(
-                    ClassEnrollment.class_group_id == session.class_group_id,
-                    ClassEnrollment.status == "ACTIVE",
-                )
-            ).scalars().all()
+            set(
+                db.execute(
+                    select(ClassEnrollment.student_id).where(
+                        ClassEnrollment.class_group_id.in_(session_group_ids),
+                        ClassEnrollment.status == "ACTIVE",
+                    )
+                ).scalars().all()
+            )
         )
 
-        # 2. Present events
-        present_count = len(
+        # 2. Count distinct people, not punch events. A check-in and check-out or a
+        # repeated event must not inflate the session's present-student count.
+        present_person_ids = set(
             db.execute(
-                select(AttendanceEvent).where(
+                select(AttendanceEvent.person_id).where(
                     AttendanceEvent.attendance_session_id == session_id,
-                    AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
+                    or_(
+                        AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
+                        AttendanceEvent.pipeline_version.in_(
+                            ("manual-administrative-entry", "manual-administrative-review")
+                        ),
+                    ),
                 )
             ).scalars().all()
         )
+        present_count = len(present_person_ids)
 
         # 3. Absentees
         absentees = AbsenteeAlertService.find_absentees(db, session_id)
@@ -180,9 +235,13 @@ class AttendanceFollowupDaemon:
                 if self._shutdown_requested:
                     break
                 try:
-                    self.reconcile_session(db, session)
-                    reconciled_count += 1
+                    result = self.reconcile_session(db, session)
+                    if result.get("status") != "SKIPPED_ALREADY_RECONCILED":
+                        reconciled_count += 1
                 except Exception:
+                    # A database error can leave the transaction failed and the session row
+                    # locked. Reset the unit of work before processing the next session.
+                    db.rollback()
                     logger.exception("Failed to reconcile closed session '%s'", session.session_id)
 
             return reconciled_count
@@ -215,10 +274,9 @@ def main() -> None:
     parser.add_argument("--channel", type=str, default="email", choices=["email", "sms"], help="Notification channel.")
     args = parser.parse_args()
 
+    settings = get_settings()
+    settings.validate_startup_security()
     create_schema()
-    from app.database import engine
-    from app.db.migrator import assert_production_schema_ready
-    assert_production_schema_ready(engine)
     daemon = AttendanceFollowupDaemon(interval_seconds=args.interval_seconds, channel=args.channel)
 
     signal.signal(signal.SIGINT, daemon.request_shutdown)

@@ -18,6 +18,7 @@ from app.database import Base, get_db
 from app.db.entities import (
     AttendanceEvent,
     EmbeddingRecord,
+    Student,
 )
 from app.security import encrypt_embedding
 from app.services.pipeline import AttendancePipeline
@@ -413,6 +414,13 @@ def test_multi_photo_group_capture_deduplication_and_review(test_setup):
     # -------------------------------------------------------------
     # Faculty Manual Review and Toggle
     # -------------------------------------------------------------
+    # Exercise the non-biometric/manual path: a legacy student may have no linked person ID.
+    # The backend should recover the existing person record or create one before finalization.
+    with sessions() as db:
+        student_three = db.get(Student, s3["student_id"])
+        student_three.person_id = None
+        db.commit()
+
     # Student 3 was absent; faculty manually resolves student 3 as PRESENT with note
     toggle_res = client.post(
         f"/api/v1/attendance/sessions/{session_id}/provisional/{s3['student_id']}/toggle",
@@ -443,6 +451,11 @@ def test_multi_photo_group_capture_deduplication_and_review(test_setup):
     assert s1["person_id"] in event_pids
     assert s2["person_id"] in event_pids
     assert s3["person_id"] in event_pids
+    manual_event = next(e for e in events if e.person_id == s3["person_id"])
+    assert manual_event.pipeline_version == "manual-administrative-review"
+    assert manual_event.similarity_score == 0.0
+    assert manual_event.threshold == 1.0
+    assert manual_event.client_device_id == "faculty-manual-override"
 
     # -------------------------------------------------------------
     # Idempotent Finalization Check

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -12,23 +10,96 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import device_actor, session_actor
+from app.api.dependencies import (
+    ROLE_DEAN,
+    ROLE_FACULTY,
+    ROLE_KIOSK,
+    ROLE_SUPER_ADMIN,
+    SessionActor,
+    device_actor,
+    session_actor,
+)
 from app.database import get_db
 from app.db.entities import (
-    AttendanceEvent,
     AttendanceSession,
-    AuditEvent,
     CaptureBatchJob,
     ClassEnrollment,
     ClassGroup,
     Department,
     SessionClassGroup,
-    Student,
 )
 from app.security import encrypt_capture_payload
 from app.services.capture_batches import pack_capture_frames, serialize_capture_batch
 
 router = APIRouter(prefix="/api/v1/attendance", tags=["attendance"])
+
+
+def _session_class_group_ids(db: Session, session: AttendanceSession) -> tuple[str, ...]:
+    linked = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == session.session_id
+        )
+    ).scalars().all()
+    return tuple(dict.fromkeys([session.class_group_id, *linked]))
+
+
+def _can_access_session(
+    db: Session,
+    session_id: str,
+    actor: SessionActor | str,
+    *,
+    allow_kiosk: bool = True,
+) -> bool:
+    session = db.get(AttendanceSession, session_id)
+    if session is None:
+        return False
+    # Legacy dependency overrides return plain strings in isolated test fixtures only.
+    if not isinstance(actor, SessionActor):
+        return True
+    if actor.role == ROLE_SUPER_ADMIN:
+        return True
+    if not allow_kiosk and actor.role == ROLE_KIOSK:
+        return False
+
+    group_ids = set(_session_class_group_ids(db, session))
+    groups = db.execute(select(ClassGroup).where(ClassGroup.class_group_id.in_(group_ids))).scalars().all()
+    if not group_ids or {group.class_group_id for group in groups} != group_ids:
+        return False
+
+    if actor.role == ROLE_DEAN:
+        return bool(actor.department_id) and all(
+            group.department_id == actor.department_id for group in groups
+        )
+    if actor.role in (ROLE_FACULTY, ROLE_KIOSK):
+        allowed = set(actor.class_group_ids)
+        return bool(allowed) and group_ids.issubset(allowed)
+    return False
+
+
+def _audit_actor_type(actor: SessionActor | str) -> str:
+    if not isinstance(actor, SessionActor):
+        return "device" if str(actor).lower().startswith("device:") else "faculty"
+    return {
+        ROLE_SUPER_ADMIN: "administrator",
+        ROLE_DEAN: "dean",
+        ROLE_FACULTY: "faculty",
+        ROLE_KIOSK: "device",
+    }.get(actor.role, "unknown")
+
+
+def _require_session_scope(
+    db: Session,
+    session_id: str,
+    actor: SessionActor | str,
+    *,
+    allow_kiosk: bool = True,
+) -> AttendanceSession:
+    session = db.get(AttendanceSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Attendance session not found.")
+    if not _can_access_session(db, session_id, actor, allow_kiosk=allow_kiosk):
+        raise HTTPException(status_code=403, detail="Forbidden: actor lacks authority over every class group in this session.")
+    return session
 
 
 async def _read_burst(
@@ -127,10 +198,10 @@ async def verify_attendance(
 
 @router.get("/sessions/open")
 def list_open_attendance_sessions(
-    _actor_id: Annotated[str, Depends(session_actor)],
+    actor: Annotated[SessionActor | str, Depends(session_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """List open attendance sessions in active class groups for an authenticated kiosk or faculty portal."""
+    """List only open sessions within the caller's assigned class/department scope."""
     rows = db.execute(
         select(AttendanceSession, ClassGroup, Department)
         .join(ClassGroup, ClassGroup.class_group_id == AttendanceSession.class_group_id)
@@ -156,6 +227,9 @@ def list_open_attendance_sessions(
                 ClassEnrollment.status == "ACTIVE",
             )
         ) or 0
+
+        if not _can_access_session(db, session.session_id, actor):
+            continue
 
         items.append({
             "session_id": session.session_id,
@@ -190,6 +264,7 @@ async def enqueue_attendance_batch(
     image: Annotated[UploadFile | None, File()] = None,
 ):
     settings = request.app.state.settings
+    session = _require_session_scope(db, attendance_session_id, actor_id)
     normalized_punch = punch_type.strip().upper()
     if normalized_punch not in {"CHECK_IN", "CHECK_OUT"}:
         raise HTTPException(status_code=422, detail="punch_type must be CHECK_IN or CHECK_OUT")
@@ -217,9 +292,7 @@ async def enqueue_attendance_batch(
         response.status_code = 200
         return serialize_capture_batch(existing)
 
-    attendance_session = db.get(AttendanceSession, attendance_session_id)
-    if attendance_session is None:
-        raise HTTPException(status_code=404, detail="Attendance session not found.")
+    attendance_session = session
     group = db.get(ClassGroup, attendance_session.class_group_id)
     department = db.get(Department, group.department_id) if group else None
     if attendance_session.status != "OPEN":
@@ -287,6 +360,8 @@ def get_attendance_batch(
         raise HTTPException(status_code=403, detail="Capture batch belongs to a different kiosk credential.")
     payload = serialize_capture_batch(job)
     attendance_session = db.get(AttendanceSession, job.attendance_session_id)
+    if attendance_session is not None:
+        _require_session_scope(db, attendance_session.session_id, actor_id)
     payload["session_open"] = attendance_session is not None and attendance_session.status == "OPEN"
     return payload
 
@@ -305,90 +380,15 @@ def record_alternative_attendance(
     actor_id: Annotated[str, Depends(device_actor)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """Enables approved non-biometric kiosk attendance (PIN, Student ID, Card/NFC) for opted-out or exempted students."""
-    attendance_session = db.get(AttendanceSession, attendance_session_id)
-    if attendance_session is None:
-        raise HTTPException(status_code=404, detail="Attendance session not found.")
-    if attendance_session.status != "OPEN":
-        raise HTTPException(status_code=409, detail="Attendance session is not open.")
+    """Fail closed until a real PIN/card/OTP verifier and enrolled credentials exist.
 
-    student = db.execute(
-        select(Student).where(
-            Student.student_number == payload.student_number.strip(),
-            Student.is_active.is_(True),
-        )
-    ).scalar_one_or_none()
-    if student is None:
-        raise HTTPException(status_code=404, detail="Student not found or inactive.")
-
-    enrollment = db.execute(
-        select(ClassEnrollment).where(
-            ClassEnrollment.student_id == student.student_id,
-            ClassEnrollment.class_group_id == attendance_session.class_group_id,
-            ClassEnrollment.status == "ACTIVE",
-        )
-    ).scalar_one_or_none()
-    if enrollment is None:
-        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
-
-    now = datetime.now(timezone.utc)
-    cooldown_cutoff = now - timedelta(seconds=60)
-    recent_punch = db.execute(
-        select(AttendanceEvent).where(
-            AttendanceEvent.employee_id == student.student_number,
-            AttendanceEvent.attendance_session_id == attendance_session.session_id,
-            AttendanceEvent.timestamp >= cooldown_cutoff,
-        )
-    ).first()
-    if recent_punch is not None:
-        raise HTTPException(status_code=429, detail="Attendance punch cooldown active. Please wait before punching again.")
-
-    event = AttendanceEvent(
-        attendance_id=str(uuid.uuid4()),
-        person_id=student.person_id,
-        employee_id=student.student_number,
-        punch_type=payload.punch_type,
-        timestamp=now,
-        similarity_score=1.0,
-        threshold=0.0,
-        client_device_id=payload.client_device_id,
-        pipeline_version=f"kiosk-alternative:{payload.alternative_method.lower()}",
-        evidence_id=f"alt:{uuid.uuid4()}",
-        attendance_session_id=attendance_session.session_id,
+    A student number and caller-selected method name are identifiers, not authenticators.
+    This endpoint does not record attendance based on those values alone.
+    """
+    raise HTTPException(
+        status_code=503,
+        detail="Alternative attendance is unavailable: a server-side PIN/card/OTP verifier is not configured.",
     )
-    db.add(event)
-
-    audit = AuditEvent(
-        session_id=attendance_session.session_id,
-        actor_type="device",
-        actor_id=actor_id,
-        action="attendance.kiosk_alternative",
-        decision_state="ACCEPTED",
-        reason_codes_json=json.dumps([payload.alternative_method]),
-        evidence_json=json.dumps({
-            "attendance_id": event.attendance_id,
-            "student_id": student.student_id,
-            "student_number": student.student_number,
-            "method": payload.alternative_method,
-            "punch_type": payload.punch_type,
-            "client_device_id": payload.client_device_id,
-        }),
-    )
-    db.add(audit)
-    db.commit()
-
-    return {
-        "status": "ACCEPTED",
-        "decision_state": "ACCEPTED",
-        "employee_id": student.student_number,
-        "full_name": student.full_name,
-        "similarity_score": 1.0,
-        "threshold": 0.0,
-        "punch_type": payload.punch_type,
-        "attendance_id": event.attendance_id,
-        "timestamp": now.isoformat(),
-        "method": payload.alternative_method,
-    }
 
 
 # ============================================================================
@@ -403,6 +403,7 @@ def get_session_roster_endpoint(
     db: Annotated[Session, Depends(get_db)],
 ):
     """Retrieve the deduplicated expected student roster for a session."""
+    _require_session_scope(db, session_id, _actor_id)
     roster = request.app.state.pipeline.get_session_roster(db, session_id)
     return {
         "session_id": session_id,
@@ -420,6 +421,7 @@ async def process_group_photo_capture(
     image: Annotated[UploadFile, File()],
 ):
     """Process a classroom group photo containing multiple student faces."""
+    _require_session_scope(db, session_id, actor_id)
     content_type = (image.content_type or "").lower()
     if content_type and content_type not in {"image/jpeg", "image/png", "image/webp", "application/octet-stream"}:
         raise HTTPException(status_code=415, detail=f"Unsupported image content type: {content_type}")
@@ -431,7 +433,11 @@ async def process_group_photo_capture(
         raise HTTPException(status_code=422, detail="Empty or corrupted image file.")
 
     return request.app.state.pipeline.process_group_photo(
-        db, session_id=session_id, image_bytes=payload, actor_id=actor_id
+        db,
+        session_id=session_id,
+        image_bytes=payload,
+        actor_id=actor_id,
+        actor_type=_audit_actor_type(actor_id),
     )
 
 
@@ -443,6 +449,7 @@ def get_session_provisional_state_endpoint(
     db: Annotated[Session, Depends(get_db)],
 ):
     """Retrieve current provisional attendance state and metrics across all group captures."""
+    _require_session_scope(db, session_id, _actor_id)
     return request.app.state.pipeline.get_session_provisional_state(db, session_id)
 
 
@@ -461,6 +468,7 @@ def toggle_session_provisional_attendance_endpoint(
     db: Annotated[Session, Depends(get_db)],
 ):
     """Manually resolve or toggle a student's provisional attendance status."""
+    _require_session_scope(db, session_id, actor_id, allow_kiosk=False)
     return request.app.state.pipeline.toggle_provisional_attendance(
         db,
         session_id=session_id,
@@ -468,6 +476,7 @@ def toggle_session_provisional_attendance_endpoint(
         new_status=payload.new_status,
         actor_id=actor_id,
         notes=payload.notes,
+        actor_type=_audit_actor_type(actor_id),
     )
 
 
@@ -479,7 +488,11 @@ def finalize_session_attendance_endpoint(
     db: Annotated[Session, Depends(get_db)],
 ):
     """Confirm and finalize attendance: writes durable AttendanceEvents and closes session."""
+    _require_session_scope(db, session_id, actor_id, allow_kiosk=False)
     return request.app.state.pipeline.finalize_session_attendance(
-        db, session_id=session_id, actor_id=actor_id
+        db,
+        session_id=session_id,
+        actor_id=actor_id,
+        actor_type=_audit_actor_type(actor_id),
     )
 

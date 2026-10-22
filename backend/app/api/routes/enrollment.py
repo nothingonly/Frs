@@ -5,8 +5,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import admin_actor
+from app.api.dependencies import ROLE_DEAN, TokenClaims, scoped_admin
 from app.database import get_db
+from app.db.entities import Department
 
 router = APIRouter(prefix="/api/v1/biometrics", tags=["enrollment"])
 
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/api/v1/biometrics", tags=["enrollment"])
 @router.post("/enroll/admin", status_code=201)
 async def enroll_person(
     request: Request,
-    admin_id: Annotated[str, Depends(admin_actor)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
     db: Annotated[Session, Depends(get_db)],
     employee_id: Annotated[str, Form(min_length=1, max_length=80)],
     full_name: Annotated[str, Form(min_length=1, max_length=200)],
@@ -22,6 +23,22 @@ async def enroll_person(
     images: Annotated[list[UploadFile] | None, File()] = None,
     image: Annotated[UploadFile | None, File()] = None,
 ):
+    # Legacy enrollment remains available, but a Dean must not use it to enroll
+    # biometric identities into another department by supplying a free-form label.
+    if actor.role == ROLE_DEAN:
+        dean_department = db.get(Department, actor.department_id) if actor.department_id else None
+        if dean_department is None:
+            raise HTTPException(status_code=403, detail="Dean enrollment requires an existing department scope.")
+        requested_department = (department or "").strip()
+        allowed_values = {
+            dean_department.department_id.casefold(),
+            dean_department.code.casefold(),
+            dean_department.name.casefold(),
+        }
+        if requested_department and requested_department.casefold() not in allowed_values:
+            raise HTTPException(status_code=403, detail="Dean may enroll biometric identities only within their own department.")
+        department = dean_department.code
+
     if images and image is not None:
         raise HTTPException(status_code=422, detail="Send either repeated 'images' parts or legacy 'image', not both.")
     uploads = images or ([image] if image is not None else [])
@@ -59,5 +76,5 @@ async def enroll_person(
         employee_id=employee_id,
         full_name=full_name,
         department=department,
-        admin_actor_id=admin_id,
+        admin_actor_id=f"admin:{actor.email or actor.sub}",
     )

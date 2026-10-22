@@ -15,6 +15,7 @@ from app.db.entities import (
     ClassGroup,
     Department,
     Person,
+    SessionClassGroup,
     Student,
 )
 from app.services.followup_worker import AttendanceFollowupDaemon
@@ -47,7 +48,10 @@ def followup_db():
         db.commit()
 
         s1 = Student(student_id="s-1", student_number="STU01", full_name="Student One", person_id="p-1", is_active=True)
-        s2 = Student(student_id="s-2", student_number="STU02", full_name="Student Two", person_id="p-2", is_active=True)
+        s2 = Student(
+            student_id="s-2", student_number="STU02", full_name="Student Two",
+            person_id="p-2", email="student.two@campus.edu", is_active=True,
+        )
         db.add_all([s1, s2])
         db.commit()
 
@@ -99,6 +103,124 @@ def followup_db():
     engine.dispose()
 
 
+
+def test_followup_counts_all_groups_and_distinct_students(followup_db):
+    # Add a second department/group to a mixed session.
+    department = Department(
+        department_id="dept-two", code="ECE", name="Electrical Engineering", is_active=True
+    )
+    followup_db.add(department)
+    followup_db.commit()
+    group = ClassGroup(
+        class_group_id="cg-two",
+        department_id="dept-two",
+        year_of_study=3,
+        section="B",
+        academic_year="2026-2027",
+        is_active=True,
+    )
+    person = Person(
+        person_id="p-3",
+        employee_id="STU03",
+        full_name="Student Three",
+        department="ECE",
+        is_active=True,
+    )
+    student = Student(
+        student_id="s-3",
+        student_number="STU03",
+        full_name="Student Three",
+        person_id="p-3",
+        is_active=True,
+    )
+    followup_db.add_all([group, person, student])
+    followup_db.commit()
+    enrollment = ClassEnrollment(
+        enrollment_id="e-3",
+        student_id="s-3",
+        class_group_id="cg-two",
+        status="ACTIVE",
+    )
+    link = SessionClassGroup(session_id="sess-closed", class_group_id="cg-two")
+    duplicate_punch = AttendanceEvent(
+        attendance_id="att-1-checkout",
+        person_id="p-1",
+        employee_id="STU01",
+        punch_type="CHECK_OUT",
+        timestamp=datetime.now(timezone.utc),
+        similarity_score=0.95,
+        threshold=0.65,
+        client_device_id="kiosk-1",
+        pipeline_version="v5",
+        evidence_id="ev-1-checkout",
+        attendance_session_id="sess-closed",
+    )
+    followup_db.add_all([enrollment, link, duplicate_punch])
+    followup_db.commit()
+
+    evidence = AttendanceFollowupDaemon().reconcile_session(
+        followup_db, followup_db.get(AttendanceSession, "sess-closed")
+    )
+    assert evidence["total_enrolled"] == 3
+    assert evidence["present_count"] == 1
+    assert evidence["absent_count"] == 2
+    assert evidence["notifications"]["total_alerts"] == 2
+    assert evidence["notifications"]["skipped_count"] == 1
+
+
+
+@pytest.mark.parametrize(
+    "manual_pipeline",
+    ["manual-administrative-entry", "manual-administrative-review"],
+)
+def test_followup_counts_manual_attendance_as_present(followup_db, manual_pipeline):
+    manual_event = AttendanceEvent(
+        attendance_id=f"manual-{manual_pipeline}",
+        person_id="p-2",
+        employee_id="STU02",
+        punch_type="CHECK_IN",
+        timestamp=datetime.now(timezone.utc),
+        similarity_score=0.0,
+        threshold=1.0,
+        client_device_id="manual-demo",
+        pipeline_version=manual_pipeline,
+        evidence_id=f"manual-evidence-{manual_pipeline}",
+        attendance_session_id="sess-closed",
+    )
+    followup_db.add(manual_event)
+    followup_db.commit()
+
+    evidence = AttendanceFollowupDaemon().reconcile_session(
+        followup_db, followup_db.get(AttendanceSession, "sess-closed")
+    )
+    assert evidence["total_enrolled"] == 2
+    assert evidence["present_count"] == 2
+    assert evidence["absent_count"] == 0
+    assert evidence["notifications"]["total_alerts"] == 0
+
+def test_reconcile_session_skips_when_another_worker_already_committed(followup_db):
+    followup_db.add(AuditEvent(
+        session_id="sess-closed",
+        actor_type="scheduler",
+        actor_id="another-worker",
+        action="attendance.followup_reconciled",
+        decision_state="RECONCILED",
+        reason_codes_json='["ALREADY_DONE"]',
+        evidence_json='{"session_id":"sess-closed"}',
+        occurred_at=datetime.now(timezone.utc),
+    ))
+    followup_db.commit()
+
+    result = AttendanceFollowupDaemon().reconcile_session(
+        followup_db, followup_db.get(AttendanceSession, "sess-closed")
+    )
+
+    assert result["status"] == "SKIPPED_ALREADY_RECONCILED"
+    assert followup_db.query(AuditEvent).filter_by(
+        session_id="sess-closed", action="attendance.followup_reconciled"
+    ).count() == 1
+
+
 def test_followup_worker_detects_only_unreconciled_closed_sessions(followup_db):
     unreconciled = AttendanceFollowupDaemon.get_unreconciled_closed_sessions(followup_db)
     # Only sess-closed is picked up, sess-open is ignored
@@ -123,7 +245,7 @@ def test_followup_worker_reconciles_session_and_records_audit(followup_db):
     alerts = notifications["alerts"]
     assert len(alerts) == 1
     assert alerts[0]["status"] in ("SENT", "SENT_MOCK")
-    assert "stu02@campus.edu" in alerts[0]["recipient"]
+    assert alerts[0]["recipient"] == "student.two@campus.edu"
 
     # Audit event written
     audit = followup_db.execute(

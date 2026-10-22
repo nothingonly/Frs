@@ -43,7 +43,25 @@ This generates:
 - `FRS_ADMIN_API_KEY`: High-entropy (40-char) administrator key.
 - `FRS_DATA_ENCRYPTION_KEY`: 32-byte URL-safe base64 key for AES-GCM encryption.
 
-### 2.2 Environment Variables (Production)
+### 2.2 Render deployment: database URL must not use `db`
+
+The hostname `db` in `postgresql+psycopg://...@db:5432/...` is **only valid for services running on the same Docker Compose network** defined in `backend/compose.yaml`. It is not a Render PostgreSQL hostname. If a Render web service starts with that URL, PostgreSQL connection attempts fail with errors such as `failed to resolve host 'db'`.
+
+For Render:
+
+1. Create or select the Render PostgreSQL database and the backend Web Service.
+2. In the database's Render dashboard, copy its **Internal Database URL** when the Web Service is in the same region; otherwise use a connection URL reachable from the Web Service.
+3. In the backend Web Service's **Environment** settings, set `FRS_DATABASE_URL` to that URL (the backend also accepts Render's conventional `DATABASE_URL` key if `FRS_DATABASE_URL` is not set). If both are present, `FRS_DATABASE_URL` takes precedence, so correct or remove any stale value pointing to `@db:5432`.
+4. Keep the URL and credentials in Render's environment settings, never commit them to the repository.
+5. Trigger a deploy and inspect logs. If the hostname resolves but connection still fails, verify the database is available, the URL/credentials are correct, and the service has network access.
+
+The backend normalizes Render's common `postgres://` and `postgresql://` URL forms to `postgresql+psycopg://`, matching the installed psycopg v3 driver. Keep the URL's host, database, username, password, and connection options intact. Do not copy a real database URL into issues, commits, screenshots, or chat.
+
+For local Docker Compose only, the `@db:5432` hostname is correct because Compose creates the `db` service DNS name on its private network.
+
+The backend Docker image does not bake in a database URL or placeholder credentials. For a non-production demo, set `FRS_ENV=staging`; staging still requires PostgreSQL and distinct strong API/JWT/encryption/deletion-signing keys, but it does not claim that biometric thresholds or production release approvals are complete. Use synthetic data or participants who have explicitly consented, and use only model weights whose license permits the demo. For a real deployment, set `FRS_ENV=production` and satisfy every production check, including approved model provenance and empirical calibration. Both modes fail closed if the URL points to the Compose-only `db` hostname. The Dockerfile binds Uvicorn and its container health check to `${PORT:-8000}` (Render defaults `PORT` to `10000`; local Compose defaults to `8000`).
+
+### 2.3 Environment Variables (Production)
 
 | Variable | Description | Required in Production |
 |---|---|---|
@@ -119,11 +137,13 @@ pnpm start -p 3000
 ```
 
 ### 5.3 Android Kiosk Setup
-1. Build release APK:
+1. Build a locally signed release APK only after creating a dedicated Android upload keystore and configuring `android/key.properties` from `android/key.properties.example`:
    ```bash
    flutter build apk --release
    ```
-2. On Android device, install APK:
+   Do not publish a debug-signed APK as a release.
+2. For the GitHub alpha-prerelease workflow, configure these repository Actions secrets before dispatching `.github/workflows/publish-alpha-release.yml`: `FRS_ANDROID_KEYSTORE_BASE64` (base64-encoded JKS/PKCS12 keystore), `FRS_ANDROID_KEYSTORE_PASSWORD`, `FRS_ANDROID_KEY_PASSWORD`, and `FRS_ANDROID_KEY_ALIAS`. The workflow fails closed when any are missing, builds a signed release APK, and points the release tag at the exact tested commit.
+3. On Android device, install APK:
    ```bash
    adb install -r build/app/outputs/flutter-apk/app-release.apk
    ```

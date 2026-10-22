@@ -70,6 +70,7 @@ export default function AttendancePage() {
       "Timestamp UTC",
       "Similarity Score",
       "Threshold",
+      "Evidence Type",
       "Device ID",
       "Session ID",
       "Audit Evidence ID",
@@ -79,8 +80,9 @@ export default function AttendancePage() {
       e.employee_id,
       e.punch_type,
       e.timestamp,
-      Number(e.similarity_score).toFixed(4),
-      Number(e.threshold).toFixed(4),
+      e.similarity_score == null ? "N/A" : Number(e.similarity_score).toFixed(4),
+      e.threshold == null ? "N/A" : Number(e.threshold).toFixed(4),
+      e.evidence_type ?? "BIOMETRIC",
       e.client_device_id,
       e.attendance_session_id || "",
       e.evidence_id,
@@ -287,8 +289,9 @@ export default function AttendancePage() {
                     <span className="event-pill">{event.punch_type}</span>
                   </td>
                   <td>{new Date(event.timestamp).toLocaleString()}</td>
-                  <td className="numeric-cell">{Number(event.similarity_score).toFixed(4)}</td>
-                  <td className="numeric-cell">{Number(event.threshold).toFixed(4)}</td>
+                  <td className="numeric-cell">{event.similarity_score == null ? "N/A" : Number(event.similarity_score).toFixed(4)}</td>
+                  <td className="numeric-cell">{event.threshold == null ? "N/A" : Number(event.threshold).toFixed(4)}</td>
+                  <td><span className="event-pill">{event.evidence_type ?? "BIOMETRIC"}</span></td>
                   <td>{event.client_device_id}</td>
                   <td>
                     {event.attendance_session_id ? (

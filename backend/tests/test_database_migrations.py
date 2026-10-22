@@ -361,3 +361,15 @@ def test_schema_constraints_and_foreign_keys_enforced() -> None:
     finally:
         engine.dispose()
 
+
+
+def test_lti_server_nonce_migration_and_model_are_present() -> None:
+    migration = Path(__file__).resolve().parent.parent / "migrations" / "0008_lti_launch_nonces.sql"
+    assert migration.is_file()
+    content = migration.read_text(encoding="utf-8").upper()
+
+    assert "CREATE TABLE IF NOT EXISTS LTI_LAUNCH_NONCES" in content
+    assert "EXPIRES_AT TIMESTAMPTZ NOT NULL" in content
+    assert "CONSUMED_AT TIMESTAMPTZ NULL" in content
+    assert "ENABLE ROW LEVEL SECURITY" in content
+    assert "lti_launch_nonces" in Base.metadata.tables

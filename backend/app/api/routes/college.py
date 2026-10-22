@@ -10,7 +10,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.api.dependencies import (
     ROLE_DEAN,
@@ -251,6 +251,10 @@ def list_students(
         return {"items": [], "limit": limit, "offset": offset}
 
     if class_group_id:
+        if actor.role == ROLE_DEAN:
+            requested_group = db.get(ClassGroup, class_group_id)
+            if requested_group is None or requested_group.department_id != actor.department_id:
+                raise HTTPException(status_code=403, detail="Forbidden: class group is outside the Dean's department.")
         if actor.role == ROLE_FACULTY and class_group_id not in actor.class_group_ids:
             raise HTTPException(status_code=403, detail=f"Forbidden: actor lacks authority over class group '{class_group_id}'.")
         ids_for_group = select(ClassEnrollment.student_id).where(
@@ -261,14 +265,21 @@ def list_students(
     ids = [row.student_id for row in rows]
     memberships: dict[str, list[dict[str, Any]]] = {student_id: [] for student_id in ids}
     if ids:
-        linked = db.execute(
+        membership_stmt = (
             select(Student.student_id, ClassGroup.class_group_id, Department.code,
                    ClassGroup.year_of_study, ClassGroup.section, ClassGroup.academic_year)
             .join(ClassEnrollment, ClassEnrollment.student_id == Student.student_id)
             .join(ClassGroup, ClassGroup.class_group_id == ClassEnrollment.class_group_id)
             .join(Department, Department.department_id == ClassGroup.department_id)
             .where(Student.student_id.in_(ids), ClassEnrollment.status == "ACTIVE")
-        ).all()
+        )
+        if actor.role == ROLE_DEAN:
+            membership_stmt = membership_stmt.where(ClassGroup.department_id == actor.department_id)
+        elif actor.role == ROLE_FACULTY:
+            membership_stmt = membership_stmt.where(
+                ClassGroup.class_group_id.in_(actor.class_group_ids or ["__none__"])
+            )
+        linked = db.execute(membership_stmt).all()
         for student_id, group_id, code, year, section, academic_year in linked:
             memberships[student_id].append({
                 "class_group_id": group_id, "department_code": code, "year_of_study": year,
@@ -292,6 +303,8 @@ def create_student(
     group = db.get(ClassGroup, payload.class_group_id) if payload.class_group_id else None
     if payload.class_group_id and (group is None or not group.is_active):
         raise HTTPException(status_code=404, detail="Active class group not found.")
+    if actor.role == ROLE_DEAN and group is None:
+        raise HTTPException(status_code=403, detail="Deans must assign new students to a class group in their department.")
     dept = db.get(Department, group.department_id) if group else None
     if group and (dept is None or not dept.is_active):
         raise HTTPException(status_code=409, detail="The class group's department is inactive.")
@@ -353,14 +366,17 @@ def deactivate_student(
     student = db.execute(select(Student).where(Student.student_id == student_id).with_for_update()).scalar_one_or_none()
     if student is None:
         raise HTTPException(status_code=404, detail="Student not found.")
-    if actor.role == ROLE_DEAN and actor.department_id:
-        student_depts = db.execute(
+    if actor.role == ROLE_DEAN:
+        student_depts = set(db.execute(
             select(ClassGroup.department_id)
             .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
             .where(ClassEnrollment.student_id == student_id, ClassEnrollment.status == "ACTIVE")
-        ).scalars().all()
-        if student_depts and actor.department_id not in student_depts:
-            raise HTTPException(status_code=403, detail="Forbidden: cannot modify student outside your assigned department.")
+        ).scalars().all())
+        if not student_depts or student_depts != {actor.department_id}:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Dean must be scoped to every active department enrollment for this student.",
+            )
     student.is_active = False
     student.updated_at = datetime.now(timezone.utc)
     if student.person_id:
@@ -384,14 +400,17 @@ def reactivate_student(
     student = db.execute(select(Student).where(Student.student_id == student_id).with_for_update()).scalar_one_or_none()
     if student is None:
         raise HTTPException(status_code=404, detail="Student not found.")
-    if actor.role == ROLE_DEAN and actor.department_id:
-        student_depts = db.execute(
+    if actor.role == ROLE_DEAN:
+        student_depts = set(db.execute(
             select(ClassGroup.department_id)
             .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
             .where(ClassEnrollment.student_id == student_id, ClassEnrollment.status == "ACTIVE")
-        ).scalars().all()
-        if student_depts and actor.department_id not in student_depts:
-            raise HTTPException(status_code=403, detail="Forbidden: cannot modify student outside your assigned department.")
+        ).scalars().all())
+        if not student_depts or student_depts != {actor.department_id}:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Dean must be scoped to every active department enrollment for this student.",
+            )
     student.is_active = True
     student.updated_at = datetime.now(timezone.utc)
     if student.person_id:
@@ -493,22 +512,57 @@ def list_attendance_sessions(
     class_group_id: str | None = None, limit: int = Query(default=100, ge=1, le=500),
 ):
     stmt = select(AttendanceSession)
-    if actor.role == ROLE_DEAN and actor.department_id:
-        stmt = stmt.join(ClassGroup, ClassGroup.class_group_id == AttendanceSession.class_group_id).where(
-            ClassGroup.department_id == actor.department_id
+
+    # For a mixed session, every linked class group is part of the protected resource.
+    # Filtering only by the primary class group would disclose mixed sessions to a single
+    # department/faculty member whose scope does not cover the other participating groups.
+    if actor.role == ROLE_DEAN:
+        if not actor.department_id:
+            return {"items": []}
+        linked_group = aliased(ClassGroup)
+        foreign_link = (
+            select(SessionClassGroup.session_id)
+            .join(linked_group, linked_group.class_group_id == SessionClassGroup.class_group_id)
+            .where(
+                SessionClassGroup.session_id == AttendanceSession.session_id,
+                linked_group.department_id != actor.department_id,
+            )
+            .exists()
         )
-    elif actor.role == ROLE_FACULTY and actor.class_group_ids:
-        stmt = stmt.where(AttendanceSession.class_group_id.in_(actor.class_group_ids))
-    elif actor.role == ROLE_FACULTY and not actor.class_group_ids:
+        stmt = (
+            stmt.join(ClassGroup, ClassGroup.class_group_id == AttendanceSession.class_group_id)
+            .where(ClassGroup.department_id == actor.department_id, ~foreign_link)
+        )
+    elif actor.role == ROLE_FACULTY:
+        allowed = tuple(actor.class_group_ids)
+        if not allowed:
+            return {"items": []}
+        foreign_link = (
+            select(SessionClassGroup.session_id)
+            .where(
+                SessionClassGroup.session_id == AttendanceSession.session_id,
+                ~SessionClassGroup.class_group_id.in_(allowed),
+            )
+            .exists()
+        )
+        stmt = stmt.where(
+            AttendanceSession.class_group_id.in_(allowed),
+            ~foreign_link,
+        )
+    elif actor.role != ROLE_SUPER_ADMIN:
         return {"items": []}
 
     if class_group_id:
+        if actor.role == ROLE_DEAN:
+            requested_group = db.get(ClassGroup, class_group_id)
+            if requested_group is None or requested_group.department_id != actor.department_id:
+                raise HTTPException(status_code=403, detail="Forbidden: class group is outside the Dean's department.")
         if actor.role == ROLE_FACULTY and class_group_id not in actor.class_group_ids:
             raise HTTPException(status_code=403, detail=f"Forbidden: actor lacks authority over class group '{class_group_id}'.")
         stmt = stmt.where(AttendanceSession.class_group_id == class_group_id)
+
     rows = db.execute(stmt.order_by(AttendanceSession.starts_at.desc()).limit(limit)).scalars().all()
     return {"items": [_session(row, db) for row in rows]}
-
 
 @router.post("/attendance-sessions", status_code=201)
 def create_attendance_session(
@@ -588,14 +642,27 @@ def close_attendance_session(
     ).with_for_update()).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
-    group = db.get(ClassGroup, row.class_group_id)
-    check_class_access(actor, row.class_group_id, group.department_id if group else None)
+
+    linked_ids = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == row.session_id
+        )
+    ).scalars().all()
+    group_ids = tuple(dict.fromkeys([row.class_group_id, *linked_ids]))
+    groups = db.execute(
+        select(ClassGroup).where(ClassGroup.class_group_id.in_(group_ids))
+    ).scalars().all()
+    if not group_ids or {group.class_group_id for group in groups} != set(group_ids):
+        raise HTTPException(status_code=409, detail="Attendance session references a missing class group.")
+    for group in groups:
+        check_class_access(actor, group.class_group_id, group.department_id)
+
     if row.status == "CANCELLED":
         raise HTTPException(status_code=409, detail="A cancelled attendance session cannot be closed.")
     if row.status == "OPEN":
         row.status, row.ends_at = "CLOSED", datetime.now(timezone.utc)
         _audit(db, actor, "attendance_session.close", "CLOSED", row.session_id, {
-            "class_group_id": row.class_group_id,
+            "class_group_ids": list(group_ids),
         })
         db.commit()
     return _session(row)
@@ -872,6 +939,25 @@ async def bulk_enroll_photos(
             results.append({"filename": fname, "student_number": roll_no, "status": "FAILED", "reason": f"STUDENT_NOT_FOUND: '{roll_no}'"})
             fail_count += 1
             continue
+
+        if actor.role == ROLE_DEAN:
+            student_departments = set(db.execute(
+                select(ClassGroup.department_id)
+                .join(ClassEnrollment, ClassEnrollment.class_group_id == ClassGroup.class_group_id)
+                .where(
+                    ClassEnrollment.student_id == student.student_id,
+                    ClassEnrollment.status == "ACTIVE",
+                )
+            ).scalars().all())
+            if not student_departments or student_departments != {actor.department_id}:
+                results.append({
+                    "filename": fname,
+                    "student_number": roll_no,
+                    "status": "FAILED",
+                    "reason": "DEPARTMENT_SCOPE_VIOLATION",
+                })
+                fail_count += 1
+                continue
 
         if not student.person_id:
             person = Person(employee_id=student.student_number, full_name=student.full_name)

@@ -236,8 +236,6 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.validate_startup_security()
     create_schema()
-    from app.db.migrator import assert_production_schema_ready
-    assert_production_schema_ready(engine)
     # Loading the real model pack is mandatory: do not report ready if inference weights fail to load.
     vision = VisionEngine(settings)
     app.state.settings = settings

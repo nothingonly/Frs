@@ -22,6 +22,10 @@ def generate_environment() -> str:
         "FRS_DATABASE_URL": f"postgresql+psycopg://frs:{db_password}@db:5432/frs",
         "FRS_DEVICE_API_KEYS": secrets.token_urlsafe(40),
         "FRS_ADMIN_API_KEY": secrets.token_urlsafe(40),
+        "FRS_JWT_SECRET": secrets.token_urlsafe(48),
+        "FRS_DELETION_CERTIFICATE_KEY": base64.urlsafe_b64encode(
+            secrets.token_bytes(32)
+        ).decode("ascii"),
         "FRS_DATA_ENCRYPTION_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"),
     }
     lines: list[str] = []

@@ -12,6 +12,9 @@ from sqlalchemy.pool import StaticPool
 from app.api.routes.admin import router as admin_router
 from app.api.routes.college import router as college_router
 from app.api.routes.integrations import router as integrations_router
+from app.services.integrations import AbsenteeAlertService, CsvExportService
+from app.api.routes.enrollment import router as enrollment_router
+from app.core.config import Settings
 from app.core.auth import ROLE_DEAN, ROLE_FACULTY, create_access_token
 from app.core.config import get_settings
 from app.database import Base, get_db
@@ -24,6 +27,7 @@ from app.db.entities import (
     ClassGroup,
     Department,
     Person,
+    SessionClassGroup,
     Student,
 )
 
@@ -42,6 +46,20 @@ def matrix_client():
     app.include_router(college_router)
     app.include_router(admin_router)
     app.include_router(integrations_router)
+    app.include_router(enrollment_router)
+    app.state.settings = get_settings()
+
+    class EnrollmentPipelineStub:
+        def enroll(self, db, payloads, *, employee_id, full_name, department, admin_actor_id):
+            return {
+                "status": "TEST_ENROLLED",
+                "employee_id": employee_id,
+                "department": department,
+                "admin_actor_id": admin_actor_id,
+                "frame_count": len(payloads),
+            }
+
+    app.state.pipeline = EnrollmentPipelineStub()
 
     def override_db():
         session = testing_sessions()
@@ -82,8 +100,12 @@ def matrix_client():
         db.commit()
 
         sess_cse = AttendanceSession(session_id="sess-cse-1", class_group_id="cg-cse-a", subject_name="Databases", created_by="admin", status="OPEN")
+        sess_cse_closed = AttendanceSession(session_id="sess-cse-closed", class_group_id="cg-cse-a", subject_name="Databases closed", created_by="admin", status="CLOSED")
         sess_ece = AttendanceSession(session_id="sess-ece-1", class_group_id="cg-ece-a", subject_name="Circuits", created_by="admin", status="OPEN")
-        db.add_all([sess_cse, sess_ece])
+        sess_mixed = AttendanceSession(session_id="sess-mixed-1", class_group_id="cg-cse-a", subject_name="Joint Lab", created_by="admin", status="CLOSED")
+        db.add_all([sess_cse, sess_cse_closed, sess_ece, sess_mixed])
+        db.commit()
+        db.add(SessionClassGroup(session_id="sess-mixed-1", class_group_id="cg-ece-a"))
         db.commit()
 
         att_cse = AttendanceEvent(
@@ -196,6 +218,184 @@ def matrix_client():
     engine.dispose()
 
 
+
+def test_dean_legacy_biometric_enrollment_is_department_scoped(matrix_client):
+    client, _ = matrix_client
+    settings = get_settings()
+    dean_cse = create_access_token(
+        sub="dean-cse", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu", department_id="dept-cse",
+    )
+    headers = {"Authorization": f"Bearer {dean_cse}"}
+    frames = [
+        ("images", (f"frame-{index}.jpg", b"demo-frame", "image/jpeg"))
+        for index in range(3)
+    ]
+
+    denied = client.post(
+        "/api/v1/biometrics/enroll/admin",
+        data={"employee_id": "STU-ECE-01", "full_name": "ECE Student", "department": "ECE"},
+        files=frames,
+        headers=headers,
+    )
+    assert denied.status_code == 403
+
+    allowed = client.post(
+        "/api/v1/biometrics/enroll/admin",
+        data={"employee_id": "STU-CSE-01", "full_name": "CSE Student", "department": "CSE"},
+        files=frames,
+        headers=headers,
+    )
+    assert allowed.status_code == 201
+    assert allowed.json()["department"] == "CSE"
+    assert allowed.json()["frame_count"] == 3
+
+
+def test_production_sftp_rejects_request_supplied_trust_and_path(matrix_client, monkeypatch):
+    client, _ = matrix_client
+    settings = get_settings()
+    super_admin = create_access_token(
+        sub="super-admin", role="super_admin", secret=settings.effective_jwt_secret,
+        email="admin@campus.edu",
+    )
+    monkeypatch.setattr(
+        "app.api.routes.integrations.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            env="production",
+            sftp_remote_path="/approved/attendance",
+            sftp_host_key_fingerprint="SHA256:trusted-host-key",
+        ),
+    )
+    headers = {"Authorization": f"Bearer {super_admin}"}
+
+    path_override = client.post(
+        "/api/v1/integrations/sftp/export",
+        json={"session_id": "sess-cse-1", "remote_path": "/other/path"},
+        headers=headers,
+    )
+    assert path_override.status_code == 422
+    assert "server configuration" in path_override.json()["detail"]
+
+    key_override = client.post(
+        "/api/v1/integrations/sftp/export",
+        json={"session_id": "sess-cse-1", "sftp_host_key_fingerprint": "SHA256:attacker-key"},
+        headers=headers,
+    )
+    assert key_override.status_code == 422
+    assert "server configuration" in key_override.json()["detail"]
+
+
+def test_mixed_session_exports_and_absentee_lists_include_all_groups(matrix_client):
+    _, testing_sessions = matrix_client
+    with testing_sessions() as db:
+        ece_student = db.query(Student).filter_by(student_number="STU002").one()
+        db.add(AttendanceEvent(
+            attendance_id="evt-mixed-manual",
+            attendance_session_id="sess-mixed-1",
+            person_id=ece_student.person_id,
+            employee_id=ece_student.student_number,
+            punch_type="CHECK_IN",
+            timestamp=datetime.now(timezone.utc),
+            similarity_score=0.0,
+            threshold=1.0,
+            client_device_id="manual-demo",
+            pipeline_version="manual-administrative-review",
+            evidence_id="manual-review-evidence",
+        ))
+        db.commit()
+
+        csv_text = CsvExportService.export_attendance_csv(db, "sess-mixed-1")
+        assert "STU001" in csv_text
+        assert "STU002" in csv_text
+        # The ECE enrollment must not be mislabeled as the primary CSE group.
+        assert ",ECE,A,STU002," in csv_text
+        ece_row = next(line for line in csv_text.splitlines() if "STU002" in line)
+        assert ",PRESENT,CHECK_IN,N/A," in ece_row
+
+        absentees = AbsenteeAlertService.find_absentees(db, "sess-mixed-1")
+        assert {student["student_number"] for student in absentees} == {"STU001"}
+
+
+
+def test_mixed_session_listing_and_closing_require_every_group_scope(matrix_client):
+    client, _ = matrix_client
+    settings = get_settings()
+    dean_cse = create_access_token(
+        sub="dean-cse", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu", department_id="dept-cse",
+    )
+    faculty_cse = create_access_token(
+        sub="fac-cse", role=ROLE_FACULTY, secret=settings.effective_jwt_secret,
+        email="prof.cse@campus.edu", class_group_ids=["cg-cse-a"],
+    )
+
+    for token in (dean_cse, faculty_cse):
+        headers = {"Authorization": f"Bearer {token}"}
+        sessions = client.get("/api/v1/admin/college/attendance-sessions", headers=headers)
+        assert sessions.status_code == 200
+        visible_ids = {item["session_id"] for item in sessions.json()["items"]}
+        assert "sess-mixed-1" not in visible_ids
+        assert "sess-cse-1" in visible_ids
+
+        denied = client.post(
+            "/api/v1/admin/college/attendance-sessions/sess-mixed-1/close",
+            headers=headers,
+        )
+        assert denied.status_code == 403
+
+
+def test_people_identity_routes_fail_closed_for_unscoped_deans(matrix_client):
+    client, sessions = matrix_client
+    settings = get_settings()
+    dean_cse = create_access_token(
+        sub="dean-cse", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu", department_id="dept-cse",
+    )
+    headers = {"Authorization": f"Bearer {dean_cse}"}
+    people = client.get("/api/v1/admin/people", headers=headers)
+    assert people.status_code == 200
+    assert {item["employee_id"] for item in people.json()["items"]} == {"STU001"}
+
+    missing_department = create_access_token(
+        sub="dean-no-dept", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.unknown@campus.edu",
+    )
+    missing_headers = {"Authorization": f"Bearer {missing_department}"}
+    assert client.get("/api/v1/admin/people", headers=missing_headers).status_code == 403
+    assert client.post(
+        "/api/v1/admin/people/STU002/deactivate", headers=missing_headers,
+    ).status_code == 403
+
+    unknown_department = create_access_token(
+        sub="dean-unknown-dept", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.unknown@campus.edu", department_id="dept-does-not-exist",
+    )
+    unknown_headers = {"Authorization": f"Bearer {unknown_department}"}
+    assert client.get("/api/v1/admin/people", headers=unknown_headers).status_code == 403
+    assert client.post(
+        "/api/v1/admin/people/STU002/reactivate", headers=unknown_headers,
+    ).status_code == 403
+
+    with sessions() as db:
+        assert db.get(Person, "per-2").is_active is True
+
+
+def test_dean_cannot_generate_arbitrary_cloudinary_signed_urls(matrix_client):
+    client, _ = matrix_client
+    settings = get_settings()
+    dean_cse = create_access_token(
+        sub="dean-cse", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu", department_id="dept-cse",
+    )
+    response = client.post(
+        "/api/v1/admin/storage/signed-url",
+        json={"public_id": "frs/faces/STU002", "expires_in_seconds": 300},
+        headers={"Authorization": f"Bearer {dean_cse}"},
+    )
+    assert response.status_code == 403
+
+
 def test_dean_cross_department_audit_forbidden(matrix_client):
     client, _ = matrix_client
     settings = get_settings()
@@ -213,7 +413,8 @@ def test_dean_cross_department_audit_forbidden(matrix_client):
     # Dean CSE inspecting ECE audit log returns 403 Forbidden
     resp = client.get("/api/v1/admin/audit?session_id=sess-ece-1", headers=headers)
     assert resp.status_code == 403
-    assert "Deans can only inspect audit logs for their department" in resp.json()["detail"]
+    # Session-level authorization rejects the foreign class group before querying its audit rows.
+    assert "Forbidden" in resp.json()["detail"]
 
     # Direct get_audit for ECE event returns 403 Forbidden
     resp = client.get("/api/v1/admin/audit/audit-ece-1", headers=headers)
@@ -331,13 +532,13 @@ def test_dean_cross_department_de_enroll_forbidden(matrix_client):
     # Dean CSE cannot de-enroll ECE student stu-2
     resp = client.post("/api/v1/admin/students/stu-2/de-enroll", headers=headers)
     assert resp.status_code == 403
-    assert "Deans can only de-enroll students within their own department" in resp.json()["detail"]
+    assert "own department" in resp.json()["detail"]
 
     # Dean CSE can de-enroll CSE student stu-1
     resp = client.post("/api/v1/admin/students/stu-1/de-enroll", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["student_id"] == "stu-1"
-    assert resp.json()["status"] == "DE_ENROLLED"
+    assert resp.json()["status"] == "DELETION_INCOMPLETE"
 
 
 def test_absentee_notifications_and_sftp_scoping(matrix_client):
@@ -357,7 +558,7 @@ def test_absentee_notifications_and_sftp_scoping(matrix_client):
 
     # Faculty can dry-run absentee alerts for assigned class session
     resp = client.post("/api/v1/integrations/notifications/absentees", json={
-        "session_id": "sess-cse-1",
+        "session_id": "sess-cse-closed",
         "dry_run": True,
     }, headers=headers_fac_cse)
     assert resp.status_code == 200
@@ -374,3 +575,24 @@ def test_absentee_notifications_and_sftp_scoping(matrix_client):
         "session_id": "sess-ece-1",
     }, headers=headers_dean_cse)
     assert resp.status_code == 403
+
+    # Mixed sessions require permission for every participating class group.
+    # A user authorized for the primary CSE group must not see ECE absentees.
+    resp = client.post("/api/v1/integrations/notifications/absentees", json={
+        "session_id": "sess-mixed-1",
+        "dry_run": True,
+    }, headers=headers_fac_cse)
+    assert resp.status_code == 403
+
+    # A Dean's department authority must cover every linked class group too.
+    resp = client.post("/api/v1/integrations/notifications/absentees", json={
+        "session_id": "sess-mixed-1",
+        "dry_run": True,
+    }, headers=headers_dean_cse)
+    assert resp.status_code == 403
+
+    resp = client.post("/api/v1/integrations/sftp/export", json={
+        "session_id": "sess-mixed-1",
+    }, headers=headers_dean_cse)
+    assert resp.status_code == 403
+
