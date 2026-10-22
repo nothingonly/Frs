@@ -344,6 +344,58 @@ def test_mixed_session_listing_and_closing_require_every_group_scope(matrix_clie
         )
         assert denied.status_code == 403
 
+
+def test_people_identity_routes_fail_closed_for_unscoped_deans(matrix_client):
+    client, sessions = matrix_client
+    settings = get_settings()
+    dean_cse = create_access_token(
+        sub="dean-cse", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu", department_id="dept-cse",
+    )
+    headers = {"Authorization": f"Bearer {dean_cse}"}
+    people = client.get("/api/v1/admin/people", headers=headers)
+    assert people.status_code == 200
+    assert {item["employee_id"] for item in people.json()["items"]} == {"STU001"}
+
+    missing_department = create_access_token(
+        sub="dean-no-dept", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.unknown@campus.edu",
+    )
+    missing_headers = {"Authorization": f"Bearer {missing_department}"}
+    assert client.get("/api/v1/admin/people", headers=missing_headers).status_code == 403
+    assert client.post(
+        "/api/v1/admin/people/STU002/deactivate", headers=missing_headers,
+    ).status_code == 403
+
+    unknown_department = create_access_token(
+        sub="dean-unknown-dept", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.unknown@campus.edu", department_id="dept-does-not-exist",
+    )
+    unknown_headers = {"Authorization": f"Bearer {unknown_department}"}
+    assert client.get("/api/v1/admin/people", headers=unknown_headers).status_code == 403
+    assert client.post(
+        "/api/v1/admin/people/STU002/reactivate", headers=unknown_headers,
+    ).status_code == 403
+
+    with sessions() as db:
+        assert db.get(Person, "per-2").is_active is True
+
+
+def test_dean_cannot_generate_arbitrary_cloudinary_signed_urls(matrix_client):
+    client, _ = matrix_client
+    settings = get_settings()
+    dean_cse = create_access_token(
+        sub="dean-cse", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu", department_id="dept-cse",
+    )
+    response = client.post(
+        "/api/v1/admin/storage/signed-url",
+        json={"public_id": "frs/faces/STU002", "expires_in_seconds": 300},
+        headers={"Authorization": f"Bearer {dean_cse}"},
+    )
+    assert response.status_code == 403
+
+
 def test_dean_cross_department_audit_forbidden(matrix_client):
     client, _ = matrix_client
     settings = get_settings()

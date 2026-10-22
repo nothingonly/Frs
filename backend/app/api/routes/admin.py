@@ -183,10 +183,11 @@ def list_people(
     statement = select(Person)
     if active_only:
         statement = statement.where(Person.is_active.is_(True))
-    if actor.role == ROLE_DEAN and actor.department_id:
-        dept = db.get(Department, actor.department_id)
-        if dept:
-            statement = statement.where(Person.department == dept.code)
+    if actor.role == ROLE_DEAN:
+        dept = db.get(Department, actor.department_id) if actor.department_id else None
+        if dept is None or not dept.is_active:
+            raise HTTPException(status_code=403, detail="Dean token must reference an existing active department.")
+        statement = statement.where(Person.department == dept.code)
     elif actor.role == ROLE_FACULTY:
         if not actor.class_group_ids:
             return {"items": [], "limit": limit, "offset": offset, "total": 0}
@@ -200,6 +201,8 @@ def list_people(
             )
         )
         statement = statement.where(Person.person_id.in_(subq))
+    elif actor.role != ROLE_SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Forbidden: role cannot list person identities.")
 
     people = db.execute(statement.order_by(Person.employee_id).limit(limit).offset(offset)).scalars().all()
     return {
@@ -227,10 +230,10 @@ def deactivate_person(
     person = db.execute(select(Person).where(Person.employee_id == employee_id).with_for_update()).scalar_one_or_none()
     if person is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
-    if actor.role == ROLE_DEAN and actor.department_id:
-        dept = db.get(Department, actor.department_id)
-        if dept and person.department != dept.code:
-            raise HTTPException(status_code=403, detail="Deans can only modify identities in their department.")
+    if actor.role == ROLE_DEAN:
+        dept = db.get(Department, actor.department_id) if actor.department_id else None
+        if dept is None or not dept.is_active or person.department != dept.code:
+            raise HTTPException(status_code=403, detail="Dean must have an active department scope matching this identity.")
     if person.is_active:
         person.is_active = False
         person.updated_at = datetime.now(timezone.utc)
@@ -972,8 +975,16 @@ def get_storage_status(
 def get_signed_storage_url(
     payload: SignedUrlRequest,
     request: Request,
-    _actor: Annotated[TokenClaims, Depends(scoped_admin)],
+    actor: Annotated[TokenClaims, Depends(scoped_admin)],
 ):
+    # Media public IDs are not linked to a department-scoped ownership record. Until that
+    # relationship exists, only Super Admin may mint signed URLs; allowing arbitrary Dean
+    # public IDs would let a caller preview another department's biometric media.
+    if actor.role != ROLE_SUPER_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Super Administrators can generate signed URLs until media ownership is department-scoped.",
+        )
     storage = getattr(request.app.state, "storage", None)
     if not storage or not storage.is_configured:
         raise HTTPException(status_code=503, detail="Cloud storage is not configured.")
