@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
+from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -154,8 +156,20 @@ class Settings(BaseSettings):
             ):
                 raise ValueError(
                     "Production startup refused: SQLite is not permitted in production. "
-                    "Configure a production PostgreSQL database URL (postgresql+psycopg2:// or postgresql://)."
+                    "Configure FRS_DATABASE_URL with a production PostgreSQL URL (postgresql+psycopg:// or postgresql://)."
                 )
+            # Render runs outside the repository's Docker Compose network, so the
+            # Compose service name "db" cannot resolve there. Detect this misconfiguration
+            # before SQLAlchemy attempts a connection and emits an opaque DNS error.
+            if os.getenv("RENDER", "").strip().lower() == "true":
+                database_host = urlsplit(db_url).hostname
+                if database_host and database_host.lower() == "db":
+                    raise ValueError(
+                        "Render production startup refused: FRS_DATABASE_URL points to the "
+                        "Docker Compose-only hostname 'db'. Set it to the Render PostgreSQL "
+                        "Internal Database URL (when services share a region) or another "
+                        "database URL reachable from this Render service."
+                    )
             if not self.device_keys or any(len(token) < 32 for token in self.device_keys):
                 raise ValueError("Production requires device API keys of at least 32 characters")
             if len(self.admin_api_key) < 32:
