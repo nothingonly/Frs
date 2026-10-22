@@ -18,8 +18,9 @@ export type AttendanceRecord = {
   employee_id: string;
   punch_type: string;
   timestamp: string;
-  similarity_score: number;
-  threshold: number;
+  similarity_score: number | null;
+  threshold: number | null;
+  evidence_type?: "BIOMETRIC" | "HUMAN_VERIFIED";
   client_device_id: string;
   pipeline_version: string;
   evidence_id: string;
