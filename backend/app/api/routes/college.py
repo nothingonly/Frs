@@ -10,7 +10,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.api.dependencies import (
     ROLE_DEAN,
@@ -512,13 +512,44 @@ def list_attendance_sessions(
     class_group_id: str | None = None, limit: int = Query(default=100, ge=1, le=500),
 ):
     stmt = select(AttendanceSession)
-    if actor.role == ROLE_DEAN and actor.department_id:
-        stmt = stmt.join(ClassGroup, ClassGroup.class_group_id == AttendanceSession.class_group_id).where(
-            ClassGroup.department_id == actor.department_id
+
+    # For a mixed session, every linked class group is part of the protected resource.
+    # Filtering only by the primary class group would disclose mixed sessions to a single
+    # department/faculty member whose scope does not cover the other participating groups.
+    if actor.role == ROLE_DEAN:
+        if not actor.department_id:
+            return {"items": []}
+        linked_group = aliased(ClassGroup)
+        foreign_link = (
+            select(SessionClassGroup.session_id)
+            .join(linked_group, linked_group.class_group_id == SessionClassGroup.class_group_id)
+            .where(
+                SessionClassGroup.session_id == AttendanceSession.session_id,
+                linked_group.department_id != actor.department_id,
+            )
+            .exists()
         )
-    elif actor.role == ROLE_FACULTY and actor.class_group_ids:
-        stmt = stmt.where(AttendanceSession.class_group_id.in_(actor.class_group_ids))
-    elif actor.role == ROLE_FACULTY and not actor.class_group_ids:
+        stmt = (
+            stmt.join(ClassGroup, ClassGroup.class_group_id == AttendanceSession.class_group_id)
+            .where(ClassGroup.department_id == actor.department_id, ~foreign_link)
+        )
+    elif actor.role == ROLE_FACULTY:
+        allowed = tuple(actor.class_group_ids)
+        if not allowed:
+            return {"items": []}
+        foreign_link = (
+            select(SessionClassGroup.session_id)
+            .where(
+                SessionClassGroup.session_id == AttendanceSession.session_id,
+                ~SessionClassGroup.class_group_id.in_(allowed),
+            )
+            .exists()
+        )
+        stmt = stmt.where(
+            AttendanceSession.class_group_id.in_(allowed),
+            ~foreign_link,
+        )
+    elif actor.role != ROLE_SUPER_ADMIN:
         return {"items": []}
 
     if class_group_id:
@@ -529,9 +560,9 @@ def list_attendance_sessions(
         if actor.role == ROLE_FACULTY and class_group_id not in actor.class_group_ids:
             raise HTTPException(status_code=403, detail=f"Forbidden: actor lacks authority over class group '{class_group_id}'.")
         stmt = stmt.where(AttendanceSession.class_group_id == class_group_id)
+
     rows = db.execute(stmt.order_by(AttendanceSession.starts_at.desc()).limit(limit)).scalars().all()
     return {"items": [_session(row, db) for row in rows]}
-
 
 @router.post("/attendance-sessions", status_code=201)
 def create_attendance_session(
@@ -611,14 +642,27 @@ def close_attendance_session(
     ).with_for_update()).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
-    group = db.get(ClassGroup, row.class_group_id)
-    check_class_access(actor, row.class_group_id, group.department_id if group else None)
+
+    linked_ids = db.execute(
+        select(SessionClassGroup.class_group_id).where(
+            SessionClassGroup.session_id == row.session_id
+        )
+    ).scalars().all()
+    group_ids = tuple(dict.fromkeys([row.class_group_id, *linked_ids]))
+    groups = db.execute(
+        select(ClassGroup).where(ClassGroup.class_group_id.in_(group_ids))
+    ).scalars().all()
+    if not group_ids or {group.class_group_id for group in groups} != set(group_ids):
+        raise HTTPException(status_code=409, detail="Attendance session references a missing class group.")
+    for group in groups:
+        check_class_access(actor, group.class_group_id, group.department_id)
+
     if row.status == "CANCELLED":
         raise HTTPException(status_code=409, detail="A cancelled attendance session cannot be closed.")
     if row.status == "OPEN":
         row.status, row.ends_at = "CLOSED", datetime.now(timezone.utc)
         _audit(db, actor, "attendance_session.close", "CLOSED", row.session_id, {
-            "class_group_id": row.class_group_id,
+            "class_group_ids": list(group_ids),
         })
         db.commit()
     return _session(row)

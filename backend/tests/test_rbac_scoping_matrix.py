@@ -299,6 +299,33 @@ def test_mixed_session_exports_and_absentee_lists_include_all_groups(matrix_clie
         assert {student["student_number"] for student in absentees} == {"STU001", "STU002"}
 
 
+
+def test_mixed_session_listing_and_closing_require_every_group_scope(matrix_client):
+    client, _ = matrix_client
+    settings = get_settings()
+    dean_cse = create_access_token(
+        sub="dean-cse", role=ROLE_DEAN, secret=settings.effective_jwt_secret,
+        email="dean.cse@campus.edu", department_id="dept-cse",
+    )
+    faculty_cse = create_access_token(
+        sub="fac-cse", role=ROLE_FACULTY, secret=settings.effective_jwt_secret,
+        email="prof.cse@campus.edu", class_group_ids=["cg-cse-a"],
+    )
+
+    for token in (dean_cse, faculty_cse):
+        headers = {"Authorization": f"Bearer {token}"}
+        sessions = client.get("/api/v1/admin/college/attendance-sessions", headers=headers)
+        assert sessions.status_code == 200
+        visible_ids = {item["session_id"] for item in sessions.json()["items"]}
+        assert "sess-mixed-1" not in visible_ids
+        assert "sess-cse-1" in visible_ids
+
+        denied = client.post(
+            "/api/v1/admin/college/attendance-sessions/sess-mixed-1/close",
+            headers=headers,
+        )
+        assert denied.status_code == 403
+
 def test_dean_cross_department_audit_forbidden(matrix_client):
     client, _ = matrix_client
     settings = get_settings()
