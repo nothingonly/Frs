@@ -26,9 +26,9 @@ RUN useradd --system --uid 10001 --create-home frs \
     && chown -R frs:frs /srv/frs /data /models
 
 USER frs
-EXPOSE 8000
+EXPOSE 8000 10000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-  CMD curl --fail http://127.0.0.1:8000/health/live || exit 1
+  CMD curl --fail "http://127.0.0.1:${PORT:-8000}/health/live" || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1 --proxy-headers"]
