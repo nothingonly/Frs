@@ -94,3 +94,22 @@ def test_compose_database_hostname_remains_valid_outside_render(monkeypatch: pyt
     )
 
     settings.validate_startup_security()
+
+
+
+@pytest.mark.parametrize(
+    ("database_url", "expected"),
+    [
+        ("postgres://frs:password@db.example.com:5432/frs", "postgresql+psycopg://frs:password@db.example.com:5432/frs"),
+        ("postgresql://frs:password@db.example.com:5432/frs", "postgresql+psycopg://frs:password@db.example.com:5432/frs"),
+        ("postgresql+psycopg2://frs:password@db.example.com:5432/frs", "postgresql+psycopg://frs:password@db.example.com:5432/frs"),
+        ("postgresql+psycopg://frs:password@db.example.com:5432/frs", "postgresql+psycopg://frs:password@db.example.com:5432/frs"),
+    ],
+)
+def test_postgresql_urls_use_installed_psycopg3_driver(
+    database_url: str,
+    expected: str,
+) -> None:
+    settings = Settings(_env_file=None, database_url=database_url)
+
+    assert settings.database_url == expected
