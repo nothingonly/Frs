@@ -12,6 +12,8 @@ from sqlalchemy.pool import StaticPool
 from app.api.dependencies import ROLE_DEAN, ROLE_FACULTY, ROLE_KIOSK, ROLE_SUPER_ADMIN, SessionActor
 from app.api.routes.attendance import _can_access_session, router as attendance_router
 from app.api.dependencies import session_actor
+from app.core.auth import create_access_token
+from app.core.config import Settings, get_settings
 from app.database import Base, get_db
 from app.db.entities import AttendanceSession, ClassGroup, Department, SessionClassGroup
 
@@ -115,3 +117,75 @@ def test_roster_route_denies_mixed_session_for_single_department_actor(scope_db:
         assert denied.status_code == 403
         allowed = client.get("/api/v1/attendance/sessions/session-cse/roster")
         assert allowed.status_code == 200
+
+
+
+def test_signed_jwt_scope_is_enforced_through_real_session_actor_dependency(
+    scope_db: Session,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        env="development",
+        jwt_secret="unit-test-signing-secret-not-used-in-production",
+        jwt_issuer="frs-auth",
+    )
+    app = FastAPI()
+    app.include_router(attendance_router)
+
+    def override_get_db():
+        yield scope_db
+
+    class StubPipeline:
+        def get_session_roster(self, _db, _session_id):
+            return [{"student_id": "test"}]
+
+    app.state.pipeline = StubPipeline()
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    cse_token = create_access_token(
+        sub="faculty-cse",
+        role=ROLE_FACULTY,
+        secret=settings.jwt_secret,
+        email="faculty-cse@campus.test",
+        class_group_ids=["cg-cse"],
+        issuer=settings.jwt_issuer,
+    )
+    mixed_scope_token = create_access_token(
+        sub="faculty-joint",
+        role=ROLE_FACULTY,
+        secret=settings.jwt_secret,
+        email="faculty-joint@campus.test",
+        class_group_ids=["cg-cse", "cg-ece"],
+        issuer=settings.jwt_issuer,
+    )
+    dean_token = create_access_token(
+        sub="dean-cse",
+        role=ROLE_DEAN,
+        secret=settings.jwt_secret,
+        email="dean-cse@campus.test",
+        department_id="dept-cse",
+        issuer=settings.jwt_issuer,
+    )
+
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {cse_token}"}
+        assert client.get(
+            "/api/v1/attendance/sessions/session-cse/roster", headers=headers
+        ).status_code == 200
+        assert client.get(
+            "/api/v1/attendance/sessions/session-mixed/roster", headers=headers
+        ).status_code == 403
+
+        both_headers = {"Authorization": f"Bearer {mixed_scope_token}"}
+        assert client.get(
+            "/api/v1/attendance/sessions/session-mixed/roster", headers=both_headers
+        ).status_code == 200
+
+        dean_headers = {"Authorization": f"Bearer {dean_token}"}
+        assert client.get(
+            "/api/v1/attendance/sessions/session-cse/roster", headers=dean_headers
+        ).status_code == 200
+        assert client.get(
+            "/api/v1/attendance/sessions/session-mixed/roster", headers=dean_headers
+        ).status_code == 403
