@@ -168,6 +168,36 @@ def test_followup_counts_all_groups_and_distinct_students(followup_db):
     assert evidence["notifications"]["skipped_count"] == 1
 
 
+
+@pytest.mark.parametrize(
+    "manual_pipeline",
+    ["manual-administrative-entry", "manual-administrative-review"],
+)
+def test_followup_counts_manual_attendance_as_present(followup_db, manual_pipeline):
+    manual_event = AttendanceEvent(
+        attendance_id=f"manual-{manual_pipeline}",
+        person_id="p-2",
+        employee_id="STU02",
+        punch_type="CHECK_IN",
+        timestamp=datetime.now(timezone.utc),
+        similarity_score=0.0,
+        threshold=1.0,
+        client_device_id="manual-demo",
+        pipeline_version=manual_pipeline,
+        evidence_id=f"manual-evidence-{manual_pipeline}",
+        attendance_session_id="sess-closed",
+    )
+    followup_db.add(manual_event)
+    followup_db.commit()
+
+    evidence = AttendanceFollowupDaemon().reconcile_session(
+        followup_db, followup_db.get(AttendanceSession, "sess-closed")
+    )
+    assert evidence["total_enrolled"] == 2
+    assert evidence["present_count"] == 2
+    assert evidence["absent_count"] == 0
+    assert evidence["notifications"]["total_alerts"] == 0
+
 def test_followup_worker_detects_only_unreconciled_closed_sessions(followup_db):
     unreconciled = AttendanceFollowupDaemon.get_unreconciled_closed_sessions(followup_db)
     # Only sess-closed is picked up, sess-open is ignored

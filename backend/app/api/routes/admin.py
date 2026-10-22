@@ -682,7 +682,9 @@ def resolve_review_item(
     session_for_scope = db.get(AttendanceSession, job.attendance_session_id)
     if session_for_scope is None:
         raise HTTPException(status_code=404, detail="Associated attendance session not found.")
-    _check_session_scope(db, actor, session_for_scope)
+    scope_groups = _session_scope_groups(db, session_for_scope)
+    for scope_group in scope_groups:
+        check_class_access(actor, scope_group.class_group_id, scope_group.department_id)
 
     if job.status not in ("REJECTED", "FAILED"):
         raise HTTPException(status_code=409, detail="Only rejected or failed capture jobs can be reviewed.")
@@ -701,14 +703,27 @@ def resolve_review_item(
         if student is None or not student.is_active:
             raise HTTPException(status_code=404, detail="Student not found or inactive.")
 
+        session_group_ids = tuple(group.class_group_id for group in scope_groups)
+        if job.class_group_id not in session_group_ids:
+            raise HTTPException(status_code=409, detail="Capture job class group is outside its attendance session.")
         enrollment = db.execute(
             select(ClassEnrollment)
             .where(ClassEnrollment.student_id == student.student_id)
-            .where(ClassEnrollment.class_group_id == job.class_group_id)
+            .where(ClassEnrollment.class_group_id.in_(session_group_ids))
             .where(ClassEnrollment.status == "ACTIVE")
         ).scalar_one_or_none()
         if enrollment is None:
-            raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
+            raise HTTPException(status_code=409, detail="Student is not actively enrolled in this attendance session.")
+
+        existing_attendance = db.execute(
+            select(AttendanceEvent).where(
+                AttendanceEvent.attendance_session_id == sess.session_id,
+                AttendanceEvent.employee_id == student.student_number,
+                AttendanceEvent.punch_type == job.punch_type,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_attendance is not None:
+            raise HTTPException(status_code=409, detail="Attendance already exists for this student and punch type.")
 
         if not student.person_id:
             raise HTTPException(status_code=409, detail="Student has no biometric identity record.")
@@ -835,16 +850,43 @@ def manual_attendance_entry(
     sess = db.get(AttendanceSession, payload.attendance_session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
-    _check_session_scope(db, actor, sess)
+    if sess.status != "OPEN":
+        raise HTTPException(status_code=409, detail="Manual attendance can only be recorded for an open session.")
+    scope_groups = _session_scope_groups(db, sess)
+    for scope_group in scope_groups:
+        check_class_access(actor, scope_group.class_group_id, scope_group.department_id)
+        scope_department = db.get(Department, scope_group.department_id)
+        if not scope_group.is_active or scope_department is None or not scope_department.is_active:
+            raise HTTPException(status_code=409, detail="Manual attendance is unavailable because a session class group is inactive.")
+    session_group_ids = tuple(group.class_group_id for group in scope_groups)
 
     enrollment = db.execute(
         select(ClassEnrollment)
         .where(ClassEnrollment.student_id == student.student_id)
-        .where(ClassEnrollment.class_group_id == sess.class_group_id)
+        .where(ClassEnrollment.class_group_id.in_(session_group_ids))
         .where(ClassEnrollment.status == "ACTIVE")
     ).scalar_one_or_none()
     if enrollment is None:
-        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this session's class.")
+        raise HTTPException(status_code=409, detail="Student is not actively enrolled in this attendance session.")
+
+    existing_attendance = db.execute(
+        select(AttendanceEvent).where(
+            AttendanceEvent.attendance_session_id == sess.session_id,
+            AttendanceEvent.employee_id == student.student_number,
+            AttendanceEvent.punch_type == payload.punch_type,
+        ).limit(1)
+    ).scalar_one_or_none()
+    if existing_attendance is not None:
+        if (
+            existing_attendance.pipeline_version == "manual-administrative-entry"
+            and existing_attendance.punch_type == payload.punch_type
+        ):
+            return {
+                "status": "success",
+                "attendance_id": existing_attendance.attendance_id,
+                "idempotent_replay": True,
+            }
+        raise HTTPException(status_code=409, detail="Attendance already exists for this student and punch type.")
 
     if not student.person_id:
         person = Person(

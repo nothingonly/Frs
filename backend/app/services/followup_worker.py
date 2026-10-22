@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -96,7 +96,12 @@ class AttendanceFollowupDaemon:
             db.execute(
                 select(AttendanceEvent.person_id).where(
                     AttendanceEvent.attendance_session_id == session_id,
-                    AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
+                    or_(
+                        AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
+                        AttendanceEvent.pipeline_version.in_(
+                            ("manual-administrative-entry", "manual-administrative-review")
+                        ),
+                    ),
                 )
             ).scalars().all()
         )

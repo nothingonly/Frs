@@ -289,14 +289,32 @@ def test_production_sftp_rejects_request_supplied_trust_and_path(matrix_client, 
 def test_mixed_session_exports_and_absentee_lists_include_all_groups(matrix_client):
     _, testing_sessions = matrix_client
     with testing_sessions() as db:
+        ece_student = db.query(Student).filter_by(student_number="STU002").one()
+        db.add(AttendanceEvent(
+            attendance_id="evt-mixed-manual",
+            attendance_session_id="sess-mixed-1",
+            person_id=ece_student.person_id,
+            employee_id=ece_student.student_number,
+            punch_type="CHECK_IN",
+            timestamp=datetime.now(timezone.utc),
+            similarity_score=0.0,
+            threshold=1.0,
+            client_device_id="manual-demo",
+            pipeline_version="manual-administrative-review",
+            evidence_id="manual-review-evidence",
+        ))
+        db.commit()
+
         csv_text = CsvExportService.export_attendance_csv(db, "sess-mixed-1")
         assert "STU001" in csv_text
         assert "STU002" in csv_text
         # The ECE enrollment must not be mislabeled as the primary CSE group.
         assert ",ECE,A,STU002," in csv_text
+        ece_row = next(line for line in csv_text.splitlines() if "STU002" in line)
+        assert ",PRESENT,CHECK_IN,N/A," in ece_row
 
         absentees = AbsenteeAlertService.find_absentees(db, "sess-mixed-1")
-        assert {student["student_number"] for student in absentees} == {"STU001", "STU002"}
+        assert {student["student_number"] for student in absentees} == {"STU001"}
 
 
 

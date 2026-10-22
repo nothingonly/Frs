@@ -14,7 +14,7 @@ import socket
 import time
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import _b64url_decode, _b64url_encode
@@ -30,6 +30,11 @@ from app.db.entities import (
 )
 
 logger = logging.getLogger("frs.integrations")
+
+MANUAL_ATTENDANCE_PIPELINES = (
+    "manual-administrative-entry",
+    "manual-administrative-review",
+)
 
 
 def _session_class_group_ids(db: Session, session: AttendanceSession) -> tuple[str, ...]:
@@ -84,8 +89,14 @@ class CsvExportService:
             if previous is None:
                 events_by_person[event.person_id] = event
                 continue
-            event_is_match = event.similarity_score is not None and event.similarity_score >= event.threshold
-            previous_is_match = previous.similarity_score is not None and previous.similarity_score >= previous.threshold
+            event_is_match = (
+                event.pipeline_version in MANUAL_ATTENDANCE_PIPELINES
+                or (event.similarity_score is not None and event.similarity_score >= event.threshold)
+            )
+            previous_is_match = (
+                previous.pipeline_version in MANUAL_ATTENDANCE_PIPELINES
+                or (previous.similarity_score is not None and previous.similarity_score >= previous.threshold)
+            )
             if (event_is_match and not previous_is_match) or (
                 event_is_match == previous_is_match and event.similarity_score > previous.similarity_score
             ):
@@ -111,11 +122,20 @@ class CsvExportService:
             groups = record["groups"]
             event = events_by_person.get(student.person_id)
             is_present = bool(
-                event and event.similarity_score is not None and event.similarity_score >= event.threshold
+                event and (
+                    event.pipeline_version in MANUAL_ATTENDANCE_PIPELINES
+                    or (event.similarity_score is not None and event.similarity_score >= event.threshold)
+                )
             )
             status = "PRESENT" if is_present else ("RECORDED" if event else "ABSENT")
             punch_type = event.punch_type if event else "N/A"
-            score = f"{event.similarity_score:.3f}" if event and event.similarity_score is not None else "0.000"
+            score = (
+                "N/A"
+                if event and event.pipeline_version in MANUAL_ATTENDANCE_PIPELINES
+                else f"{event.similarity_score:.3f}"
+                if event and event.similarity_score is not None
+                else "0.000"
+            )
             timestamp = event.timestamp.isoformat() if event else "N/A"
             acad_years = sorted({item.academic_year for item in groups})
             departments = sorted(set(record["departments"]))
@@ -162,7 +182,10 @@ class AbsenteeAlertService:
             db.execute(
                 select(AttendanceEvent.person_id).where(
                     AttendanceEvent.attendance_session_id == session_id,
-                    AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
+                    or_(
+                        AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
+                        AttendanceEvent.pipeline_version.in_(MANUAL_ATTENDANCE_PIPELINES),
+                    ),
                 )
             ).scalars().all()
         )
