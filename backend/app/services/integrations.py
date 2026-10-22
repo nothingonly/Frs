@@ -51,26 +51,45 @@ class CsvExportService:
         if session is None:
             raise ValueError(f"Attendance session '{session_id}' not found.")
 
-        group = db.get(ClassGroup, session.class_group_id)
-        department = db.get(Department, group.department_id) if group else None
-
-        # A mixed session can include several class groups; include every active enrollment
-        # once even when the same student belongs to more than one linked group.
+        # Mixed sessions may span several departments/sections. Keep each student's actual
+        # membership metadata instead of incorrectly labeling every row as the primary group.
         group_ids = _session_class_group_ids(db, session)
-        enrollments = db.execute(
-            select(Student)
+        enrollment_rows = db.execute(
+            select(Student, ClassGroup, Department)
             .join(ClassEnrollment, Student.student_id == ClassEnrollment.student_id)
+            .join(ClassGroup, ClassGroup.class_group_id == ClassEnrollment.class_group_id)
+            .join(Department, Department.department_id == ClassGroup.department_id)
             .where(
                 ClassEnrollment.class_group_id.in_(group_ids),
                 ClassEnrollment.status == "ACTIVE",
             )
-        ).scalars().unique().all()
+            .order_by(Student.student_number, Department.code, ClassGroup.section)
+        ).all()
 
-        # Fetch attendance events for this session
+        enrollments: dict[str, dict[str, Any]] = {}
+        for student, class_group, department in enrollment_rows:
+            record = enrollments.setdefault(
+                student.student_id,
+                {"student": student, "groups": [], "departments": []},
+            )
+            record["groups"].append(class_group)
+            record["departments"].append(department.code)
+
         events = db.execute(
             select(AttendanceEvent).where(AttendanceEvent.attendance_session_id == session_id)
         ).scalars().all()
-        events_by_person = {e.person_id: e for e in events}
+        events_by_person: dict[str, AttendanceEvent] = {}
+        for event in events:
+            previous = events_by_person.get(event.person_id)
+            if previous is None:
+                events_by_person[event.person_id] = event
+                continue
+            event_is_match = event.similarity_score is not None and event.similarity_score >= event.threshold
+            previous_is_match = previous.similarity_score is not None and previous.similarity_score >= previous.threshold
+            if (event_is_match and not previous_is_match) or (
+                event_is_match == previous_is_match and event.similarity_score > previous.similarity_score
+            ):
+                events_by_person[event.person_id] = event
 
         output = io.StringIO()
         writer = csv.writer(output)
@@ -87,22 +106,26 @@ class CsvExportService:
             "Recorded At (UTC)",
         ])
 
-        dept_code = department.code if department else "UNKNOWN"
-        section_name = group.section if group else "UNKNOWN"
-        acad_year = group.academic_year if group else "UNKNOWN"
-
-        for student in enrollments:
+        for record in enrollments.values():
+            student = record["student"]
+            groups = record["groups"]
             event = events_by_person.get(student.person_id)
-            status = "PRESENT" if event and event.similarity_score >= event.threshold else ("RECORDED" if event else "ABSENT")
+            is_present = bool(
+                event and event.similarity_score is not None and event.similarity_score >= event.threshold
+            )
+            status = "PRESENT" if is_present else ("RECORDED" if event else "ABSENT")
             punch_type = event.punch_type if event else "N/A"
             score = f"{event.similarity_score:.3f}" if event and event.similarity_score is not None else "0.000"
             timestamp = event.timestamp.isoformat() if event else "N/A"
+            acad_years = sorted({item.academic_year for item in groups})
+            departments = sorted(set(record["departments"]))
+            sections = sorted({item.section for item in groups})
 
             writer.writerow([
                 session_id,
-                acad_year,
-                dept_code,
-                section_name,
+                ", ".join(acad_years),
+                ", ".join(departments),
+                ", ".join(sections),
                 student.student_number,
                 student.full_name,
                 status,
