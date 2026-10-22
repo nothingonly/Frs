@@ -78,8 +78,9 @@ def dispatch_session_absentee_alerts(
         check_class_access(actor, sess.class_group_id)
     elif actor.role == ROLE_DEAN:
         cg = db.get(ClassGroup, sess.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+        if cg is None:
+            raise HTTPException(status_code=404, detail="Session class group not found.")
+        check_department_access(actor, cg.department_id)
 
     try:
         absentees = AbsenteeAlertService.find_absentees(db, payload.session_id)
@@ -133,8 +134,9 @@ def trigger_sftp_attendance_export(
 
     if actor.role == ROLE_DEAN:
         cg = db.get(ClassGroup, sess.class_group_id)
-        if cg:
-            check_department_access(actor, cg.department_id)
+        if cg is None:
+            raise HTTPException(status_code=404, detail="Session class group not found.")
+        check_department_access(actor, cg.department_id)
 
     settings = get_settings()
     remote_path = payload.remote_path or settings.sftp_remote_path
