@@ -55,7 +55,7 @@ For Render:
 4. Keep the URL and credentials in Render's environment settings, never commit them to the repository.
 5. Trigger a deploy and inspect logs. If the hostname resolves but connection still fails, verify the database is available, the URL/credentials are correct, and the service has network access.
 
-Use the Render-provided URL as-is if the driver scheme is supported by the app; otherwise use the equivalent SQLAlchemy psycopg URL form (for example, `postgresql+psycopg://` with the same host, database, username, and password). Do not copy a real database URL into issues, commits, screenshots, or chat.
+The backend normalizes Render's common `postgres://` and `postgresql://` URL forms to `postgresql+psycopg://`, matching the installed psycopg v3 driver. Keep the URL's host, database, username, password, and connection options intact. Do not copy a real database URL into issues, commits, screenshots, or chat.
 
 For local Docker Compose only, the `@db:5432` hostname is correct because Compose creates the `db` service DNS name on its private network.
 
