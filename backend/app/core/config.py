@@ -164,13 +164,23 @@ class Settings(BaseSettings):
     def validate_startup_security(self) -> None:
         if self.minimum_identification_frames > self.maximum_identification_frames:
             raise ValueError("Minimum identification frames cannot exceed maximum frames")
-        # Render sets RENDER=true for deployed services. Fail closed instead of
-        # accidentally starting with development defaults and an ephemeral SQLite DB.
-        if os.getenv("RENDER", "").strip().lower() == "true" and self.env.lower() != "production":
-            raise ValueError(
-                "Render deployment refused: set FRS_ENV=production so production database, "
-                "credential, encryption, calibration, and model-provenance checks are enforced."
-            )
+        # Render sets RENDER=true for deployed services. Diagnose a stale Compose URL
+        # before enforcing environment mode, regardless of whether FRS_ENV was set correctly.
+        on_render = os.getenv("RENDER", "").strip().lower() == "true"
+        if on_render:
+            render_db_url = self.database_url.strip()
+            render_host = urlsplit(render_db_url).hostname
+            if render_host and render_host.lower() == "db":
+                raise ValueError(
+                    "Render startup refused: FRS_DATABASE_URL points to the Docker Compose-only "
+                    "hostname 'db'. Replace it with the Render PostgreSQL Internal Database URL "
+                    "(when services share a region) or another URL reachable from this service."
+                )
+            if self.env.lower() != "production":
+                raise ValueError(
+                    "Render deployment refused: set FRS_ENV=production so production database, "
+                    "credential, encryption, calibration, and model-provenance checks are enforced."
+                )
         if self.env.lower() == "production":
             db_url = self.database_url.lower().strip()
             if db_url.startswith("sqlite") or not (
@@ -180,18 +190,6 @@ class Settings(BaseSettings):
                     "Production startup refused: SQLite is not permitted in production. "
                     "Configure FRS_DATABASE_URL with a production PostgreSQL URL (postgresql+psycopg:// or postgresql://)."
                 )
-            # Render runs outside the repository's Docker Compose network, so the
-            # Compose service name "db" cannot resolve there. Detect this misconfiguration
-            # before SQLAlchemy attempts a connection and emits an opaque DNS error.
-            if os.getenv("RENDER", "").strip().lower() == "true":
-                database_host = urlsplit(db_url).hostname
-                if database_host and database_host.lower() == "db":
-                    raise ValueError(
-                        "Render production startup refused: FRS_DATABASE_URL points to the "
-                        "Docker Compose-only hostname 'db'. Set it to the Render PostgreSQL "
-                        "Internal Database URL (when services share a region) or another "
-                        "database URL reachable from this Render service."
-                    )
             if not self.device_keys or any(len(token) < 32 for token in self.device_keys):
                 raise ValueError("Production requires device API keys of at least 32 characters")
             if len(self.admin_api_key) < 32:
