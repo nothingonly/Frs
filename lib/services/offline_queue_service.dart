@@ -236,7 +236,7 @@ class OfflineQueueService {
       if (nonce.length != 16) return <Uint8List>[];
 
       const headerLen = 6;
-      final maxPackedLen = maxBurstBytes + headerLen + (maxFramesPerBatch * 4);
+      const maxPackedLen = maxBurstBytes + headerLen + (maxFramesPerBatch * 4);
       if (rawPayload.length < headerLen + (3 * 4) + _checksumLen ||
           rawPayload.length > maxPackedLen + _checksumLen) {
         return <Uint8List>[];
