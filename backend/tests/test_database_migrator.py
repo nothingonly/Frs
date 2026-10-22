@@ -170,7 +170,7 @@ def test_assert_production_schema_halts_on_pending_migrations(monkeypatch) -> No
     # Mock verify_all_migrations to simulate pending migration
     monkeypatch.setattr("app.db.migrator.verify_all_migrations", lambda eng: (False, ["0005_future_migration"]))
 
-    with pytest.raises(RuntimeError, match="Production startup halted: Database schema is out of date"):
+    with pytest.raises(RuntimeError, match="Production startup halted: database migration state is not ready"):
         assert_production_schema_ready(engine)
 
 
