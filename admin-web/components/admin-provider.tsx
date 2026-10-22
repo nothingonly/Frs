@@ -67,55 +67,21 @@ const AdminContext = createContext<AdminContextValue | null>(null);
 const initialApiBase = process.env.NEXT_PUBLIC_FRS_API_BASE_URL || "http://127.0.0.1:8000";
 
 export function AdminProvider({ children }: { children: ReactNode }) {
-  const [apiBase, setApiBaseState] = useState(() => {
-    if (typeof window !== "undefined") {
-      try {
-        return window.sessionStorage.getItem("frs_api_base") || initialApiBase;
-      } catch {
-        return initialApiBase;
-      }
-    }
-    return initialApiBase;
-  });
-  const [apiKey, setApiKeyState] = useState(() => {
-    if (typeof window !== "undefined") {
-      try {
-        return window.sessionStorage.getItem("frs_admin_key") || "";
-      } catch {
-        return "";
-      }
-    }
-    return "";
-  });
+  // Keep initial client state identical to server-rendered state to avoid hydration
+  // mismatches. The administrator bearer key is deliberately memory-only.
+  const [apiBase, setApiBaseState] = useState(initialApiBase);
+  const [apiKey, setApiKeyState] = useState("");
   const [isConnected, setIsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   const setApiKey = useCallback((value: string) => {
     setApiKeyState(value);
-    try {
-      if (value) {
-        window.sessionStorage.setItem("frs_admin_key", value);
-      } else {
-        window.sessionStorage.removeItem("frs_admin_key");
-      }
-    } catch {
-      // Ignore
-    }
   }, []);
 
   const setApiBase = useCallback((value: string) => {
     setApiBaseState(value);
     setIsConnected(false);
     setConnectionError(null);
-    try {
-      if (value) {
-        window.sessionStorage.setItem("frs_api_base", value);
-      } else {
-        window.sessionStorage.removeItem("frs_api_base");
-      }
-    } catch {
-      // Ignore
-    }
   }, []);
 
   const normalizedBase = apiBase.trim().replace(/\/+$/, "");
