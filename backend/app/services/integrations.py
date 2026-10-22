@@ -135,7 +135,9 @@ class AbsenteeAlertService:
                     "student_id": s.student_id,
                     "student_number": s.student_number,
                     "full_name": s.full_name,
-                    "email": s.email or f"{s.student_number.lower()}@campus.edu",
+                    # Never synthesize a recipient address. Missing contact information must
+                    # result in a visible skipped delivery, not a guessed destination.
+                    "email": (s.email or "").strip(),
                     "session_id": session_id,
                 })
         return absentees
@@ -465,7 +467,15 @@ class NotificationManager:
         channel: str = "email",
         contact_address: str | None = None,
     ) -> dict[str, Any]:
-        recipient = contact_address or (f"{student_number.lower()}@campus.edu" if channel == "email" else student_number)
+        recipient = (contact_address or "").strip()
+        if not recipient:
+            return {
+                "status": "SKIPPED_NO_VERIFIED_CONTACT",
+                "recipient": "",
+                "channel": channel,
+                "reason": "No contact address was supplied for this student.",
+                "timestamp": int(time.time()),
+            }
         subject = f"Attendance Notice - Session {session_id}"
         body = (
             f"Dear {student_name},\n\n"
@@ -482,6 +492,7 @@ class NotificationManager:
         sent_count = 0
         mocked_count = 0
         failed_count = 0
+        skipped_count = 0
         for a in absentees:
             res = self.send_absentee_alert(
                 student_name=a.get("full_name", "Student"),
@@ -496,6 +507,8 @@ class NotificationManager:
                 sent_count += 1
             elif st in ("SENT_MOCK", "FAILED_FALLBACK_MOCK"):
                 mocked_count += 1
+            elif st == "SKIPPED_NO_VERIFIED_CONTACT":
+                skipped_count += 1
             else:
                 failed_count += 1
 
@@ -504,7 +517,8 @@ class NotificationManager:
             "sent_count": sent_count,
             "mocked_count": mocked_count,
             "failed_count": failed_count,
-            "is_mock": bool(mocked_count > 0 and sent_count == 0),
+            "skipped_count": skipped_count,
+            "is_mock": bool(mocked_count > 0 and sent_count == 0 and skipped_count == 0),
             "channel": channel,
             "alerts": results,
         }
