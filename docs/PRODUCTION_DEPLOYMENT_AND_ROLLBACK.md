@@ -59,6 +59,8 @@ The backend normalizes Render's common `postgres://` and `postgresql://` URL for
 
 For local Docker Compose only, the `@db:5432` hostname is correct because Compose creates the `db` service DNS name on its private network.
 
+The backend Docker image does not bake in a database URL or placeholder credentials. On Render, set `FRS_ENV=production` and `FRS_DATABASE_URL` in the service's Environment settings; startup intentionally fails closed if production configuration is missing or still points at the Compose-only `db` hostname. The Dockerfile binds Uvicorn and its container health check to `${PORT:-8000}` (Render defaults `PORT` to `10000`; local Compose defaults to `8000`).
+
 ### 2.3 Environment Variables (Production)
 
 | Variable | Description | Required in Production |
