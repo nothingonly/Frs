@@ -1,5 +1,7 @@
 FROM python:3.11-slim-bookworm
 
+# Database credentials are supplied at deployment/runtime. Do not bake a Compose-only
+# hostname or placeholder secret into the image; production startup requires FRS_DATABASE_URL.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -23,7 +25,6 @@ RUN useradd --system --uid 10001 --create-home frs \
     && mkdir -p /data /models/insightface/models \
     && chown -R frs:frs /srv/frs /data /models
 
-ENV FRS_DATABASE_URL=postgresql+psycopg://frs:configure-a-real-password@db:5432/frs
 USER frs
 EXPOSE 8000
 
