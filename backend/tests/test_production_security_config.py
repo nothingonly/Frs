@@ -113,3 +113,12 @@ def test_postgresql_urls_use_installed_psycopg3_driver(
     settings = Settings(_env_file=None, database_url=database_url)
 
     assert settings.database_url == expected
+
+
+
+def test_render_rejects_nonproduction_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    settings = Settings(_env_file=None, env="development")
+
+    with pytest.raises(ValueError, match="set FRS_ENV=production"):
+        settings.validate_startup_security()
