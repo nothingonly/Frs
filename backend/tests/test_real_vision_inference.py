@@ -162,12 +162,14 @@ def test_similarity_and_class_scoped_retrieval() -> None:
     assert diff < ambiguity_margin  # 0.02 < 0.05 -> Must be rejected as AMBIGUOUS
 
 
-def test_production_license_attestation_enforced() -> None:
-    """Production startup must strictly fail if model license attestation is false."""
+def test_production_model_license_boolean_cannot_override_restrictive_weights() -> None:
+    """Production must reject the known research-only Buffalo_L manifest even if the legacy boolean is true."""
     settings = Settings(
         _env_file=None,
         env="production",
         database_url="postgresql://frs:password@localhost:5432/frs",
+        model_root="model-artifacts/insightface",
+        model_pack="buffalo_l",
         device_api_keys="device-key-must-be-at-least-32-characters-long",
         admin_api_key="admin-key-must-be-at-least-32-characters-long",
         data_encryption_key=base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"),
@@ -175,15 +177,16 @@ def test_production_license_attestation_enforced() -> None:
         calibrated_models_csv="ArcFace",
         require_liveness=False,
         require_all_specialists=False,
-        model_license_attested=False,  # Unattested
+        model_license_attested=False,
     )
 
-    with pytest.raises(ValueError, match="Production requires explicit verification of every model-weight license"):
-        settings.validate_startup_security()
+    with pytest.raises(VisionError, match="Production startup blocked: SCRFD weights have restrictive terms"):
+        VisionEngine(settings)
 
-    # Once attested with commercial compliance acknowledged, validation proceeds
+    # The deprecated boolean is intentionally informational: it must not bypass the manifest.
     settings.model_license_attested = True
-    settings.validate_startup_security()
+    with pytest.raises(VisionError, match="Production startup blocked: SCRFD weights have restrictive terms"):
+        VisionEngine(settings)
 
 
 def test_production_rejects_sqlite_database() -> None:
