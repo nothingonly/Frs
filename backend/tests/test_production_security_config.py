@@ -25,6 +25,25 @@ def production_settings(**overrides: object) -> Settings:
     return Settings(**values)
 
 
+
+def test_arcface_model_list_does_not_override_calibration_gate() -> None:
+    settings = Settings(
+        _env_file=None,
+        env="development",
+        threshold_calibrated=False,
+        calibrated_models_csv="ArcFace",
+    )
+
+    assert settings.is_model_calibrated("ArcFace") is False
+
+
+def test_production_rejects_missing_arcface_threshold_value() -> None:
+    settings = production_settings(model_thresholds_json='{"UnrelatedModel": 0.5}')
+
+    with pytest.raises(ValueError, match="No calibrated threshold configured for ArcFace"):
+        settings.validate_startup_security()
+
+
 def test_production_requires_explicit_jwt_secret() -> None:
     settings = production_settings(jwt_secret="")
 
