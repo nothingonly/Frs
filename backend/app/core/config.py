@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     )
 
     env: str = "development"
-    database_url: str = "sqlite:///./frs.db"
+    database_url: str = Field(default="sqlite:///./frs.db", validation_alias=AliasChoices("FRS_DATABASE_URL", "DATABASE_URL"))
     device_api_keys: str = ""
     admin_api_key: str = ""
     data_encryption_key: str = ""
