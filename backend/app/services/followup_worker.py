@@ -15,7 +15,13 @@ from app.core.config import get_settings
 from app.core.logging_config import setup_logging
 from app.core.metrics import get_metrics
 from app.database import SessionLocal, create_schema
-from app.db.entities import AttendanceEvent, AttendanceSession, AuditEvent, ClassEnrollment
+from app.db.entities import (
+    AttendanceEvent,
+    AttendanceSession,
+    AuditEvent,
+    ClassEnrollment,
+    SessionClassGroup,
+)
 from app.services.integrations import (
     AbsenteeAlertService,
     NotificationManager,
@@ -66,24 +72,35 @@ class AttendanceFollowupDaemon:
         logger.info("Reconciling attendance follow-up for closed session '%s'...", session_id)
 
         # 1. Total active enrollments
+        linked_group_ids = db.execute(
+            select(SessionClassGroup.class_group_id).where(
+                SessionClassGroup.session_id == session_id
+            )
+        ).scalars().all()
+        session_group_ids = tuple(dict.fromkeys([session.class_group_id, *linked_group_ids]))
+
         total_enrolled = len(
-            db.execute(
-                select(ClassEnrollment).where(
-                    ClassEnrollment.class_group_id == session.class_group_id,
-                    ClassEnrollment.status == "ACTIVE",
-                )
-            ).scalars().all()
+            set(
+                db.execute(
+                    select(ClassEnrollment.student_id).where(
+                        ClassEnrollment.class_group_id.in_(session_group_ids),
+                        ClassEnrollment.status == "ACTIVE",
+                    )
+                ).scalars().all()
+            )
         )
 
-        # 2. Present events
-        present_count = len(
+        # 2. Count distinct people, not punch events. A check-in and check-out or a
+        # repeated event must not inflate the session's present-student count.
+        present_person_ids = set(
             db.execute(
-                select(AttendanceEvent).where(
+                select(AttendanceEvent.person_id).where(
                     AttendanceEvent.attendance_session_id == session_id,
                     AttendanceEvent.similarity_score >= AttendanceEvent.threshold,
                 )
             ).scalars().all()
         )
+        present_count = len(present_person_ids)
 
         # 3. Absentees
         absentees = AbsenteeAlertService.find_absentees(db, session_id)
