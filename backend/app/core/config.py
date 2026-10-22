@@ -164,6 +164,13 @@ class Settings(BaseSettings):
     def validate_startup_security(self) -> None:
         if self.minimum_identification_frames > self.maximum_identification_frames:
             raise ValueError("Minimum identification frames cannot exceed maximum frames")
+        # Render sets RENDER=true for deployed services. Fail closed instead of
+        # accidentally starting with development defaults and an ephemeral SQLite DB.
+        if os.getenv("RENDER", "").strip().lower() == "true" and self.env.lower() != "production":
+            raise ValueError(
+                "Render deployment refused: set FRS_ENV=production so production database, "
+                "credential, encryption, calibration, and model-provenance checks are enforced."
+            )
         if self.env.lower() == "production":
             db_url = self.database_url.lower().strip()
             if db_url.startswith("sqlite") or not (
