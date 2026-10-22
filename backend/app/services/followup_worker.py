@@ -67,8 +67,41 @@ class AttendanceFollowupDaemon:
         return list(db.execute(statement).scalars().all())
 
     def reconcile_session(self, db: Session, session: AttendanceSession) -> dict[str, Any]:
-        """Perform reconciliation, absentee notification, and optional SFTP export for a closed session."""
+        """Perform reconciliation once per closed session, serializing concurrent workers."""
         session_id = session.session_id
+
+        # Use the session row as a per-session claim. PostgreSQL workers attempting the same
+        # session serialize here; the winner holds the lock through delivery and audit commit.
+        # The post-lock audit recheck prevents another worker from dispatching duplicate work
+        # after waiting for a previous worker's successful commit.
+        locked_session = db.execute(
+            select(AttendanceSession)
+            .where(AttendanceSession.session_id == session_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if locked_session is None:
+            raise ValueError(f"Attendance session '{session_id}' no longer exists.")
+        session = locked_session
+        if session.status != "CLOSED":
+            db.rollback()
+            raise ValueError(f"Attendance session '{session_id}' is no longer closed.")
+
+        prior_reconciliation = db.execute(
+            select(AuditEvent.audit_id)
+            .where(
+                AuditEvent.session_id == session_id,
+                AuditEvent.action == "attendance.followup_reconciled",
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if prior_reconciliation is not None:
+            db.rollback()
+            return {
+                "session_id": session_id,
+                "status": "SKIPPED_ALREADY_RECONCILED",
+            }
+
         logger.info("Reconciling attendance follow-up for closed session '%s'...", session_id)
 
         # 1. Total active enrollments
@@ -202,9 +235,13 @@ class AttendanceFollowupDaemon:
                 if self._shutdown_requested:
                     break
                 try:
-                    self.reconcile_session(db, session)
-                    reconciled_count += 1
+                    result = self.reconcile_session(db, session)
+                    if result.get("status") != "SKIPPED_ALREADY_RECONCILED":
+                        reconciled_count += 1
                 except Exception:
+                    # A database error can leave the transaction failed and the session row
+                    # locked. Reset the unit of work before processing the next session.
+                    db.rollback()
                     logger.exception("Failed to reconcile closed session '%s'", session.session_id)
 
             return reconciled_count

@@ -198,6 +198,29 @@ def test_followup_counts_manual_attendance_as_present(followup_db, manual_pipeli
     assert evidence["absent_count"] == 0
     assert evidence["notifications"]["total_alerts"] == 0
 
+def test_reconcile_session_skips_when_another_worker_already_committed(followup_db):
+    followup_db.add(AuditEvent(
+        session_id="sess-closed",
+        actor_type="scheduler",
+        actor_id="another-worker",
+        action="attendance.followup_reconciled",
+        decision_state="RECONCILED",
+        reason_codes_json='["ALREADY_DONE"]',
+        evidence_json='{"session_id":"sess-closed"}',
+        occurred_at=datetime.now(timezone.utc),
+    ))
+    followup_db.commit()
+
+    result = AttendanceFollowupDaemon().reconcile_session(
+        followup_db, followup_db.get(AttendanceSession, "sess-closed")
+    )
+
+    assert result["status"] == "SKIPPED_ALREADY_RECONCILED"
+    assert followup_db.query(AuditEvent).filter_by(
+        session_id="sess-closed", action="attendance.followup_reconciled"
+    ).count() == 1
+
+
 def test_followup_worker_detects_only_unreconciled_closed_sessions(followup_db):
     unreconciled = AttendanceFollowupDaemon.get_unreconciled_closed_sessions(followup_db)
     # Only sess-closed is picked up, sess-open is ignored
