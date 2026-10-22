@@ -122,3 +122,15 @@ def test_render_rejects_nonproduction_mode(monkeypatch: pytest.MonkeyPatch) -> N
 
     with pytest.raises(ValueError, match="set FRS_ENV=production"):
         settings.validate_startup_security()
+
+
+
+def test_standard_database_url_environment_alias_is_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FRS_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgres://frs:password@db.example.com:5432/frs")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.database_url == "postgresql+psycopg://frs:password@db.example.com:5432/frs"
