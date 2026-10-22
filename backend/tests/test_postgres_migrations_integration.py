@@ -105,7 +105,7 @@ def test_restricted_application_role_cannot_mutate_or_drop_audit_trigger(
                         {"audit_id": audit_id},
                     )
 
-            with pytest.raises(DBAPIError, match="must be owner of table audit_events"):
+            with pytest.raises(DBAPIError, match="must be owner of (?:table|relation) audit_events"):
                 with app_engine.begin() as connection:
                     connection.execute(
                         text("DROP TRIGGER trg_audit_events_append_only ON public.audit_events")
